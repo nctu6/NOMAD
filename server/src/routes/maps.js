@@ -70,7 +70,8 @@ router.post('/search', authenticate, async (req, res) => {
       headers: {
         'Content-Type': 'application/json',
         'X-Goog-Api-Key': apiKey,
-        'X-Goog-FieldMask': 'places.id,places.displayName,places.formattedAddress,places.location,places.rating,places.websiteUri,places.nationalPhoneNumber,places.types',
+        // Keep the mask conservative for broad API-key compatibility.
+        'X-Goog-FieldMask': 'places.id,places.displayName,places.formattedAddress,places.location,places.rating',
       },
       body: JSON.stringify({ textQuery: query, languageCode: req.query.lang || 'en' }),
     });
@@ -78,7 +79,22 @@ router.post('/search', authenticate, async (req, res) => {
     const data = await response.json();
 
     if (!response.ok) {
-      return res.status(response.status).json({ error: data.error?.message || 'Google Places API error' });
+      const googleError = data.error?.message || 'Google Places API error';
+      console.error('Google Places search error:', response.status, googleError);
+
+      // Graceful fallback: if Google fails (e.g. key restrictions), still return results.
+      try {
+        const places = await searchNominatim(query, req.query.lang);
+        return res.json({
+          places,
+          source: 'openstreetmap',
+          fallback_reason: 'google_error',
+          google_error: googleError,
+        });
+      } catch (fallbackErr) {
+        console.error('Nominatim fallback after Google error failed:', fallbackErr);
+        return res.status(response.status).json({ error: googleError });
+      }
     }
 
     const places = (data.places || []).map(p => ({
@@ -88,15 +104,21 @@ router.post('/search', authenticate, async (req, res) => {
       lat: p.location?.latitude || null,
       lng: p.location?.longitude || null,
       rating: p.rating || null,
-      website: p.websiteUri || null,
-      phone: p.nationalPhoneNumber || null,
+      website: null,
+      phone: null,
       source: 'google',
     }));
 
     res.json({ places, source: 'google' });
   } catch (err) {
     console.error('Maps search error:', err);
-    res.status(500).json({ error: 'Google Places search error' });
+    try {
+      const places = await searchNominatim(query, req.query.lang);
+      res.json({ places, source: 'openstreetmap', fallback_reason: 'google_request_failed' });
+    } catch (fallbackErr) {
+      console.error('Nominatim fallback after request error failed:', fallbackErr);
+      res.status(500).json({ error: 'Google Places search error' });
+    }
   }
 });
 

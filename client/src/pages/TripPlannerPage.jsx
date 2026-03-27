@@ -103,6 +103,7 @@ export default function TripPlannerPage() {
   const [showPlaceForm, setShowPlaceForm] = useState(false)
   const [editingPlace, setEditingPlace] = useState(null)
   const [editingAssignmentId, setEditingAssignmentId] = useState(null)
+  const [initialPlaceSearch, setInitialPlaceSearch] = useState('')
   const [showTripForm, setShowTripForm] = useState(false)
   const [showMembersModal, setShowMembersModal] = useState(false)
   const [showReservationModal, setShowReservationModal] = useState(false)
@@ -561,9 +562,13 @@ export default function TripPlannerPage() {
                     selectedDayId={selectedDayId}
                     selectedPlaceId={selectedPlaceId}
                     onPlaceClick={handlePlaceClick}
-                    onAddPlace={() => { setEditingPlace(null); setShowPlaceForm(true) }}
+                    onAddPlace={(searchQuery = '') => {
+                      setEditingPlace(null)
+                      setInitialPlaceSearch(searchQuery || '')
+                      setShowPlaceForm(true)
+                    }}
                     onAssignToDay={handleAssignToDay}
-                    onEditPlace={(place) => { setEditingPlace(place); setEditingAssignmentId(null); setShowPlaceForm(true) }}
+                    onEditPlace={(place) => { setEditingPlace(place); setEditingAssignmentId(null); setInitialPlaceSearch(''); setShowPlaceForm(true) }}
                     onDeletePlace={(placeId) => handleDeletePlace(placeId)}
                   />
                 </div>
@@ -663,7 +668,7 @@ export default function TripPlannerPage() {
                   <div style={{ flex: 1, overflow: 'auto' }}>
                     {mobileSidebarOpen === 'left'
                       ? <DayPlanSidebar tripId={tripId} trip={trip} days={days} places={places} categories={categories} assignments={assignments} selectedDayId={selectedDayId} selectedPlaceId={selectedPlaceId} selectedAssignmentId={selectedAssignmentId} onSelectDay={(id) => { handleSelectDay(id); setMobileSidebarOpen(null) }} onPlaceClick={handlePlaceClick} onReorder={handleReorder} onUpdateDayTitle={handleUpdateDayTitle} onAssignToDay={handleAssignToDay} onRouteCalculated={(r) => { if (r) { setRoute(r.coordinates); setRouteInfo({ distance: r.distanceText, duration: r.durationText }) } }} reservations={reservations} onAddReservation={(dayId) => { setEditingReservation(null); tripStore.setSelectedDay(dayId); setShowReservationModal(true); setMobileSidebarOpen(null) }} onDayDetail={(day) => { setShowDayDetail(day); setSelectedPlaceId(null); setSelectedAssignmentId(null); setMobileSidebarOpen(null) }} accommodations={tripAccommodations} />
-                      : <PlacesSidebar places={places} categories={categories} assignments={assignments} selectedDayId={selectedDayId} selectedPlaceId={selectedPlaceId} onPlaceClick={handlePlaceClick} onAddPlace={() => { setEditingPlace(null); setShowPlaceForm(true); setMobileSidebarOpen(null) }} onAssignToDay={handleAssignToDay} days={days} isMobile />
+                      : <PlacesSidebar places={places} categories={categories} assignments={assignments} selectedDayId={selectedDayId} selectedPlaceId={selectedPlaceId} onPlaceClick={handlePlaceClick} onAddPlace={(searchQuery = '') => { setEditingPlace(null); setInitialPlaceSearch(searchQuery || ''); setShowPlaceForm(true); setMobileSidebarOpen(null) }} onAssignToDay={handleAssignToDay} days={days} isMobile />
                     }
                   </div>
                 </div>
@@ -723,7 +728,7 @@ export default function TripPlannerPage() {
         )}
       </div>
 
-      <PlaceFormModal isOpen={showPlaceForm} onClose={() => { setShowPlaceForm(false); setEditingPlace(null); setEditingAssignmentId(null) }} onSave={handleSavePlace} place={editingPlace} assignmentId={editingAssignmentId} dayAssignments={editingAssignmentId ? Object.values(assignments).flat() : []} tripId={tripId} categories={categories} onCategoryCreated={cat => tripStore.addCategory?.(cat)} />
+      <PlaceFormModal isOpen={showPlaceForm} onClose={() => { setShowPlaceForm(false); setEditingPlace(null); setEditingAssignmentId(null); setInitialPlaceSearch('') }} onSave={handleSavePlace} place={editingPlace} assignmentId={editingAssignmentId} dayAssignments={editingAssignmentId ? Object.values(assignments).flat() : []} tripId={tripId} categories={categories} onCategoryCreated={cat => tripStore.addCategory?.(cat)} initialMapsSearch={initialPlaceSearch} />
       <TripFormModal isOpen={showTripForm} onClose={() => setShowTripForm(false)} onSave={async (data) => { await tripStore.updateTrip(tripId, data); toast.success(t('trip.toast.tripUpdated')) }} trip={trip} />
       <TripMembersModal isOpen={showMembersModal} onClose={() => setShowMembersModal(false)} tripId={tripId} tripTitle={trip?.title} />
       <ReservationModal isOpen={showReservationModal} onClose={() => { setShowReservationModal(false); setEditingReservation(null) }} onSave={handleSaveReservation} reservation={editingReservation} days={days} places={places} assignments={assignments} selectedDayId={selectedDayId} files={files} onFileUpload={(fd) => tripStore.addFile(tripId, fd)} onFileDelete={(id) => tripStore.deleteFile(tripId, id)} />

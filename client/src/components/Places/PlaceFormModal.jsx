@@ -135,8 +135,11 @@ export default function PlaceFormModal({
       const data = await mapsApi.search(mapQuery)
       setMapResults(data.places || [])
       setSearchSource(data.source || 'google')
+      if (data.fallback_reason) {
+        toast.warning(data.google_error || t('places.googleFallback'), 10000)
+      }
     } catch (err) {
-      toast.error(err.response?.data?.error || t('places.mapsSearchError'))
+      toast.error(err.response?.data?.error || t('places.mapsSearchError'), 10000)
     } finally {
       setMapSearching(false)
     }

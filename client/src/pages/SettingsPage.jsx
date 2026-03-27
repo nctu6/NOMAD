@@ -12,6 +12,7 @@ import { authApi, adminApi } from '../api/client'
 const MAP_PRESETS = [
   { name: 'OpenStreetMap', url: 'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png' },
   { name: 'OpenStreetMap DE', url: 'https://tile.openstreetmap.de/{z}/{x}/{y}.png' },
+  { name: 'Google Maps', url: 'https://mt1.google.com/vt/lyrs=m&x={x}&y={y}&z={z}' },
   { name: 'CartoDB Light', url: 'https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png' },
   { name: 'CartoDB Dark', url: 'https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png' },
   { name: 'Stadia Smooth', url: 'https://tiles.stadiamaps.com/tiles/alidade_smooth/{z}/{x}/{y}{r}.png' },
@@ -32,7 +33,7 @@ function Section({ title, icon: Icon, children }) {
 }
 
 export default function SettingsPage() {
-  const { user, updateProfile, uploadAvatar, deleteAvatar, logout } = useAuthStore()
+  const { user, updateProfile, updateMapsKey, uploadAvatar, deleteAvatar, logout } = useAuthStore()
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false)
   const avatarInputRef = React.useRef(null)
   const { settings, updateSetting, updateSettings } = useSettingsStore()
@@ -47,6 +48,7 @@ export default function SettingsPage() {
   const [defaultLat, setDefaultLat] = useState(settings.default_lat || 48.8566)
   const [defaultLng, setDefaultLng] = useState(settings.default_lng || 2.3522)
   const [defaultZoom, setDefaultZoom] = useState(settings.default_zoom || 10)
+  const [mapsApiKey, setMapsApiKey] = useState(user?.maps_api_key || '')
 
   // Display
   const [tempUnit, setTempUnit] = useState(settings.temperature_unit || 'celsius')
@@ -70,6 +72,10 @@ export default function SettingsPage() {
     setEmail(user?.email || '')
   }, [user])
 
+  useEffect(() => {
+    setMapsApiKey(user?.maps_api_key || '')
+  }, [user])
+
   const saveMapSettings = async () => {
     setSaving(s => ({ ...s, map: true }))
     try {
@@ -79,6 +85,9 @@ export default function SettingsPage() {
         default_lng: parseFloat(defaultLng),
         default_zoom: parseInt(defaultZoom),
       })
+      if (mapsApiKey !== (user?.maps_api_key || '')) {
+        await updateMapsKey(mapsApiKey)
+      }
       toast.success(t('settings.toast.mapSaved'))
     } catch (err) {
       toast.error(err.message)
@@ -166,6 +175,18 @@ export default function SettingsPage() {
                 className="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm focus:ring-2 focus:ring-slate-400 focus:border-transparent"
               />
               <p className="text-xs text-slate-400 mt-1">{t('settings.mapDefaultHint')}</p>
+            </div>
+
+            <div>
+              <label className="block text-sm font-medium text-slate-700 mb-1.5">{t('settings.mapsKey')}</label>
+              <input
+                type="password"
+                value={mapsApiKey}
+                onChange={e => setMapsApiKey(e.target.value)}
+                placeholder={t('settings.keyPlaceholder')}
+                className="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm focus:ring-2 focus:ring-slate-400 focus:border-transparent"
+              />
+              <p className="text-xs text-slate-400 mt-1">{t('settings.mapsKeyHint')}</p>
             </div>
 
             <div className="grid grid-cols-2 gap-3">

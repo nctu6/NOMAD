@@ -24,7 +24,7 @@ const DEFAULT_FORM = {
 
 export default function PlaceFormModal({
   isOpen, onClose, onSave, place, tripId, categories,
-  onCategoryCreated, assignmentId, dayAssignments = [],
+  onCategoryCreated, assignmentId, dayAssignments = [], initialMapsSearch = '',
 }) {
   const [form, setForm] = useState(DEFAULT_FORM)
   const [mapsSearch, setMapsSearch] = useState('')
@@ -64,14 +64,18 @@ export default function PlaceFormModal({
     setForm(prev => ({ ...prev, [field]: value }))
   }
 
-  const handleMapsSearch = async () => {
-    if (!mapsSearch.trim()) return
+  const handleMapsSearch = async (queryOverride) => {
+    const query = (queryOverride ?? mapsSearch).trim()
+    if (!query) return
     setIsSearchingMaps(true)
     try {
-      const result = await mapsApi.search(mapsSearch, language)
+      const result = await mapsApi.search(query, language)
       setMapsResults(result.places || [])
+      if (result.fallback_reason) {
+        toast.warning(result.google_error || t('places.googleFallback'), 10000)
+      }
     } catch (err) {
-      toast.error(t('places.mapsSearchError'))
+      toast.error(err.response?.data?.error || t('places.mapsSearchError'), 10000)
     } finally {
       setIsSearchingMaps(false)
     }
@@ -89,6 +93,14 @@ export default function PlaceFormModal({
     setMapsResults([])
     setMapsSearch('')
   }
+
+  useEffect(() => {
+    if (!isOpen || place) return
+    const q = (initialMapsSearch || '').trim()
+    if (!q) return
+    setMapsSearch(q)
+    handleMapsSearch(q)
+  }, [isOpen, place, initialMapsSearch, language])
 
   const handleCreateCategory = async () => {
     if (!newCategoryName.trim()) return

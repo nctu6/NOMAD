@@ -34,6 +34,12 @@ export default function PlacesSidebar({
   const isAssignedToSelectedDay = (placeId) =>
     selectedDayId && (assignments[String(selectedDayId)] || []).some(a => a.place?.id === placeId)
 
+  const handleSearchInMap = () => {
+    const q = search.trim()
+    if (!q) return
+    onAddPlace?.(q)
+  }
+
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%', fontFamily: "-apple-system, BlinkMacSystemFont, 'SF Pro Text', system-ui, sans-serif" }}>
       {/* Kopfbereich */}
@@ -69,6 +75,12 @@ export default function PlacesSidebar({
             type="text"
             value={search}
             onChange={e => setSearch(e.target.value)}
+            onKeyDown={e => {
+              if (e.key === 'Enter' && search.trim() && filtered.length === 0) {
+                e.preventDefault()
+                handleSearchInMap()
+              }
+            }}
             placeholder={t('places.search')}
             style={{
               width: '100%', padding: '7px 30px 7px 30px', borderRadius: 10,
@@ -115,6 +127,14 @@ export default function PlacesSidebar({
             <button onClick={onAddPlace} style={{ fontSize: 12, color: 'var(--text-primary)', background: 'none', border: 'none', cursor: 'pointer', textDecoration: 'underline', fontFamily: 'inherit' }}>
               {t('places.addPlace')}
             </button>
+            {search.trim() && filter !== 'unplanned' && (
+              <button
+                onClick={handleSearchInMap}
+                style={{ fontSize: 12, color: 'var(--text-primary)', background: 'none', border: 'none', cursor: 'pointer', textDecoration: 'underline', fontFamily: 'inherit' }}
+              >
+                {t('places.searchInMap', { query: search.trim() })}
+              </button>
+            )}
           </div>
         ) : (
           filtered.map(place => {

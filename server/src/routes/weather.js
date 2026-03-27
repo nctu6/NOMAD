@@ -1,8 +1,54 @@
 const express = require('express');
 const fetch = require('node-fetch');
 const { authenticate } = require('../middleware/auth');
+const { db } = require('../db/database');
 
 const router = express.Router();
+
+const WEATHER_HTTP_TIMEOUT_MS = 10000;
+const WEATHER_HTTP_RETRIES = 2;
+const STALE_WEATHER_MAX_AGE_MS = 24 * 60 * 60 * 1000;
+const GOOGLE_WEATHER_DISABLE_MS = 30 * 60 * 1000;
+const RETRYABLE_NETWORK_CODES = new Set([
+  'ETIMEDOUT',
+  'ESOCKETTIMEDOUT',
+  'ECONNRESET',
+  'EAI_AGAIN',
+  'ENOTFOUND',
+]);
+let googleWeatherDisabledUntil = 0;
+
+function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+function isRetryableFetchError(err) {
+  if (!err) return false;
+  if (err.type === 'request-timeout') return true;
+  if (RETRYABLE_NETWORK_CODES.has(err.code)) return true;
+  return false;
+}
+
+async function fetchJsonWithRetry(url, options = {}) {
+  const retries = Number.isInteger(options.retries) ? options.retries : WEATHER_HTTP_RETRIES;
+  const timeout = Number.isInteger(options.timeoutMs) ? options.timeoutMs : WEATHER_HTTP_TIMEOUT_MS;
+  let lastErr = null;
+
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    try {
+      const response = await fetch(url, { timeout });
+      const data = await response.json();
+      return { response, data };
+    } catch (err) {
+      lastErr = err;
+      if (!isRetryableFetchError(err) || attempt >= retries) throw err;
+      // short backoff to absorb transient upstream/network hiccups
+      await sleep(300 * (attempt + 1));
+    }
+  }
+
+  throw lastErr || new Error('Unknown weather fetch error');
+}
 
 // --------------- In-memory weather cache ---------------
 const weatherCache = new Map();
@@ -21,6 +67,16 @@ function getCached(key) {
   const entry = weatherCache.get(key);
   if (!entry) return null;
   if (Date.now() > entry.expiresAt) {
+    if (Date.now() > entry.expiresAt + STALE_WEATHER_MAX_AGE_MS) weatherCache.delete(key);
+    return null;
+  }
+  return entry.data;
+}
+
+function getStaleCached(key, maxAgeMs = STALE_WEATHER_MAX_AGE_MS) {
+  const entry = weatherCache.get(key);
+  if (!entry) return null;
+  if (Date.now() > entry.expiresAt + maxAgeMs) {
     weatherCache.delete(key);
     return null;
   }
@@ -29,6 +85,167 @@ function getCached(key) {
 
 function setCache(key, data, ttlMs) {
   weatherCache.set(key, { data, expiresAt: Date.now() + ttlMs });
+}
+
+function shouldUseGoogleWeather() {
+  return Date.now() >= googleWeatherDisabledUntil;
+}
+
+function isGoogleWeatherDisabledError(err) {
+  const msg = String(err?.message || '').toLowerCase();
+  return msg.includes('weather api has not been used') || msg.includes('it is disabled') || msg.includes('api weather.googleapis.com');
+}
+
+function noteGoogleWeatherDisabled(err) {
+  googleWeatherDisabledUntil = Date.now() + GOOGLE_WEATHER_DISABLE_MS;
+  console.error('Google Weather temporarily disabled; skipping calls for 30m:', err?.message || err);
+}
+
+function getMapsKey(userId) {
+  const user = db.prepare('SELECT maps_api_key FROM users WHERE id = ?').get(userId);
+  if (user?.maps_api_key) return user.maps_api_key;
+  const admin = db.prepare("SELECT maps_api_key FROM users WHERE role = 'admin' AND maps_api_key IS NOT NULL AND maps_api_key != '' LIMIT 1").get();
+  return admin?.maps_api_key || null;
+}
+
+function pad2(n) {
+  return String(n).padStart(2, '0');
+}
+
+function parseDateKeyFromGoogleDate(displayDate) {
+  if (!displayDate) return null;
+  const y = Number(displayDate.year);
+  const m = Number(displayDate.month);
+  const d = Number(displayDate.day);
+  if (!y || !m || !d) return null;
+  return `${y}-${pad2(m)}-${pad2(d)}`;
+}
+
+function parseDateKeyFromForecastHour(h) {
+  const fromDisplay = parseDateKeyFromGoogleDate(h?.displayDateTime);
+  if (fromDisplay) return fromDisplay;
+  const ts = h?.interval?.startTime;
+  if (typeof ts === 'string' && ts.length >= 10) return ts.slice(0, 10);
+  return null;
+}
+
+function parseHourFromForecastHour(h) {
+  const raw = h?.displayDateTime?.hours;
+  const hour = Number(raw);
+  if (Number.isFinite(hour)) return hour;
+  const ts = h?.interval?.startTime;
+  if (typeof ts === 'string') {
+    const m = ts.match(/T(\d{2}):/);
+    if (m) return Number(m[1]);
+  }
+  return 0;
+}
+
+function parseTimeHM(ts) {
+  if (!ts || typeof ts !== 'string') return null;
+  const m = ts.match(/T(\d{2}):(\d{2})/);
+  if (!m) return null;
+  return `${m[1]}:${m[2]}`;
+}
+
+function tempDeg(t) {
+  return typeof t?.degrees === 'number' ? t.degrees : null;
+}
+
+function qpfMm(p) {
+  return typeof p?.qpf?.quantity === 'number' ? p.qpf.quantity : 0;
+}
+
+function pProb(p) {
+  return typeof p?.probability?.percent === 'number' ? p.probability.percent : null;
+}
+
+function windVal(w) {
+  const speed = typeof w?.speed?.value === 'number' ? w.speed.value : null;
+  const gust = typeof w?.gust?.value === 'number' ? w.gust.value : null;
+  if (speed == null && gust == null) return null;
+  if (speed == null) return gust;
+  if (gust == null) return speed;
+  return Math.max(speed, gust);
+}
+
+function googleTypeToMain(type) {
+  const t = String(type || '').toUpperCase();
+  if (t.includes('THUNDER')) return 'Thunderstorm';
+  if (t.includes('SNOW') || t.includes('SLEET')) return 'Snow';
+  if (t.includes('RAIN') || t.includes('SHOWERS') || t === 'HAIL' || t === 'HAIL_SHOWERS') return 'Rain';
+  if (t.includes('CLOUD')) return 'Clouds';
+  if (t.includes('WIND')) return 'Clouds';
+  if (t === 'CLEAR' || t === 'MOSTLY_CLEAR') return 'Clear';
+  return 'Clouds';
+}
+
+function googleDescription(cond) {
+  return cond?.description?.text || '';
+}
+
+async function fetchGoogleCurrent(lat, lng, lang, apiKey) {
+  const params = new URLSearchParams({
+    key: apiKey,
+    'location.latitude': String(lat),
+    'location.longitude': String(lng),
+    unitsSystem: 'METRIC',
+    languageCode: lang || 'en',
+  });
+  const url = `https://weather.googleapis.com/v1/currentConditions:lookup?${params}`;
+  const { response, data } = await fetchJsonWithRetry(url);
+  if (!response.ok || data.error) throw new Error(data.error?.message || data.reason || 'Google Weather API error');
+  const currentTemp = tempDeg(data.temperature);
+  if (currentTemp == null) throw new Error('Google Weather API returned no temperature');
+
+  return {
+    temp: Math.round(currentTemp),
+    main: googleTypeToMain(data.weatherCondition?.type),
+    description: googleDescription(data.weatherCondition),
+    type: 'current',
+  };
+}
+
+async function fetchGoogleForecastDay(lat, lng, targetDateStr, lang, apiKey) {
+  const params = new URLSearchParams({
+    key: apiKey,
+    'location.latitude': String(lat),
+    'location.longitude': String(lng),
+    unitsSystem: 'METRIC',
+    languageCode: lang || 'en',
+    days: '10',
+    pageSize: '10',
+  });
+  const url = `https://weather.googleapis.com/v1/forecast/days:lookup?${params}`;
+  const { response, data } = await fetchJsonWithRetry(url);
+  if (!response.ok || data.error) throw new Error(data.error?.message || data.reason || 'Google Weather API error');
+  const days = data.forecastDays || [];
+  return days.find(d => parseDateKeyFromGoogleDate(d.displayDate) === targetDateStr) || null;
+}
+
+async function fetchGoogleForecastHours(lat, lng, lang, apiKey, maxPages = 12) {
+  const base = {
+    key: apiKey,
+    'location.latitude': String(lat),
+    'location.longitude': String(lng),
+    unitsSystem: 'METRIC',
+    languageCode: lang || 'en',
+    hours: '240',
+    pageSize: '24',
+  };
+  const hours = [];
+  let pageToken = null;
+  for (let i = 0; i < maxPages; i++) {
+    const params = new URLSearchParams(base);
+    if (pageToken) params.set('pageToken', pageToken);
+    const url = `https://weather.googleapis.com/v1/forecast/hours:lookup?${params}`;
+    const { response, data } = await fetchJsonWithRetry(url);
+    if (!response.ok || data.error) throw new Error(data.error?.message || data.reason || 'Google Weather API error');
+    hours.push(...(data.forecastHours || []));
+    pageToken = data.nextPageToken;
+    if (!pageToken) break;
+  }
+  return hours;
 }
 
 // WMO weather code mapping → condition string used by client icon map
@@ -143,6 +360,7 @@ router.get('/', authenticate, async (req, res) => {
   }
 
   const ck = cacheKey(lat, lng, date);
+  const mapsApiKey = getMapsKey(req.user.id);
 
   try {
     // ── Forecast for a specific date ──
@@ -156,9 +374,34 @@ router.get('/', authenticate, async (req, res) => {
 
       // Within 16-day forecast window → real forecast
       if (diffDays >= -1 && diffDays <= 16) {
+        // Prefer Google Weather API when a Google key is available.
+        if (mapsApiKey && shouldUseGoogleWeather() && diffDays <= 10) {
+          try {
+            const gDay = await fetchGoogleForecastDay(lat, lng, targetDate.toISOString().slice(0, 10), lang, mapsApiKey);
+            if (gDay) {
+              const tMax = tempDeg(gDay.maxTemperature);
+              const tMin = tempDeg(gDay.minTemperature);
+              if (tMax == null || tMin == null) throw new Error('Google Weather API returned incomplete daily temperatures');
+              const dayPart = gDay.daytimeForecast || gDay.nighttimeForecast || {};
+              const result = {
+                temp: Math.round((tMax + tMin) / 2),
+                temp_max: Math.round(tMax),
+                temp_min: Math.round(tMin),
+                main: googleTypeToMain(dayPart.weatherCondition?.type),
+                description: googleDescription(dayPart.weatherCondition),
+                type: 'forecast',
+              };
+              setCache(ck, result, TTL_FORECAST_MS);
+              return res.json(result);
+            }
+          } catch (gErr) {
+            if (isGoogleWeatherDisabledError(gErr)) noteGoogleWeatherDisabled(gErr);
+            else console.error('Google Weather daily lookup failed, falling back to Open-Meteo:', gErr.message || gErr);
+          }
+        }
+
         const url = `https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lng}&daily=temperature_2m_max,temperature_2m_min,weathercode&timezone=auto&forecast_days=16`;
-        const response = await fetch(url);
-        const data = await response.json();
+        const { response, data } = await fetchJsonWithRetry(url);
 
         if (!response.ok || data.error) {
           return res.status(response.status || 500).json({ error: data.reason || 'Open-Meteo API error' });
@@ -198,8 +441,7 @@ router.get('/', authenticate, async (req, res) => {
         const endStr = endDate.toISOString().slice(0, 10);
 
         const url = `https://archive-api.open-meteo.com/v1/archive?latitude=${lat}&longitude=${lng}&start_date=${startStr}&end_date=${endStr}&daily=temperature_2m_max,temperature_2m_min,precipitation_sum&timezone=auto`;
-        const response = await fetch(url);
-        const data = await response.json();
+        const { response, data } = await fetchJsonWithRetry(url);
 
         if (!response.ok || data.error) {
           return res.status(response.status || 500).json({ error: data.reason || 'Open-Meteo Climate API error' });
@@ -252,9 +494,20 @@ router.get('/', authenticate, async (req, res) => {
     const cached = getCached(ck);
     if (cached) return res.json(cached);
 
+    // Prefer Google Weather API when a Google key is available.
+    if (mapsApiKey && shouldUseGoogleWeather()) {
+      try {
+        const result = await fetchGoogleCurrent(lat, lng, lang, mapsApiKey);
+        setCache(ck, result, TTL_CURRENT_MS);
+        return res.json(result);
+      } catch (gErr) {
+        if (isGoogleWeatherDisabledError(gErr)) noteGoogleWeatherDisabled(gErr);
+        else console.error('Google Weather current lookup failed, falling back to Open-Meteo:', gErr.message || gErr);
+      }
+    }
+
     const url = `https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lng}&current=temperature_2m,weathercode&timezone=auto`;
-    const response = await fetch(url);
-    const data = await response.json();
+    const { response, data } = await fetchJsonWithRetry(url);
 
     if (!response.ok || data.error) {
       return res.status(response.status || 500).json({ error: data.reason || 'Open-Meteo API error' });
@@ -273,7 +526,11 @@ router.get('/', authenticate, async (req, res) => {
     setCache(ck, result, TTL_CURRENT_MS);
     res.json(result);
   } catch (err) {
-    console.error('Weather error:', err);
+    const stale = getStaleCached(ck);
+    if (stale) {
+      return res.json({ ...stale, stale: true });
+    }
+    console.error('Weather error:', err?.code || err?.type || err?.message || err);
     res.status(500).json({ error: 'Error fetching weather data' });
   }
 });
@@ -287,6 +544,7 @@ router.get('/detailed', authenticate, async (req, res) => {
   }
 
   const ck = `detailed_${cacheKey(lat, lng, date)}`;
+  const mapsApiKey = getMapsKey(req.user.id);
 
   try {
     const cached = getCached(ck);
@@ -298,6 +556,63 @@ router.get('/detailed', authenticate, async (req, res) => {
     const dateStr = targetDate.toISOString().slice(0, 10);
     const descriptions = lang === 'de' ? WMO_DESCRIPTION_DE : WMO_DESCRIPTION_EN;
 
+    // Prefer Google Weather API for detailed forecast in its forecast window.
+    if (mapsApiKey && shouldUseGoogleWeather() && diffDays >= -1 && diffDays <= 10) {
+      try {
+        const gDay = await fetchGoogleForecastDay(lat, lng, dateStr, lang, mapsApiKey);
+        if (gDay) {
+          const tMax = tempDeg(gDay.maxTemperature);
+          const tMin = tempDeg(gDay.minTemperature);
+          if (tMax == null || tMin == null) throw new Error('Google Weather API returned incomplete daily temperatures');
+          const dayPart = gDay.daytimeForecast || {};
+          const nightPart = gDay.nighttimeForecast || {};
+          const dayProb = pProb(dayPart.precipitation);
+          const nightProb = pProb(nightPart.precipitation);
+          const precipitationProbabilityMax = Math.max(dayProb ?? 0, nightProb ?? 0);
+          const precipitationSum = qpfMm(dayPart.precipitation) + qpfMm(nightPart.precipitation);
+          const windMax = Math.max(windVal(dayPart.wind) ?? 0, windVal(nightPart.wind) ?? 0);
+
+          const gHours = await fetchGoogleForecastHours(lat, lng, lang, mapsApiKey);
+          const hourlyData = gHours
+            .filter(h => parseDateKeyFromForecastHour(h) === dateStr)
+            .map(h => ({
+              hour: parseHourFromForecastHour(h),
+              temp: Math.round(tempDeg(h.temperature) ?? 0),
+              precipitation_probability: pProb(h.precipitation) ?? 0,
+              precipitation: qpfMm(h.precipitation),
+              main: googleTypeToMain(h.weatherCondition?.type),
+              wind: Math.round(windVal(h.wind) ?? 0),
+              humidity: Math.round(
+                typeof h.relativeHumidity === 'number'
+                  ? h.relativeHumidity
+                  : (typeof h.relativeHumidity?.percent === 'number' ? h.relativeHumidity.percent : 0)
+              ),
+            }));
+
+          const result = {
+            type: 'forecast',
+            temp: Math.round((tMax + tMin) / 2),
+            temp_max: Math.round(tMax),
+            temp_min: Math.round(tMin),
+            main: googleTypeToMain((dayPart.weatherCondition || nightPart.weatherCondition)?.type),
+            description: googleDescription(dayPart.weatherCondition || nightPart.weatherCondition),
+            sunrise: parseTimeHM(gDay.sunEvents?.sunriseTime),
+            sunset: parseTimeHM(gDay.sunEvents?.sunsetTime),
+            precipitation_sum: Math.round(precipitationSum * 10) / 10,
+            precipitation_probability_max: precipitationProbabilityMax,
+            wind_max: Math.round(windMax),
+            hourly: hourlyData,
+          };
+
+          setCache(ck, result, TTL_FORECAST_MS);
+          return res.json(result);
+        }
+      } catch (gErr) {
+        if (isGoogleWeatherDisabledError(gErr)) noteGoogleWeatherDisabled(gErr);
+        else console.error('Google Weather detailed lookup failed, falling back to Open-Meteo:', gErr.message || gErr);
+      }
+    }
+
     // Beyond 16-day forecast window → archive API with hourly data from same date last year
     if (diffDays > 16) {
       const refYear = targetDate.getFullYear() - 1;
@@ -308,8 +623,7 @@ router.get('/detailed', authenticate, async (req, res) => {
         + `&hourly=temperature_2m,precipitation,weathercode,windspeed_10m,relativehumidity_2m`
         + `&daily=temperature_2m_max,temperature_2m_min,weathercode,precipitation_sum,windspeed_10m_max,sunrise,sunset`
         + `&timezone=auto`;
-      const response = await fetch(url);
-      const data = await response.json();
+      const { response, data } = await fetchJsonWithRetry(url);
 
       if (!response.ok || data.error) {
         return res.status(response.status || 500).json({ error: data.reason || 'Open-Meteo Climate API error' });
@@ -373,8 +687,7 @@ router.get('/detailed', authenticate, async (req, res) => {
       + `&daily=temperature_2m_max,temperature_2m_min,weathercode,sunrise,sunset,precipitation_probability_max,precipitation_sum,windspeed_10m_max`
       + `&timezone=auto&start_date=${dateStr}&end_date=${dateStr}`;
 
-    const response = await fetch(url);
-    const data = await response.json();
+    const { response, data } = await fetchJsonWithRetry(url);
 
     if (!response.ok || data.error) {
       return res.status(response.status || 500).json({ error: data.reason || 'Open-Meteo API error' });
@@ -432,7 +745,11 @@ router.get('/detailed', authenticate, async (req, res) => {
     setCache(ck, result, TTL_FORECAST_MS);
     return res.json(result);
   } catch (err) {
-    console.error('Detailed weather error:', err);
+    const stale = getStaleCached(ck);
+    if (stale) {
+      return res.json({ ...stale, stale: true });
+    }
+    console.error('Detailed weather error:', err?.code || err?.type || err?.message || err);
     res.status(500).json({ error: 'Error fetching detailed weather data' });
   }
 });
