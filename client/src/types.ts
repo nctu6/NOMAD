@@ -1,0 +1,332 @@
+// Shared types for the NOMAD travel planner
+
+export interface User {
+  id: number
+  username: string
+  email: string
+  role: 'admin' | 'user'
+  avatar_url: string | null
+  maps_api_key: string | null
+  created_at: string
+}
+
+export interface Trip {
+  id: number
+  name: string
+  description: string | null
+  start_date: string
+  end_date: string
+  cover_url: string | null
+  is_archived: boolean
+  owner_id: number
+  created_at: string
+  updated_at: string
+}
+
+export interface Day {
+  id: number
+  trip_id: number
+  date: string
+  title: string | null
+  notes: string | null
+  assignments: Assignment[]
+  notes_items: DayNote[]
+}
+
+export interface Place {
+  id: number
+  trip_id: number
+  name: string
+  description: string | null
+  lat: number | null
+  lng: number | null
+  address: string | null
+  category_id: number | null
+  icon: string | null
+  price: string | null
+  image_url: string | null
+  google_place_id: string | null
+  place_time: string | null
+  end_time: string | null
+  created_at: string
+}
+
+export interface Assignment {
+  id: number
+  day_id: number
+  place_id?: number
+  order_index: number
+  notes: string | null
+  place: Place
+}
+
+export interface DayNote {
+  id: number
+  day_id: number
+  text: string
+  time: string | null
+  icon: string | null
+  sort_order?: number
+  created_at: string
+}
+
+export interface PackingItem {
+  id: number
+  trip_id: number
+  name: string
+  category: string | null
+  checked: number
+  quantity: number
+}
+
+export interface Tag {
+  id: number
+  name: string
+  color: string | null
+  user_id: number
+}
+
+export interface Category {
+  id: number
+  name: string
+  icon: string | null
+  user_id: number
+}
+
+export interface BudgetItem {
+  id: number
+  trip_id: number
+  name: string
+  amount: number
+  currency: string
+  category: string | null
+  paid_by: number | null
+  persons: number
+  members: BudgetMember[]
+}
+
+export interface BudgetMember {
+  user_id: number
+  paid: boolean
+}
+
+export interface Reservation {
+  id: number
+  trip_id: number
+  name: string
+  type: string | null
+  status: 'pending' | 'confirmed'
+  date: string | null
+  time: string | null
+  confirmation_number: string | null
+  notes: string | null
+  url: string | null
+  created_at: string
+}
+
+export interface TripFile {
+  id: number
+  trip_id: number
+  filename: string
+  original_name: string
+  mime_type: string
+  size: number
+  created_at: string
+}
+
+export interface Settings {
+  map_tile_url: string
+  default_lat: number
+  default_lng: number
+  default_zoom: number
+  dark_mode: boolean | string
+  default_currency: string
+  language: string
+  temperature_unit: string
+  time_format: string
+  show_place_description: boolean
+  route_calculation?: boolean
+}
+
+export interface AssignmentsMap {
+  [dayId: string]: Assignment[]
+}
+
+export interface DayNotesMap {
+  [dayId: string]: DayNote[]
+}
+
+export interface RouteSegment {
+  mid: [number, number]
+  from: [number, number]
+  to: [number, number]
+  walkingText: string
+  drivingText: string
+}
+
+export interface RouteResult {
+  coordinates: [number, number][]
+  distance: number
+  duration: number
+  distanceText: string
+  durationText: string
+  walkingText: string
+  drivingText: string
+}
+
+export interface Waypoint {
+  lat: number
+  lng: number
+}
+
+// User with optional OIDC fields
+export interface UserWithOidc extends User {
+  oidc_issuer?: string | null
+}
+
+// Accommodation type
+export interface Accommodation {
+  id: number
+  trip_id: number
+  name: string
+  address: string | null
+  check_in: string | null
+  check_out: string | null
+  confirmation_number: string | null
+  notes: string | null
+  url: string | null
+  created_at: string
+}
+
+// Trip member (owner or collaborator)
+export interface TripMember {
+  id: number
+  username: string
+  email?: string
+  avatar_url?: string | null
+  role?: string
+}
+
+// Photo type
+export interface Photo {
+  id: number
+  trip_id: number
+  filename: string
+  original_name: string
+  mime_type: string
+  size: number
+  caption: string | null
+  place_id: number | null
+  day_id: number | null
+  created_at: string
+}
+
+// Atlas place detail
+export interface AtlasPlace {
+  id: number
+  name: string
+  lat: number | null
+  lng: number | null
+}
+
+// GeoJSON types (simplified for atlas map)
+export interface GeoJsonFeature {
+  type: 'Feature'
+  properties: Record<string, string | number | null | undefined>
+  geometry: {
+    type: string
+    coordinates: unknown
+  }
+  id?: string
+}
+
+export interface GeoJsonFeatureCollection {
+  type: 'FeatureCollection'
+  features: GeoJsonFeature[]
+}
+
+// App config from /auth/app-config
+export interface AppConfig {
+  has_users: boolean
+  allow_registration: boolean
+  demo_mode: boolean
+  oidc_configured: boolean
+  oidc_display_name?: string
+  has_maps_key?: boolean
+  allowed_file_types?: string
+}
+
+// Translation function type
+export type TranslationFn = (key: string, params?: Record<string, string | number | null>) => string
+
+// WebSocket event type
+export interface WebSocketEvent {
+  type: string
+  [key: string]: unknown
+}
+
+// Vacay types
+export interface VacayPlan {
+  id: number
+  holidays_enabled: boolean
+  holidays_region: string | null
+  name?: string
+  year?: number
+  owner_id?: number
+  created_at?: string
+  updated_at?: string
+}
+
+export interface VacayUser {
+  id: number
+  username: string
+  color: string | null
+}
+
+export interface VacayEntry {
+  date: string
+  user_id: number
+}
+
+export interface VacayStat {
+  user_id: number
+  vacation_days: number
+  used: number
+}
+
+export interface HolidayInfo {
+  name: string
+  localName: string
+}
+
+export interface HolidaysMap {
+  [date: string]: HolidayInfo
+}
+
+// API error shape from axios
+export interface ApiError {
+  response?: {
+    data?: {
+      error?: string
+    }
+    status?: number
+  }
+  message: string
+}
+
+/** Safely extract an error message from an unknown catch value */
+export function getApiErrorMessage(err: unknown, fallback: string): string {
+  if (typeof err === 'object' && err !== null && 'response' in err) {
+    const apiErr = err as ApiError
+    if (apiErr.response?.data?.error) return apiErr.response.data.error
+  }
+  if (err instanceof Error) return err.message
+  return fallback
+}
+
+// MergedItem used in day notes hook
+export interface MergedItem {
+  type: 'assignment' | 'note'
+  sortKey: number
+  data: Assignment | DayNote
+}

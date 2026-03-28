@@ -26,8 +26,9 @@ COPY --from=client-builder /app/client/dist ./public
 # Fonts für PDF-Export kopieren
 COPY --from=client-builder /app/client/public/fonts ./public/fonts
 
-# Verzeichnisse erstellen
-RUN mkdir -p /app/data /app/uploads/files /app/uploads/covers
+# Verzeichnisse erstellen + Symlink für Abwärtskompatibilität (alte docker-compose mounten nach /app/server/uploads)
+RUN mkdir -p /app/data /app/uploads/files /app/uploads/covers /app/uploads/avatars /app/uploads/photos && \
+    mkdir -p /app/server && ln -s /app/uploads /app/server/uploads && ln -s /app/data /app/server/data
 
 # Umgebung setzen
 ENV NODE_ENV=production
@@ -35,4 +36,4 @@ ENV PORT=3000
 
 EXPOSE 3000
 
-CMD ["node", "src/index.js"]
+CMD ["node", "--import", "tsx", "src/index.ts"]
