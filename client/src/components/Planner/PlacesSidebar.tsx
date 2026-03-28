@@ -1,5 +1,5 @@
 import ReactDOM from 'react-dom'
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import DOM from 'react-dom'
 import { Search, Plus, X, CalendarDays, Pencil, Trash2, ExternalLink, Navigation } from 'lucide-react'
 import PlaceAvatar from '../shared/PlaceAvatar'
@@ -16,17 +16,18 @@ interface PlacesSidebarProps {
   selectedDayId: number | null
   selectedPlaceId: number | null
   onPlaceClick: (placeId: number | null) => void
-  onAddPlace: () => void
+  onAddPlace: (searchQuery?: string) => void
   onAssignToDay: (placeId: number, dayId: number) => void
   onEditPlace: (place: Place) => void
   onDeletePlace: (placeId: number) => void
   days: Day[]
   isMobile: boolean
+  resetSearchKey?: number
 }
 
 export default function PlacesSidebar({
   places, categories, assignments, selectedDayId, selectedPlaceId,
-  onPlaceClick, onAddPlace, onAssignToDay, onEditPlace, onDeletePlace, days, isMobile,
+  onPlaceClick, onAddPlace, onAssignToDay, onEditPlace, onDeletePlace, days, isMobile, resetSearchKey = 0,
 }: PlacesSidebarProps) {
   const { t } = useTranslation()
   const ctxMenu = useContextMenu()
@@ -34,6 +35,10 @@ export default function PlacesSidebar({
   const [filter, setFilter] = useState('all')
   const [categoryFilter, setCategoryFilter] = useState('')
   const [dayPickerPlace, setDayPickerPlace] = useState(null)
+
+  useEffect(() => {
+    setSearch('')
+  }, [resetSearchKey])
 
   // Alle geplanten Ort-IDs abrufen (einem Tag zugewiesen)
   const plannedIds = new Set(
@@ -62,7 +67,7 @@ export default function PlacesSidebar({
       {/* Kopfbereich */}
       <div style={{ padding: '14px 16px 10px', borderBottom: '1px solid var(--border-faint)', flexShrink: 0 }}>
         <button
-          onClick={onAddPlace}
+          onClick={() => onAddPlace()}
           style={{
             display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6,
             width: '100%', padding: '8px 12px', borderRadius: 12, border: 'none',
@@ -141,7 +146,7 @@ export default function PlacesSidebar({
             <span style={{ fontSize: 13, color: 'var(--text-faint)' }}>
               {filter === 'unplanned' ? t('places.allPlanned') : t('places.noneFound')}
             </span>
-            <button onClick={onAddPlace} style={{ fontSize: 12, color: 'var(--text-primary)', background: 'none', border: 'none', cursor: 'pointer', textDecoration: 'underline', fontFamily: 'inherit' }}>
+            <button onClick={() => onAddPlace()} style={{ fontSize: 12, color: 'var(--text-primary)', background: 'none', border: 'none', cursor: 'pointer', textDecoration: 'underline', fontFamily: 'inherit' }}>
               {t('places.addPlace')}
             </button>
             {search.trim() && filter !== 'unplanned' && (

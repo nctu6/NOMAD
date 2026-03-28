@@ -50,6 +50,7 @@ const TYPE_ICONS = {
   flight: '✈️', hotel: '🏨', restaurant: '🍽️', train: '🚆',
   car: '🚗', cruise: '🚢', event: '🎫', other: '📋',
 }
+const DAY_ROUTE_COLORS = ['#1d4ed8', '#b91c1c', '#166534', '#92400e', '#6d28d9', '#0f766e', '#be185d', '#365314']
 
 interface DayPlanSidebarProps {
   tripId: number
@@ -61,7 +62,10 @@ interface DayPlanSidebarProps {
   selectedDayId: number | null
   selectedPlaceId: number | null
   selectedAssignmentId: number | null
+  selectedMapDayIds?: number[]
   onSelectDay: (dayId: number | null) => void
+  onToggleMapDay?: (dayId: number) => void
+  onClearSelections?: () => void
   onPlaceClick: (placeId: number) => void
   onDayDetail: (day: Day) => void
   accommodations?: Assignment[]
@@ -79,8 +83,8 @@ interface DayPlanSidebarProps {
 export default function DayPlanSidebar({
   tripId,
   trip, days, places, categories, assignments,
-  selectedDayId, selectedPlaceId, selectedAssignmentId,
-  onSelectDay, onPlaceClick, onDayDetail, accommodations = [],
+  selectedDayId, selectedPlaceId, selectedAssignmentId, selectedMapDayIds = [],
+  onSelectDay, onToggleMapDay, onClearSelections, onPlaceClick, onDayDetail, accommodations = [],
   onReorder, onUpdateDayTitle, onRouteCalculated,
   onAssignToDay, onRemoveAssignment, onEditPlace, onDeletePlace,
   reservations = [],
@@ -390,29 +394,43 @@ export default function DayPlanSidebar({
               </div>
             )}
           </div>
-          <button
-            onClick={async () => {
-              const flatNotes = Object.entries(dayNotes).flatMap(([dayId, notes]) =>
-                notes.map(n => ({ ...n, day_id: Number(dayId) }))
-              )
-              try {
-                await downloadTripPDF({ trip, days, places, assignments, categories, dayNotes: flatNotes, t, locale })
-              } catch (e) {
-                console.error('PDF error:', e)
-                toast.error(t('dayplan.pdfError') + ': ' + (e?.message || String(e)))
-              }
-            }}
-            title={t('dayplan.pdfTooltip')}
-            style={{
-              flexShrink: 0, display: 'flex', alignItems: 'center', gap: 5,
-              padding: '5px 10px', borderRadius: 8, border: 'none',
-              background: 'var(--accent)', color: 'var(--accent-text)', fontSize: 11, fontWeight: 500,
-              cursor: 'pointer', fontFamily: 'inherit',
-            }}
-          >
-            <FileDown size={13} strokeWidth={2} />
-            {t('dayplan.pdf')}
-          </button>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexShrink: 0 }}>
+            <button
+              onClick={() => onClearSelections?.()}
+              title="Clear all selections"
+              style={{
+                display: 'flex', alignItems: 'center', justifyContent: 'center',
+                width: 34, height: 30, borderRadius: 8, border: '1px solid var(--border-primary)',
+                background: 'var(--bg-card)', color: 'var(--text-secondary)',
+                cursor: 'pointer', fontFamily: 'inherit',
+              }}
+            >
+              <RotateCcw size={13} strokeWidth={2.2} />
+            </button>
+            <button
+              onClick={async () => {
+                const flatNotes = Object.entries(dayNotes).flatMap(([dayId, notes]) =>
+                  notes.map(n => ({ ...n, day_id: Number(dayId) }))
+                )
+                try {
+                  await downloadTripPDF({ trip, days, places, assignments, categories, dayNotes: flatNotes, t, locale })
+                } catch (e) {
+                  console.error('PDF error:', e)
+                  toast.error(t('dayplan.pdfError') + ': ' + (e?.message || String(e)))
+                }
+              }}
+              title={t('dayplan.pdfTooltip')}
+              style={{
+                flexShrink: 0, display: 'flex', alignItems: 'center', gap: 5,
+                padding: '5px 10px', borderRadius: 8, border: 'none',
+                background: 'var(--accent)', color: 'var(--accent-text)', fontSize: 11, fontWeight: 500,
+                cursor: 'pointer', fontFamily: 'inherit',
+              }}
+            >
+              <FileDown size={13} strokeWidth={2} />
+              {t('dayplan.pdf')}
+            </button>
+          </div>
         </div>
       </div>
 
@@ -420,8 +438,10 @@ export default function DayPlanSidebar({
       <div className="scroll-container" style={{ flex: 1, overflowY: 'auto', minHeight: 0, scrollbarWidth: 'thin', scrollbarColor: 'var(--scrollbar-thumb) transparent' }}>
         {days.map((day, index) => {
           const isSelected = selectedDayId === day.id
+          const isMapDaySelected = selectedMapDayIds.includes(day.id)
           const isExpanded = expandedDays.has(day.id)
           const da = getDayAssignments(day.id)
+          const dayLineColor = DAY_ROUTE_COLORS[index % DAY_ROUTE_COLORS.length]
           const cost = dayTotalCost(day.id, assignments, currency)
           const formattedDate = formatDate(day.date, locale)
           const loc = da.find(a => a.place?.lat && a.place?.lng)
@@ -462,6 +482,21 @@ export default function DayPlanSidebar({
                 }}>
                   {index + 1}
                 </div>
+
+                <button
+                  onClick={e => { e.stopPropagation(); onToggleMapDay?.(day.id) }}
+                  title={isMapDaySelected ? 'Hide day line on map' : 'Show day line on map'}
+                  style={{
+                    width: 20, height: 20, borderRadius: '50%', flexShrink: 0,
+                    border: `1.5px solid ${isMapDaySelected ? dayLineColor : 'var(--border-primary)'}`,
+                    background: isMapDaySelected ? dayLineColor : 'var(--bg-card)',
+                    color: isMapDaySelected ? '#ffffff' : 'var(--text-faint)',
+                    display: 'flex', alignItems: 'center', justifyContent: 'center',
+                    padding: 0, cursor: 'pointer',
+                  }}
+                >
+                  {isMapDaySelected ? <Check size={11} strokeWidth={2.5} /> : <MapPin size={11} strokeWidth={2.2} />}
+                </button>
 
                 <div style={{ flex: 1, minWidth: 0 }}>
                   {editingDayId === day.id ? (

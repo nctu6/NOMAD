@@ -19,7 +19,7 @@ import BudgetPanel from '../components/Budget/BudgetPanel'
 import CollabPanel from '../components/Collab/CollabPanel'
 import Navbar from '../components/Layout/Navbar'
 import { useToast } from '../components/shared/Toast'
-import { Map, X, PanelLeftClose, PanelLeftOpen, PanelRightClose, PanelRightOpen } from 'lucide-react'
+import { X, PanelLeftClose, PanelLeftOpen, PanelRightClose, PanelRightOpen } from 'lucide-react'
 import { useTranslation } from '../i18n'
 import { addonsApi, accommodationsApi, authApi, tripsApi, assignmentsApi } from '../api/client'
 import ConfirmDialog from '../components/shared/ConfirmDialog'
@@ -28,6 +28,8 @@ import { useTripWebSocket } from '../hooks/useTripWebSocket'
 import { useRouteCalculation } from '../hooks/useRouteCalculation'
 import { usePlaceSelection } from '../hooks/usePlaceSelection'
 import type { Accommodation, TripMember, Day, Place, Reservation } from '../types'
+
+const DAY_ROUTE_COLORS = ['#1d4ed8', '#b91c1c', '#166534', '#92400e', '#6d28d9', '#0f766e', '#be185d', '#365314']
 
 export default function TripPlannerPage(): React.ReactElement | null {
   const { id: tripId } = useParams<{ id: string }>()
@@ -92,6 +94,10 @@ export default function TripPlannerPage(): React.ReactElement | null {
   const [fitKey, setFitKey] = useState<number>(0)
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState<'left' | 'right' | null>(null)
   const [deletePlaceId, setDeletePlaceId] = useState<number | null>(null)
+  const [selectedMapDayIds, setSelectedMapDayIds] = useState<number[]>([])
+  const [mapSelectionTouched, setMapSelectionTouched] = useState<boolean>(false)
+  const [placesSidebarSearchResetKey, setPlacesSidebarSearchResetKey] = useState<number>(0)
+  const normalizeSearchQuery = (value: unknown): string => typeof value === 'string' ? value : ''
 
   // Load trip + files (needed for place inspector file section)
   useEffect(() => {
@@ -119,13 +125,75 @@ export default function TripPlannerPage(): React.ReactElement | null {
 
   const { route, routeSegments, routeInfo, setRoute, setRouteInfo, updateRouteForDay } = useRouteCalculation(tripStore, selectedDayId)
 
+  const dayIndexById = useMemo(() => {
+    const map = new Map<number, number>()
+    days.forEach((d, idx) => map.set(d.id, idx))
+    return map
+  }, [days])
+
+  const sortDayIds = useCallback((ids: number[]) => (
+    [...ids].sort((a, b) => (dayIndexById.get(a) ?? Number.MAX_SAFE_INTEGER) - (dayIndexById.get(b) ?? Number.MAX_SAFE_INTEGER))
+  ), [dayIndexById])
+
   const handleSelectDay = useCallback((dayId, skipFit) => {
     const changed = dayId !== selectedDayId
+    setMapSelectionTouched(true)
     tripStore.setSelectedDay(dayId)
+    setSelectedMapDayIds(prev => {
+      if (!dayId) return prev
+      if (prev.length === 0) return [dayId]
+      if (prev.includes(dayId)) return prev
+      return sortDayIds([...prev, dayId])
+    })
     if (changed && !skipFit) setFitKey(k => k + 1)
     setMobileSidebarOpen(null)
     updateRouteForDay(dayId)
-  }, [tripStore, updateRouteForDay, selectedDayId])
+  }, [tripStore, updateRouteForDay, selectedDayId, sortDayIds])
+
+  const toggleMapDaySelection = useCallback((dayId: number) => {
+    setMapSelectionTouched(true)
+    setSelectedMapDayIds(prev => {
+      if (prev.includes(dayId)) {
+        if (selectedDayId === dayId) return prev
+        const next = prev.filter(id => id !== dayId)
+        if (next.length === 0 && selectedDayId) return [selectedDayId]
+        return sortDayIds(next)
+      }
+      return sortDayIds([...prev, dayId])
+    })
+  }, [selectedDayId, sortDayIds])
+
+  const handleClearSelections = useCallback(() => {
+    setMapSelectionTouched(true)
+    setSelectedMapDayIds([])
+    tripStore.setSelectedDay(null)
+    setSelectedPlaceId(null)
+    setShowDayDetail(null)
+    setRoute(null)
+    setRouteInfo(null)
+  }, [tripStore, setSelectedPlaceId, setRoute, setRouteInfo])
+
+  useEffect(() => {
+    setMapSelectionTouched(false)
+  }, [tripId])
+
+  useEffect(() => {
+    if (!days.length) {
+      setSelectedMapDayIds([])
+      return
+    }
+    setSelectedMapDayIds(prev => {
+      const allDayIds = sortDayIds(days.map(d => d.id))
+      const filtered = prev.filter(id => dayIndexById.has(id))
+      // Default behavior on trip open: show all day routes
+      if (!mapSelectionTouched && filtered.length === 0) return allDayIds
+      if (selectedDayId && dayIndexById.has(selectedDayId)) {
+        if (filtered.includes(selectedDayId)) return sortDayIds(filtered)
+        return sortDayIds([...filtered, selectedDayId])
+      }
+      return filtered.length > 0 ? sortDayIds(filtered) : []
+    })
+  }, [days, selectedDayId, dayIndexById, sortDayIds, mapSelectionTouched])
 
   const handlePlaceClick = useCallback((placeId, assignmentId) => {
     if (assignmentId) {
@@ -179,6 +247,7 @@ export default function TripPlannerPage(): React.ReactElement | null {
         }
       }
       toast.success(t('trip.toast.placeAdded'))
+      setPlacesSidebarSearchResetKey(k => k + 1)
     }
   }, [editingPlace, editingAssignmentId, tripId, tripStore, toast])
 
@@ -254,26 +323,89 @@ export default function TripPlannerPage(): React.ReactElement | null {
 
   const selectedPlace = selectedPlaceId ? places.find(p => p.id === selectedPlaceId) : null
 
-  // Build placeId → order-number map from the selected day's assignments
+  const activeMapDayIds = useMemo(() => {
+    if (selectedMapDayIds.length > 0) return sortDayIds(selectedMapDayIds)
+    return selectedDayId ? [selectedDayId] : []
+  }, [selectedMapDayIds, selectedDayId, sortDayIds])
+
+  // Build placeId -> day-position badges (D1-1, D1-2, D2-1, ...)
   const dayOrderMap = useMemo(() => {
-    if (!selectedDayId) return {}
-    const da = assignments[String(selectedDayId)] || []
-    const sorted = [...da].sort((a, b) => a.order_index - b.order_index)
-    const map = {}
-    sorted.forEach((a, i) => {
-      if (!a.place?.id) return
-      if (!map[a.place.id]) map[a.place.id] = []
-      map[a.place.id].push(i + 1)
+    const map: Record<number, string[]> = {}
+    activeMapDayIds.forEach(dayId => {
+      const dayNum = (dayIndexById.get(dayId) ?? -1) + 1
+      if (dayNum <= 0) return
+      const da = (assignments[String(dayId)] || [])
+        .slice()
+        .sort((a, b) => a.order_index - b.order_index)
+      da.forEach((a, idx) => {
+        const placeId = a.place?.id
+        if (!placeId) return
+        const label = `D${dayNum}-${idx + 1}`
+        if (!map[placeId]) map[placeId] = []
+        if (!map[placeId].includes(label)) map[placeId].push(label)
+      })
     })
     return map
-  }, [selectedDayId, assignments])
+  }, [activeMapDayIds, assignments, dayIndexById])
 
-  // Places assigned to selected day (with coords) — used for map fitting
+  // Places for map fitting from all selected map days
   const dayPlaces = useMemo(() => {
-    if (!selectedDayId) return []
-    const da = assignments[String(selectedDayId)] || []
-    return da.map(a => a.place).filter(p => p?.lat && p?.lng)
-  }, [selectedDayId, assignments])
+    const all = activeMapDayIds.flatMap(dayId => {
+      const da = assignments[String(dayId)] || []
+      return da.map(a => a.place).filter(p => p?.lat && p?.lng)
+    })
+    const seen = new Set<number>()
+    return all.filter(p => {
+      if (!p?.id || seen.has(p.id)) return false
+      seen.add(p.id)
+      return true
+    })
+  }, [activeMapDayIds, assignments])
+
+  const dayLineColorById = useMemo(() => {
+    const map: Record<number, string> = {}
+    days.forEach((d, idx) => { map[d.id] = DAY_ROUTE_COLORS[idx % DAY_ROUTE_COLORS.length] })
+    return map
+  }, [days])
+
+  const multiDayRoutes = useMemo(() => {
+    const lines: Array<{ positions: [number, number][], color: string, weight?: number, opacity?: number, dashArray?: string }> = []
+    let prevLastPoint: [number, number] | null = null
+
+    activeMapDayIds.forEach(dayId => {
+      const color = dayLineColorById[dayId] || '#111827'
+      const coords = (assignments[String(dayId)] || [])
+        .slice()
+        .sort((a, b) => a.order_index - b.order_index)
+        .map(a => a.place)
+        .filter(p => p?.lat && p?.lng)
+        .map(p => [p.lat, p.lng] as [number, number])
+
+      if (coords.length > 0 && prevLastPoint) {
+        lines.push({
+          positions: [prevLastPoint, coords[0]],
+          color,
+          weight: 3,
+          opacity: 0.8,
+          dashArray: '8, 6',
+        })
+      }
+
+      if (coords.length > 1) {
+        lines.push({
+          positions: coords,
+          color,
+          weight: 4,
+          opacity: 0.9,
+          dashArray: '10, 8',
+        })
+      }
+
+      if (coords.length > 0) prevLastPoint = coords[coords.length - 1]
+    })
+
+    return lines
+  }, [activeMapDayIds, assignments, dayLineColorById])
 
   const mapTileUrl = settings.map_tile_url || 'https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png'
   const defaultCenter = [settings.default_lat || 48.8566, settings.default_lng || 2.3522]
@@ -341,8 +473,8 @@ export default function TripPlannerPage(): React.ReactElement | null {
             <MapView
               places={mapPlaces()}
               dayPlaces={dayPlaces}
-              route={route}
-              routeSegments={routeSegments}
+              route={activeMapDayIds.length > 1 ? null : route}
+              routeSegments={activeMapDayIds.length > 1 ? [] : routeSegments}
               selectedPlaceId={selectedPlaceId}
               onMarkerClick={handleMarkerClick}
               onMapClick={handleMapClick}
@@ -351,6 +483,7 @@ export default function TripPlannerPage(): React.ReactElement | null {
               tileUrl={mapTileUrl}
               fitKey={fitKey}
               dayOrderMap={dayOrderMap}
+              multiDayRoutes={multiDayRoutes}
               leftWidth={leftCollapsed ? 0 : leftWidth}
               rightWidth={rightCollapsed ? 0 : rightWidth}
               hasInspector={!!selectedPlace}
@@ -393,7 +526,10 @@ export default function TripPlannerPage(): React.ReactElement | null {
                   selectedDayId={selectedDayId}
                   selectedPlaceId={selectedPlaceId}
                   selectedAssignmentId={selectedAssignmentId}
+                  selectedMapDayIds={selectedMapDayIds}
                   onSelectDay={handleSelectDay}
+                  onToggleMapDay={toggleMapDaySelection}
+                  onClearSelections={handleClearSelections}
                   onPlaceClick={handlePlaceClick}
                   onReorder={handleReorder}
                   onUpdateDayTitle={handleUpdateDayTitle}
@@ -459,10 +595,11 @@ export default function TripPlannerPage(): React.ReactElement | null {
                     assignments={assignments}
                     selectedDayId={selectedDayId}
                     selectedPlaceId={selectedPlaceId}
+                    resetSearchKey={placesSidebarSearchResetKey}
                     onPlaceClick={handlePlaceClick}
                     onAddPlace={(searchQuery = '') => {
                       setEditingPlace(null)
-                      setInitialPlaceSearch(searchQuery || '')
+                      setInitialPlaceSearch(normalizeSearchQuery(searchQuery))
                       setShowPlaceForm(true)
                     }}
                     onAssignToDay={handleAssignToDay}
@@ -566,8 +703,8 @@ export default function TripPlannerPage(): React.ReactElement | null {
                   </div>
                   <div style={{ flex: 1, overflow: 'auto' }}>
                     {mobileSidebarOpen === 'left'
-                      ? <DayPlanSidebar tripId={tripId} trip={trip} days={days} places={places} categories={categories} assignments={assignments} selectedDayId={selectedDayId} selectedPlaceId={selectedPlaceId} selectedAssignmentId={selectedAssignmentId} onSelectDay={(id) => { handleSelectDay(id); setMobileSidebarOpen(null) }} onPlaceClick={handlePlaceClick} onReorder={handleReorder} onUpdateDayTitle={handleUpdateDayTitle} onAssignToDay={handleAssignToDay} onRouteCalculated={(r) => { if (r) { setRoute(r.coordinates); setRouteInfo({ distance: r.distanceText, duration: r.durationText }) } }} reservations={reservations} onAddReservation={(dayId) => { setEditingReservation(null); tripStore.setSelectedDay(dayId); setShowReservationModal(true); setMobileSidebarOpen(null) }} onDayDetail={(day) => { setShowDayDetail(day); setSelectedPlaceId(null); setSelectedAssignmentId(null); setMobileSidebarOpen(null) }} accommodations={tripAccommodations} />
-                      : <PlacesSidebar places={places} categories={categories} assignments={assignments} selectedDayId={selectedDayId} selectedPlaceId={selectedPlaceId} onPlaceClick={handlePlaceClick} onAddPlace={(searchQuery = '') => { setEditingPlace(null); setInitialPlaceSearch(searchQuery || ''); setShowPlaceForm(true); setMobileSidebarOpen(null) }} onAssignToDay={handleAssignToDay} days={days} isMobile />
+                      ? <DayPlanSidebar tripId={tripId} trip={trip} days={days} places={places} categories={categories} assignments={assignments} selectedDayId={selectedDayId} selectedPlaceId={selectedPlaceId} selectedAssignmentId={selectedAssignmentId} selectedMapDayIds={selectedMapDayIds} onSelectDay={(id) => { handleSelectDay(id); setMobileSidebarOpen(null) }} onToggleMapDay={toggleMapDaySelection} onClearSelections={handleClearSelections} onPlaceClick={handlePlaceClick} onReorder={handleReorder} onUpdateDayTitle={handleUpdateDayTitle} onAssignToDay={handleAssignToDay} onRouteCalculated={(r) => { if (r) { setRoute(r.coordinates); setRouteInfo({ distance: r.distanceText, duration: r.durationText }) } }} reservations={reservations} onAddReservation={(dayId) => { setEditingReservation(null); tripStore.setSelectedDay(dayId); setShowReservationModal(true); setMobileSidebarOpen(null) }} onDayDetail={(day) => { setShowDayDetail(day); setSelectedPlaceId(null); setSelectedAssignmentId(null); setMobileSidebarOpen(null) }} accommodations={tripAccommodations} />
+                      : <PlacesSidebar places={places} categories={categories} assignments={assignments} selectedDayId={selectedDayId} selectedPlaceId={selectedPlaceId} resetSearchKey={placesSidebarSearchResetKey} onPlaceClick={handlePlaceClick} onAddPlace={(searchQuery = '') => { setEditingPlace(null); setInitialPlaceSearch(normalizeSearchQuery(searchQuery)); setShowPlaceForm(true); setMobileSidebarOpen(null) }} onAssignToDay={handleAssignToDay} days={days} isMobile />
                     }
                   </div>
                 </div>

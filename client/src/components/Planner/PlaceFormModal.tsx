@@ -63,9 +63,15 @@ export default function PlaceFormModal({
   const [isSaving, setIsSaving] = useState(false)
   const [pendingFiles, setPendingFiles] = useState([])
   const fileRef = useRef(null)
+  const latestSearchIdRef = useRef(0)
   const toast = useToast()
   const { t, language } = useTranslation()
   const { hasMapsKey } = useAuthStore()
+  const resolveSearchLanguage = (query: string): string => {
+    // Google Places returns better localized names for CJK queries with zh-TW.
+    if (/[\u3400-\u9FFF]/.test(query)) return 'zh-TW'
+    return language
+  }
 
   useEffect(() => {
     if (place) {
@@ -93,20 +99,25 @@ export default function PlaceFormModal({
   }
 
   const handleMapsSearch = async (queryOverride?: string) => {
-    const query = (queryOverride ?? mapsSearch).trim()
+    const query = (typeof queryOverride === 'string' ? queryOverride : mapsSearch).trim()
     if (!query) return
+    const searchId = ++latestSearchIdRef.current
     setIsSearchingMaps(true)
     try {
-      const result = await mapsApi.search(query, language)
+      const result = await mapsApi.search(query, resolveSearchLanguage(query))
+      if (searchId !== latestSearchIdRef.current) return
       setMapsResults(result.places || [])
       if (result.fallback_reason) {
         toast.warning(result.google_error || t('places.googleFallback'), 10000)
       }
     } catch (err: unknown) {
+      if (searchId !== latestSearchIdRef.current) return
       const apiError = (err as { response?: { data?: { error?: string } } })?.response?.data?.error
       toast.error(apiError || t('places.mapsSearchError'), 10000)
     } finally {
-      setIsSearchingMaps(false)
+      if (searchId === latestSearchIdRef.current) {
+        setIsSearchingMaps(false)
+      }
     }
   }
 
@@ -125,7 +136,7 @@ export default function PlaceFormModal({
 
   useEffect(() => {
     if (!isOpen || place) return
-    const q = (initialMapsSearch || '').trim()
+    const q = typeof initialMapsSearch === 'string' ? initialMapsSearch.trim() : ''
     if (!q) return
     setMapsSearch(q)
     handleMapsSearch(q)
@@ -218,7 +229,7 @@ export default function PlaceFormModal({
             />
             <button
               type="button"
-              onClick={handleMapsSearch}
+              onClick={() => handleMapsSearch()}
               disabled={isSearchingMaps}
               className="bg-slate-900 text-white px-3 py-1.5 rounded-lg text-sm hover:bg-slate-700 disabled:opacity-60"
             >

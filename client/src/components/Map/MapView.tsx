@@ -26,29 +26,51 @@ function escAttr(s) {
   return s.replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
 }
 
-function createPlaceIcon(place, orderNumbers, isSelected) {
-  const size = isSelected ? 44 : 36
-  const borderColor = isSelected ? '#111827' : 'white'
-  const borderWidth = isSelected ? 3 : 2.5
-  const shadow = isSelected
-    ? '0 0 0 3px rgba(17,24,39,0.25), 0 4px 14px rgba(0,0,0,0.3)'
-    : '0 2px 8px rgba(0,0,0,0.22)'
-  const bgColor = place.category_color || '#6b7280'
-  const icon = place.category_icon || '📍'
+function normalizeMarkerColor(color) {
+  if (!color || typeof color !== 'string') return '#3b82f6'
+  const trimmed = color.trim()
+  const m = trimmed.match(/^#([0-9a-fA-F]{3}|[0-9a-fA-F]{6})$/)
+  if (!m) return trimmed
+  let hex = m[1]
+  if (hex.length === 3) hex = hex.split('').map(c => c + c).join('')
+  const r = parseInt(hex.slice(0, 2), 16)
+  const g = parseInt(hex.slice(2, 4), 16)
+  const b = parseInt(hex.slice(4, 6), 16)
+  const luminance = 0.2126 * r + 0.7152 * g + 0.0722 * b
+  // Avoid near-black marker fills that appear as a plain black blob on map.
+  if (luminance < 45) return '#334155'
+  return trimmed
+}
 
-  // Number badges (bottom-right), supports multiple numbers for duplicate places
+function createPlaceIcon(place, badgeLabels, isSelected) {
+  const size = isSelected ? 44 : 36
+  const borderColor = 'white'
+  const borderWidth = 2.5
+  const shadow = isSelected
+    ? '0 0 0 2px rgba(255,255,255,0.92), 0 0 0 5px rgba(14,165,233,0.42), 0 8px 18px rgba(2,132,199,0.45)'
+    : '0 2px 8px rgba(0,0,0,0.22)'
+  const bgColor = normalizeMarkerColor(place.category_color || '#6b7280')
+  const icon = place.category_icon || '📍'
+  const selectedRing = isSelected ? `<span style="
+      position:absolute;inset:-7px;border-radius:50%;
+      border:2.5px dashed #22d3ee;
+      box-shadow:0 0 0 1px rgba(255,255,255,0.92), 0 0 12px rgba(56,189,248,0.7);
+      pointer-events:none;
+    "></span>` : ''
+
+  // Number badges (bottom-right), supports multiple labels for duplicate places
   let badgeHtml = ''
-  if (orderNumbers && orderNumbers.length > 0) {
-    const label = orderNumbers.join(' · ')
+  if (badgeLabels && badgeLabels.length > 0) {
+    const label = badgeLabels.join(' · ')
     badgeHtml = `<span style="
       position:absolute;bottom:-4px;right:-4px;
-      min-width:18px;height:${orderNumbers.length > 1 ? 16 : 18}px;border-radius:${orderNumbers.length > 1 ? 8 : 9}px;
-      padding:0 ${orderNumbers.length > 1 ? 4 : 3}px;
+      min-width:18px;height:${badgeLabels.length > 1 ? 16 : 18}px;border-radius:${badgeLabels.length > 1 ? 8 : 9}px;
+      padding:0 ${badgeLabels.length > 1 ? 4 : 3}px;
       background:rgba(255,255,255,0.94);
       border:1.5px solid rgba(0,0,0,0.15);
       box-shadow:0 1px 4px rgba(0,0,0,0.18);
       display:flex;align-items:center;justify-content:center;
-      font-size:${orderNumbers.length > 1 ? 7.5 : 9}px;font-weight:800;color:#111827;
+      font-size:${badgeLabels.length > 1 ? 7.5 : 9}px;font-weight:800;color:#111827;
       font-family:-apple-system,system-ui,sans-serif;line-height:1;
       box-sizing:border-box;white-space:nowrap;
     ">${label}</span>`
@@ -64,6 +86,7 @@ function createPlaceIcon(place, orderNumbers, isSelected) {
         overflow:visible;background:${bgColor};
         cursor:pointer;flex-shrink:0;position:relative;
       ">
+        ${selectedRing}
         <div style="width:100%;height:100%;border-radius:50%;overflow:hidden;">
           <img src="${escAttr(place.image_url)}" style="width:100%;height:100%;object-fit:cover;" />
         </div>
@@ -85,7 +108,8 @@ function createPlaceIcon(place, orderNumbers, isSelected) {
       display:flex;align-items:center;justify-content:center;
       cursor:pointer;position:relative;
     ">
-      <span style="font-size:${isSelected ? 18 : 15}px;line-height:1;">${icon}</span>
+      ${selectedRing}
+      <span style="font-size:${isSelected ? 18 : 15}px;line-height:1;color:#f8fafc;text-shadow:0 1px 2px rgba(0,0,0,0.35);">${icon}</span>
       ${badgeHtml}
     </div>`,
     iconSize: [size, size],
@@ -97,30 +121,19 @@ function createPlaceIcon(place, orderNumbers, isSelected) {
 interface SelectionControllerProps {
   places: Place[]
   selectedPlaceId: number | null
-  dayPlaces: Place[]
-  paddingOpts: Record<string, number>
 }
 
-function SelectionController({ places, selectedPlaceId, dayPlaces, paddingOpts }: SelectionControllerProps) {
+function SelectionController({ places, selectedPlaceId }: SelectionControllerProps) {
   const map = useMap()
   const prev = useRef(null)
 
   useEffect(() => {
     if (selectedPlaceId && selectedPlaceId !== prev.current) {
-      // Fit all day places into view (so you see context), but ensure selected is visible
-      const toFit = dayPlaces.length > 0 ? dayPlaces : places.filter(p => p.id === selectedPlaceId)
-      const withCoords = toFit.filter(p => p.lat && p.lng)
-      if (withCoords.length > 0) {
-        try {
-          const bounds = L.latLngBounds(withCoords.map(p => [p.lat, p.lng]))
-          if (bounds.isValid()) {
-            map.fitBounds(bounds, { ...paddingOpts, maxZoom: 16, animate: true })
-          }
-        } catch {}
-      }
+      const selected = places.find(p => p.id === selectedPlaceId && p.lat && p.lng)
+      if (selected) map.panTo([selected.lat, selected.lng], { animate: true, duration: 0.35 })
     }
     prev.current = selectedPlaceId
-  }, [selectedPlaceId, places, dayPlaces, paddingOpts, map])
+  }, [selectedPlaceId, places, map])
 
   return null
 }
@@ -232,6 +245,32 @@ function RouteLabel({ midpoint, walkingText, drivingText }: RouteLabelProps) {
   return <Marker position={midpoint} icon={icon} interactive={false} zIndexOffset={2000} />
 }
 
+const EARTH_RADIUS_M = 6371000
+
+function toRad(v: number): number { return (v * Math.PI) / 180 }
+
+function haversineMeters(a: [number, number], b: [number, number]): number {
+  const lat1 = toRad(a[0]); const lon1 = toRad(a[1])
+  const lat2 = toRad(b[0]); const lon2 = toRad(b[1])
+  const dLat = lat2 - lat1
+  const dLon = lon2 - lon1
+  const h = Math.sin(dLat / 2) ** 2 + Math.cos(lat1) * Math.cos(lat2) * Math.sin(dLon / 2) ** 2
+  return 2 * EARTH_RADIUS_M * Math.asin(Math.sqrt(h))
+}
+
+function bearingDeg(a: [number, number], b: [number, number]): number {
+  const lat1 = toRad(a[0]); const lon1 = toRad(a[1])
+  const lat2 = toRad(b[0]); const lon2 = toRad(b[1])
+  const dLon = lon2 - lon1
+  const y = Math.sin(dLon) * Math.cos(lat2)
+  const x = Math.cos(lat1) * Math.sin(lat2) - Math.sin(lat1) * Math.cos(lat2) * Math.cos(dLon)
+  return ((Math.atan2(y, x) * 180) / Math.PI + 360) % 360
+}
+
+function interpolatePoint(a: [number, number], b: [number, number], t: number): [number, number] {
+  return [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t]
+}
+
 // Module-level photo cache shared with PlaceAvatar
 const mapPhotoCache = new Map()
 
@@ -248,6 +287,7 @@ export function MapView({
   tileUrl = 'https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png',
   fitKey = 0,
   dayOrderMap = {},
+  multiDayRoutes = [],
   leftWidth = 0,
   rightWidth = 0,
   hasInspector = false,
@@ -263,6 +303,43 @@ export function MapView({
     return { paddingTopLeft: [left, top], paddingBottomRight: [right, bottom] }
   }, [leftWidth, rightWidth, hasInspector])
   const [photoUrls, setPhotoUrls] = useState({})
+  const directionalArrows = useMemo(() => {
+    const arrows: Array<{ key: string, position: [number, number], angle: number, color: string }> = []
+    const arrowSpacingM = 30000
+    const maxArrows = 260
+    const addArrowsForPositions = (positions: [number, number][], color: string, keyPrefix: string) => {
+      if (!positions || positions.length < 2) return
+      for (let i = 0; i < positions.length - 1; i++) {
+        if (arrows.length >= maxArrows) return
+        const start = positions[i]
+        const end = positions[i + 1]
+        const distance = haversineMeters(start, end)
+        if (!Number.isFinite(distance) || distance <= 0) continue
+        // Leaflet div icon coordinate orientation is flipped vs our symbol baseline;
+        // add 180deg so arrow head follows polyline direction visually.
+        const angle = (bearingDeg(start, end) + 180) % 360
+        const count = Math.max(1, Math.floor(distance / arrowSpacingM))
+        const step = 1 / (count + 1)
+        for (let k = 1; k <= count; k++) {
+          if (arrows.length >= maxArrows) return
+          arrows.push({
+            key: `${keyPrefix}-${i}-${k}`,
+            position: interpolatePoint(start, end, step * k),
+            angle,
+            color,
+          })
+        }
+      }
+    }
+
+    multiDayRoutes.forEach((line, idx) => {
+      addArrowsForPositions(line.positions || [], line.color || '#111827', `multi-${idx}`)
+    })
+
+    if (route && route.length > 1) addArrowsForPositions(route as [number, number][], '#111827', 'single')
+
+    return arrows
+  }, [multiDayRoutes, route])
 
   // Fetch Google photos for places that have google_place_id but no image_url
   useEffect(() => {
@@ -300,7 +377,7 @@ export function MapView({
 
       <MapController center={center} zoom={zoom} />
       <BoundsController places={dayPlaces.length > 0 ? dayPlaces : places} fitKey={fitKey} paddingOpts={paddingOpts} />
-      <SelectionController places={places} selectedPlaceId={selectedPlaceId} dayPlaces={dayPlaces} paddingOpts={paddingOpts} />
+      <SelectionController places={places} selectedPlaceId={selectedPlaceId} />
       <MapClickHandler onClick={onMapClick} />
 
       <MarkerClusterGroup
@@ -310,7 +387,6 @@ export function MapView({
         spiderfyOnMaxZoom
         showCoverageOnHover={false}
         zoomToBoundsOnClick
-        singleMarkerMode
         iconCreateFunction={(cluster) => {
           const count = cluster.getChildCount()
           const size = count < 10 ? 36 : count < 50 ? 42 : 48
@@ -327,12 +403,13 @@ export function MapView({
         {places.map((place) => {
           const isSelected = place.id === selectedPlaceId
           const resolvedPhotoUrl = place.image_url || (place.google_place_id && photoUrls[place.google_place_id]) || null
-          const orderNumbers = dayOrderMap[place.id] ?? null
-          const icon = createPlaceIcon({ ...place, image_url: resolvedPhotoUrl }, orderNumbers, isSelected)
+          const badgeLabels = dayOrderMap[place.id] ?? null
+          const icon = createPlaceIcon({ ...place, image_url: resolvedPhotoUrl }, badgeLabels, isSelected)
+          const markerKey = `${place.id}:${(badgeLabels || []).join('|')}:${isSelected ? '1' : '0'}`
 
           return (
             <Marker
-              key={place.id}
+              key={markerKey}
               position={[place.lat, place.lng]}
               icon={icon}
               eventHandlers={{
@@ -370,6 +447,45 @@ export function MapView({
           )
         })}
       </MarkerClusterGroup>
+
+      {multiDayRoutes.map((line, idx) => (
+        <Polyline
+          key={`multi-day-line-${idx}`}
+          positions={line.positions}
+          color={line.color}
+          weight={line.weight ?? 4}
+          opacity={line.opacity ?? 0.9}
+          dashArray={line.dashArray}
+        />
+      ))}
+
+      {directionalArrows.map((arrow) => (
+        <Marker
+          key={`arrow-${arrow.key}`}
+          position={arrow.position}
+          interactive={false}
+          zIndexOffset={1400}
+          icon={L.divIcon({
+            className: '',
+            html: `<div style="
+              width:14px;height:14px;
+              transform: rotate(${arrow.angle}deg);
+              transform-origin:50% 50%;
+              display:flex;align-items:center;justify-content:center;
+            ">
+              <svg width="14" height="14" viewBox="0 0 14 14" aria-hidden="true">
+                <path d="M7 1 L12 13 L7 10.2 L2 13 Z"
+                  fill="${arrow.color}"
+                  stroke="rgba(255,255,255,0.95)"
+                  stroke-width="1.1"
+                  stroke-linejoin="round" />
+              </svg>
+            </div>`,
+            iconSize: [16, 16],
+            iconAnchor: [8, 8],
+          })}
+        />
+      ))}
 
       {route && route.length > 1 && (
         <>

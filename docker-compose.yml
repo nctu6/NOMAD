@@ -1,20 +1,20 @@
 services:
   app:
-    image: mauriceboe/nomad:2.5.5
+    image: nomad
     container_name: nomad
     ports:
-      - "3000:3000"
+      - "8910:8910"
     environment:
       - NODE_ENV=production
       - JWT_SECRET=${JWT_SECRET:-}
       # - ALLOWED_ORIGINS=https://yourdomain.com  # Optional: restrict CORS to specific origins
-      - PORT=3000
+      - PORT=8910
     volumes:
       - ./data:/app/data
       - ./uploads:/app/uploads
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://localhost:3000/api/health"]
+      test: ["CMD", "wget", "-qO-", "http://localhost:8910/api/health"]
       interval: 30s
       timeout: 10s
       retries: 3
