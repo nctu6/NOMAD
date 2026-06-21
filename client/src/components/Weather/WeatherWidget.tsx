@@ -80,13 +80,14 @@ export default function WeatherWidget({ lat, lng, date, compact = false }: Weath
     weatherApi.get(lat, lng, date)
       .then(data => {
         if (data.error || data.temp === undefined) {
+          setWeatherCache(cacheKey, null)
           setFailed(true)
         } else {
           setWeatherCache(cacheKey, data)
           setWeather(data)
         }
       })
-      .catch(() => { setFailed(true) })
+      .catch(() => { setWeatherCache(cacheKey, null); setFailed(true) })
       .finally(() => setLoading(false))
   }, [lat, lng, date])
 

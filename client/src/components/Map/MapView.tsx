@@ -279,6 +279,7 @@ export function MapView({
   dayPlaces = [],
   route = null,
   routeSegments = [],
+  routeColor = '#111827',
   selectedPlaceId = null,
   onMarkerClick,
   onMapClick,
@@ -336,10 +337,10 @@ export function MapView({
       addArrowsForPositions(line.positions || [], line.color || '#111827', `multi-${idx}`)
     })
 
-    if (route && route.length > 1) addArrowsForPositions(route as [number, number][], '#111827', 'single')
+    if (route && route.length > 1) addArrowsForPositions(route as [number, number][], routeColor, 'single')
 
     return arrows
-  }, [multiDayRoutes, route])
+  }, [multiDayRoutes, route, routeColor])
 
   // Fetch Google photos for places that have google_place_id but no image_url
   useEffect(() => {
@@ -491,7 +492,7 @@ export function MapView({
         <>
           <Polyline
             positions={route}
-            color="#111827"
+            color={routeColor}
             weight={3}
             opacity={0.9}
             dashArray="6, 5"

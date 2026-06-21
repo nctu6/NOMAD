@@ -10,12 +10,14 @@ const WEATHER_HTTP_TIMEOUT_MS = 10000;
 const WEATHER_HTTP_RETRIES = 2;
 const STALE_WEATHER_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 const GOOGLE_WEATHER_DISABLE_MS = 30 * 60 * 1000;
+const TRANSIENT_FAILURE_TTL_MS = 2 * 60 * 1000;
 const RETRYABLE_NETWORK_CODES = new Set([
   'ETIMEDOUT',
   'ESOCKETTIMEDOUT',
   'ECONNRESET',
   'EAI_AGAIN',
   'ENOTFOUND',
+  'ERR_STREAM_PREMATURE_CLOSE',
 ]);
 let googleWeatherDisabledUntil = 0;
 
@@ -27,6 +29,8 @@ function isRetryableFetchError(err) {
   if (!err) return false;
   if (err.type === 'request-timeout') return true;
   if (RETRYABLE_NETWORK_CODES.has(err.code)) return true;
+  const message = String(err.message || '').toLowerCase();
+  if (message.includes('premature close') || message.includes('socket hang up')) return true;
   return false;
 }
 
@@ -37,7 +41,7 @@ async function fetchJsonWithRetry(url, options = {}) {
 
   for (let attempt = 0; attempt <= retries; attempt++) {
     try {
-      const response = await fetch(url, { timeout });
+      const response = await fetch(url, { timeout, compress: false });
       const data = await response.json();
       return { response, data };
     } catch (err) {
@@ -53,6 +57,7 @@ async function fetchJsonWithRetry(url, options = {}) {
 
 // --------------- In-memory weather cache ---------------
 const weatherCache = new Map();
+const transientFailureCache = new Map();
 
 const TTL_FORECAST_MS = 60 * 60 * 1000;   // 1 hour
 const TTL_CURRENT_MS  = 15 * 60 * 1000;   // 15 minutes
@@ -72,6 +77,20 @@ function getCached(key) {
     return null;
   }
   return entry.data;
+}
+
+function hasRecentTransientFailure(key) {
+  const until = transientFailureCache.get(key);
+  if (!until) return false;
+  if (Date.now() >= until) {
+    transientFailureCache.delete(key);
+    return false;
+  }
+  return true;
+}
+
+function noteTransientFailure(key) {
+  transientFailureCache.set(key, Date.now() + TRANSIENT_FAILURE_TTL_MS);
 }
 
 function getStaleCached(key, maxAgeMs = STALE_WEATHER_MAX_AGE_MS) {
@@ -365,6 +384,12 @@ router.get('/', authenticate, async (req, res) => {
   const mapsApiKey = getMapsKey(authReq.user.id);
 
   try {
+    if (hasRecentTransientFailure(ck)) {
+      const stale = getStaleCached(ck);
+      if (stale) return res.json({ ...stale, stale: true });
+      return res.json({ error: 'weather_temporarily_unavailable' });
+    }
+
     // ── Forecast for a specific date ──
     if (date) {
       const cached = getCached(ck);
@@ -532,6 +557,10 @@ router.get('/', authenticate, async (req, res) => {
     if (stale) {
       return res.json({ ...stale, stale: true });
     }
+    if (isRetryableFetchError(err)) {
+      noteTransientFailure(ck);
+      return res.json({ error: 'weather_temporarily_unavailable' });
+    }
     console.error('Weather error:', err?.code || err?.type || err?.message || err);
     res.status(500).json({ error: 'Error fetching weather data' });
   }
@@ -550,6 +579,12 @@ router.get('/detailed', authenticate, async (req, res) => {
   const mapsApiKey = getMapsKey(authReq.user.id);
 
   try {
+    if (hasRecentTransientFailure(ck)) {
+      const stale = getStaleCached(ck);
+      if (stale) return res.json({ ...stale, stale: true });
+      return res.json({ error: 'weather_temporarily_unavailable' });
+    }
+
     const cached = getCached(ck);
     if (cached) return res.json(cached);
 
@@ -751,6 +786,10 @@ router.get('/detailed', authenticate, async (req, res) => {
     const stale = getStaleCached(ck);
     if (stale) {
       return res.json({ ...stale, stale: true });
+    }
+    if (isRetryableFetchError(err)) {
+      noteTransientFailure(ck);
+      return res.json({ error: 'weather_temporarily_unavailable' });
     }
     console.error('Detailed weather error:', err?.code || err?.type || err?.message || err);
     res.status(500).json({ error: 'Error fetching detailed weather data' });

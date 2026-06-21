@@ -35,6 +35,49 @@ interface GooglePlaceDetails extends GooglePlaceResult {
 
 const router = express.Router();
 
+const MAPS_HTTP_TIMEOUT_MS = 10000;
+const MAPS_HTTP_RETRIES = 2;
+const RETRYABLE_NETWORK_CODES = new Set([
+  'ETIMEDOUT',
+  'ESOCKETTIMEDOUT',
+  'ECONNRESET',
+  'EAI_AGAIN',
+  'ENOTFOUND',
+  'ERR_STREAM_PREMATURE_CLOSE',
+]);
+
+function sleep(ms: number) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+function isRetryableFetchError(err: any): boolean {
+  if (!err) return false;
+  if (err.type === 'request-timeout') return true;
+  if (RETRYABLE_NETWORK_CODES.has(err.code)) return true;
+  const message = String(err.message || '').toLowerCase();
+  return message.includes('premature close') || message.includes('socket hang up');
+}
+
+async function fetchJsonWithRetry(url: string, options: Record<string, any> = {}) {
+  let lastErr: unknown = null;
+  for (let attempt = 0; attempt <= MAPS_HTTP_RETRIES; attempt++) {
+    try {
+      const response = await fetch(url, {
+        ...options,
+        timeout: MAPS_HTTP_TIMEOUT_MS,
+        compress: false,
+      });
+      const data = await response.json();
+      return { response, data };
+    } catch (err) {
+      lastErr = err;
+      if (!isRetryableFetchError(err) || attempt >= MAPS_HTTP_RETRIES) throw err;
+      await sleep(300 * (attempt + 1));
+    }
+  }
+  throw lastErr || new Error('Unknown maps fetch error');
+}
+
 function getMapsKey(userId: number): string | null {
   const user = db.prepare('SELECT maps_api_key FROM users WHERE id = ?').get(userId) as { maps_api_key: string | null } | undefined;
   if (user?.maps_api_key) return user.maps_api_key;
@@ -106,7 +149,7 @@ router.post('/search', authenticate, async (req: Request, res: Response) => {
   }
 
   try {
-    const response = await fetch('https://places.googleapis.com/v1/places:searchText', {
+    const { response, data } = await fetchJsonWithRetry('https://places.googleapis.com/v1/places:searchText', {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -116,8 +159,6 @@ router.post('/search', authenticate, async (req: Request, res: Response) => {
       },
       body: JSON.stringify({ textQuery: query, languageCode: (req.query.lang as string) || 'en' }),
     });
-
-    const data = await response.json() as { places?: GooglePlaceResult[]; error?: { message?: string } };
 
     if (!response.ok) {
       const googleError = data.error?.message || 'Google Places API error';
@@ -174,15 +215,13 @@ router.get('/details/:placeId', authenticate, async (req: Request, res: Response
 
   try {
     const lang = (req.query.lang as string) || 'de';
-    const response = await fetch(`https://places.googleapis.com/v1/places/${placeId}?languageCode=${lang}`, {
+    const { response, data } = await fetchJsonWithRetry(`https://places.googleapis.com/v1/places/${placeId}?languageCode=${lang}`, {
       method: 'GET',
       headers: {
         'X-Goog-Api-Key': apiKey,
         'X-Goog-FieldMask': 'id,displayName,formattedAddress,location,rating,userRatingCount,websiteUri,nationalPhoneNumber,regularOpeningHours,googleMapsUri,reviews,editorialSummary',
       },
     });
-
-    const data = await response.json() as GooglePlaceDetails & { error?: { message?: string } };
 
     if (!response.ok) {
       return res.status(response.status).json({ error: data.error?.message || 'Google Places API error' });
@@ -233,13 +272,12 @@ router.get('/place-photo/:placeId', authenticate, async (req: Request, res: Resp
   }
 
   try {
-    const detailsRes = await fetch(`https://places.googleapis.com/v1/places/${placeId}`, {
+    const { response: detailsRes, data: details } = await fetchJsonWithRetry(`https://places.googleapis.com/v1/places/${placeId}`, {
       headers: {
         'X-Goog-Api-Key': apiKey,
         'X-Goog-FieldMask': 'photos',
       },
     });
-    const details = await detailsRes.json() as GooglePlaceDetails & { error?: { message?: string } };
 
     if (!detailsRes.ok) {
       console.error('Google Places photo details error:', details.error?.message || detailsRes.status);
@@ -254,10 +292,9 @@ router.get('/place-photo/:placeId', authenticate, async (req: Request, res: Resp
     const photoName = photo.name;
     const attribution = photo.authorAttributions?.[0]?.displayName || null;
 
-    const mediaRes = await fetch(
+    const { data: mediaData } = await fetchJsonWithRetry(
       `https://places.googleapis.com/v1/${photoName}/media?maxHeightPx=600&key=${apiKey}&skipHttpRedirect=true`
     );
-    const mediaData = await mediaRes.json() as { photoUri?: string };
     const photoUrl = mediaData.photoUri;
 
     if (!photoUrl) {

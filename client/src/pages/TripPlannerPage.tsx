@@ -139,6 +139,7 @@ export default function TripPlannerPage(): React.ReactElement | null {
     const changed = dayId !== selectedDayId
     setMapSelectionTouched(true)
     tripStore.setSelectedDay(dayId)
+    setShowDayDetail(null)
     setSelectedMapDayIds(prev => {
       if (!dayId) return prev
       if (prev.length === 0) return [dayId]
@@ -407,6 +408,11 @@ export default function TripPlannerPage(): React.ReactElement | null {
     return lines
   }, [activeMapDayIds, assignments, dayLineColorById])
 
+  const selectedRouteColor = useMemo(() => {
+    if (!selectedDayId) return '#111827'
+    return dayLineColorById[selectedDayId] || '#111827'
+  }, [dayLineColorById, selectedDayId])
+
   const mapTileUrl = settings.map_tile_url || 'https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png'
   const defaultCenter = [settings.default_lat || 48.8566, settings.default_lng || 2.3522]
   const defaultZoom = settings.default_zoom || 10
@@ -475,6 +481,7 @@ export default function TripPlannerPage(): React.ReactElement | null {
               dayPlaces={dayPlaces}
               route={activeMapDayIds.length > 1 ? null : route}
               routeSegments={activeMapDayIds.length > 1 ? [] : routeSegments}
+              routeColor={selectedRouteColor}
               selectedPlaceId={selectedPlaceId}
               onMarkerClick={handleMarkerClick}
               onMapClick={handleMapClick}
@@ -483,7 +490,7 @@ export default function TripPlannerPage(): React.ReactElement | null {
               tileUrl={mapTileUrl}
               fitKey={fitKey}
               dayOrderMap={dayOrderMap}
-              multiDayRoutes={multiDayRoutes}
+              multiDayRoutes={activeMapDayIds.length > 1 ? multiDayRoutes : []}
               leftWidth={leftCollapsed ? 0 : leftWidth}
               rightWidth={rightCollapsed ? 0 : rightWidth}
               hasInspector={!!selectedPlace}

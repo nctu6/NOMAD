@@ -115,7 +115,7 @@ interface PlaceInspectorProps {
   onClose: () => void
   onEdit: () => void
   onDelete: () => void
-  onAssignToDay: (placeId: number, dayId: number) => void
+  onAssignToDay: (placeId: number, dayId?: number) => void
   onRemoveAssignment: (assignmentId: number, dayId: number) => void
   files: TripFile[]
   onFileUpload: (fd: FormData) => Promise<void>
@@ -163,12 +163,17 @@ export default function PlaceInspector({
   if (!place) return null
 
   const category = categories?.find(c => c.id === place.category_id)
-  const dayAssignments = selectedDayId ? (assignments[String(selectedDayId)] || []) : []
-  const assignmentInDay = selectedDayId ? dayAssignments.find(a => a.place?.id === place.id) : null
+  const selectedAssignmentInDay = selectedAssignmentId
+    ? Object.values(assignments).flat().find(a => a.id === selectedAssignmentId && a.place?.id === place.id)
+    : null
+  const inspectorDayId = selectedAssignmentInDay?.day_id ?? selectedDayId
+  const dayAssignments = inspectorDayId ? (assignments[String(inspectorDayId)] || []) : []
+  const matchingAssignments = inspectorDayId ? dayAssignments.filter(a => a.place?.id === place.id) : []
+  const removableAssignment = selectedAssignmentInDay || (matchingAssignments.length === 1 ? matchingAssignments[0] : null)
 
   const openingHours = googleDetails?.opening_hours || null
   const openNow = googleDetails?.open_now ?? null
-  const selectedDay = days?.find(d => d.id === selectedDayId)
+  const selectedDay = days?.find(d => d.id === inspectorDayId)
   const weekdayIndex = getWeekdayIndex(selectedDay?.date)
 
   const placeFiles = (files || []).filter(f => String(f.place_id) === String(place.id))
@@ -490,13 +495,29 @@ export default function PlaceInspector({
 
         {/* Footer actions */}
         <div style={{ padding: '10px 16px', borderTop: '1px solid var(--border-faint)', display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap' }}>
-          {selectedDayId && (
-            assignmentInDay ? (
-              <ActionButton onClick={() => onRemoveAssignment(selectedDayId, assignmentInDay.id)} variant="ghost" icon={<Minus size={13} />}
-                label={<><span className="hidden sm:inline">{t('inspector.removeFromDay')}</span><span className="sm:hidden">Remove</span></>} />
-            ) : (
-              <ActionButton onClick={() => onAssignToDay(place.id)} variant="primary" icon={<Plus size={13} />} label={t('inspector.addToDay')} />
-            )
+          {inspectorDayId && (
+            <>
+              <ActionButton
+                onClick={() => onAssignToDay(place.id, inspectorDayId)}
+                variant="primary"
+                icon={<Plus size={13} />}
+                label={
+                  <>
+                    <span>{matchingAssignments.length > 0 ? t('inspector.duplicateInDay') : t('inspector.addToDay')}</span>
+                    {matchingAssignments.length > 0 && <span style={{ opacity: 0.75 }}> (x{matchingAssignments.length + 1})</span>}
+                  </>
+                }
+              />
+              {removableAssignment && (
+                <ActionButton onClick={() => onRemoveAssignment(inspectorDayId, removableAssignment.id)} variant="ghost" icon={<Minus size={13} />}
+                  label={<><span className="hidden sm:inline">{t('inspector.removeFromDay')}</span><span className="sm:hidden">Remove</span></>} />
+              )}
+              {matchingAssignments.length > 1 && (
+                <div style={{ fontSize: 11, color: 'var(--text-faint)', fontWeight: 500 }}>
+                  x{matchingAssignments.length} in day
+                </div>
+              )}
+            </>
           )}
           {googleDetails?.google_maps_url && (
             <ActionButton onClick={() => window.open(googleDetails.google_maps_url, '_blank')} variant="ghost" icon={<Navigation size={13} />}

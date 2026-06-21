@@ -558,6 +558,7 @@ const de: Record<string, string> = {
   'inspector.filesCount': '{count} Dateien',
   'inspector.removeFromDay': 'Vom Tag entfernen',
   'inspector.addToDay': 'Zum Tag hinzufügen',
+  'inspector.duplicateInDay': 'Im Tag duplizieren',
   'inspector.confirmedRes': 'Bestätigte Reservierung',
   'inspector.pendingRes': 'Ausstehende Reservierung',
   'inspector.google': 'In Google Maps öffnen',

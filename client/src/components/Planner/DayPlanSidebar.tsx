@@ -454,7 +454,7 @@ export default function DayPlanSidebar({
             <div key={day.id} style={{ borderBottom: '1px solid var(--border-faint)' }}>
               {/* Tages-Header — akzeptiert Drops aus der PlacesSidebar */}
               <div
-                onClick={() => { onSelectDay(day.id); if (onDayDetail) onDayDetail(day) }}
+                onClick={() => { onSelectDay(day.id) }}
                 onDragOver={e => { e.preventDefault(); setDragOverDayId(day.id) }}
                 onDragLeave={e => { if (!e.currentTarget.contains(e.relatedTarget)) setDragOverDayId(null) }}
                 onDrop={e => handleDropOnDay(e, day.id)}
@@ -548,6 +548,15 @@ export default function DayPlanSidebar({
                   </div>
                 </div>
 
+                <button
+                  onClick={e => { e.stopPropagation(); onDayDetail?.(day) }}
+                  title={t('planner.dayDetails')}
+                  style={{ flexShrink: 0, background: 'none', border: 'none', padding: 4, cursor: 'pointer', display: 'flex', alignItems: 'center', color: 'var(--text-faint)' }}
+                  onMouseEnter={e => e.currentTarget.style.color = 'var(--text-primary)'}
+                  onMouseLeave={e => e.currentTarget.style.color = 'var(--text-faint)'}
+                >
+                  <Info size={13} strokeWidth={2} />
+                </button>
                 <button
                   onClick={e => openAddNote(day.id, e)}
                   title={t('dayplan.addNote')}

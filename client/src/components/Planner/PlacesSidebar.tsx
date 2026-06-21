@@ -53,8 +53,10 @@ export default function PlacesSidebar({
     return true
   })
 
-  const isAssignedToSelectedDay = (placeId) =>
-    selectedDayId && (assignments[String(selectedDayId)] || []).some(a => a.place?.id === placeId)
+  const countAssignmentsForSelectedDay = (placeId) => {
+    if (!selectedDayId) return 0
+    return (assignments[String(selectedDayId)] || []).filter(a => a.place?.id === placeId).length
+  }
 
   const handleSearchInMap = () => {
     const q = search.trim()
@@ -162,7 +164,7 @@ export default function PlacesSidebar({
           filtered.map(place => {
             const cat = categories.find(c => c.id === place.category_id)
             const isSelected = place.id === selectedPlaceId
-            const inDay = isAssignedToSelectedDay(place.id)
+            const assignmentsInDay = countAssignmentsForSelectedDay(place.id)
             const isPlanned = plannedIds.has(place.id)
 
             return (
@@ -221,9 +223,10 @@ export default function PlacesSidebar({
                   )}
                 </div>
                 <div style={{ flexShrink: 0, display: 'flex', alignItems: 'center' }}>
-                  {!inDay && selectedDayId && (
+                  {selectedDayId && (
                     <button
                       onClick={e => { e.stopPropagation(); onAssignToDay(place.id) }}
+                      title={assignmentsInDay > 0 ? `${t('planner.addToDay')} (+1)` : t('planner.addToDay')}
                       style={{
                         display: 'flex', alignItems: 'center', justifyContent: 'center',
                         width: 20, height: 20, borderRadius: 6,
@@ -233,6 +236,11 @@ export default function PlacesSidebar({
                       onMouseEnter={e => { e.currentTarget.style.background = 'var(--accent)'; e.currentTarget.style.color = 'var(--accent-text)' }}
                       onMouseLeave={e => { e.currentTarget.style.background = 'var(--bg-hover)'; e.currentTarget.style.color = 'var(--text-faint)' }}
                     ><Plus size={12} strokeWidth={2.5} /></button>
+                  )}
+                  {assignmentsInDay > 0 && (
+                    <span style={{ marginLeft: 6, fontSize: 10, fontWeight: 700, color: 'var(--text-faint)' }}>
+                      x{assignmentsInDay}
+                    </span>
                   )}
                 </div>
               </div>
@@ -280,7 +288,11 @@ export default function PlacesSidebar({
                       </div>
                       {day.date && <div style={{ fontSize: 11, color: 'var(--text-faint)' }}>{new Date(day.date + 'T00:00:00').toLocaleDateString()}</div>}
                     </div>
-                    {(assignments[String(day.id)] || []).some(a => a.place?.id === dayPickerPlace.id) && <span style={{ fontSize: 11, color: 'var(--text-faint)' }}>✓</span>}
+                    {(() => {
+                      const assignmentCount = (assignments[String(day.id)] || []).filter(a => a.place?.id === dayPickerPlace.id).length
+                      if (assignmentCount === 0) return null
+                      return <span style={{ fontSize: 11, color: 'var(--text-faint)' }}>x{assignmentCount}</span>
+                    })()}
                   </button>
                 )
               })}
