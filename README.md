@@ -62,7 +62,7 @@ A self-hosted, real-time collaborative travel planner — with maps, budgets, pa
 
 <br />
 
-Most of what follows is an addon an admin switches on or off. Lists, Costs, Documents, Collab, Tours, Vacay and Atlas ship on; Journey, Collections, MCP, the AI assistant, AI Parsing, Road trip, Dawarich and AirTrail ship off and are marked below.
+Most of what follows is an addon an admin switches on or off. Lists, Costs, Documents, Collab, Tours, Vacay, Atlas and Cities ship on; Journey, Collections, MCP, the AI assistant, AI Parsing, Road trip, Dawarich and AirTrail ship off and are marked below.
 
 <table>
 <tr>
@@ -414,6 +414,12 @@ The Atlas map's country and sub-national (province/county) boundaries come from
 [**geoBoundaries**](https://www.geoboundaries.org/) (Runfola et al., 2020), licensed
 [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/). See [NOTICE.md](NOTICE.md)
 for full third-party attributions.
+
+Cities compares a starter set of places using open measurements (GeoNames, Wikidata, World Bank, Open-Meteo, Ookla, OpenStreetMap). The tables are empty until you seed them. Sources, licenses, and score formulas are in [docs/cities-data-sources.md](docs/cities-data-sources.md).
+
+```bash
+cd server && npm run seed:cities
+```
 
 <br />
 

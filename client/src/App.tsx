@@ -54,6 +54,8 @@ const SettingsPage = lazyWithRetry(() => import('./pages/SettingsPage'))
 const VacayPage = lazyWithRetry(() => import('./pages/VacayPage'))
 const HelpPage = lazyWithRetry(() => import('./pages/HelpPage'))
 const AtlasPage = lazyWithRetry(() => import('./pages/AtlasPage'))
+const CitiesPage = lazyWithRetry(() => import('./pages/CitiesPage'))
+const CityDetailPage = lazyWithRetry(() => import('./pages/CityDetailPage'))
 const JourneyPage = lazyWithRetry(() => import('./pages/JourneyPage'))
 const JourneyDetailPage = lazyWithRetry(() => import('./pages/JourneyDetailPage'))
 const JourneyStudioPage = lazyWithRetry(() => import('./pages/JourneyStudioPage'))
@@ -525,14 +527,30 @@ export default function App() {
               </ProtectedRoute>
             }
           />
-          <Route
-            path="/atlas"
-            element={
-              <ProtectedRoute>
-                <ViewportRoute phone={MAtlasScreen} desktop={AtlasPage} />
-              </ProtectedRoute>
-            }
-          />
+        <Route
+          path="/atlas"
+          element={
+            <ProtectedRoute>
+              <ViewportRoute phone={MAtlasScreen} desktop={AtlasPage} />
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="/cities"
+          element={
+            <ProtectedRoute addonId="cities">
+              <CitiesPage />
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="/cities/:slug"
+          element={
+            <ProtectedRoute addonId="cities">
+              <CityDetailPage />
+            </ProtectedRoute>
+          }
+        />
           <Route
             path="/journey"
             element={

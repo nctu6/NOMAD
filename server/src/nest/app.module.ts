@@ -100,6 +100,7 @@ import { TripInviteModule } from './trip-invite/trip-invite.module';
 import { TripsModule } from './trips/trips.module';
 import { VacayModule } from './vacay/vacay.module';
 import { WandererModule } from './wanderer/wanderer.module';
+import { CitiesModule } from './cities/cities.module';
 import { WeatherModule } from './weather/weather.module';
 import { MikroOrmModule } from '@mikro-orm/nestjs';
 import { Module } from '@nestjs/common';
@@ -131,6 +132,7 @@ import { APP_FILTER, APP_GUARD, APP_INTERCEPTOR, APP_PIPE } from '@nestjs/core';
     PlatformModule,
     McpTransportModule,
     WeatherModule,
+    CitiesModule,
     PublicApiModule,
     HelpModule,
     AirportsModule,

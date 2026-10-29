@@ -1,7 +1,7 @@
 import { useState, type ComponentType } from 'react'
 import { useTranslation } from '../../i18n'
 import { useIsDark } from '../../hooks/useIsDark'
-import { Puzzle, ListChecks, Wallet, FileText, CalendarDays, Globe, Briefcase, Image, Terminal, Link2, Compass, BookOpen, Sparkles, Luggage, Plane, Bookmark, Users, Loader2, Mountain, CarFront, Search } from 'lucide-react'
+import { Puzzle, ListChecks, Wallet, FileText, CalendarDays, Globe, Briefcase, Image, Terminal, Link2, Compass, BookOpen, Sparkles, Luggage, Plane, Bookmark, Users, Loader2, Mountain, CarFront, Search, MapPinned } from 'lucide-react'
 import EmptyState from '../shared/EmptyState'
 import DawarichIcon from '../shared/DawarichIcon'
 import AirTrailIcon from '../shared/AirTrailIcon'
@@ -21,7 +21,7 @@ import WandererMark from '../Tours/wanderer/WandererMark'
 // unknown falls back to Puzzle. Users/Sparkles cover collab and llm_parsing, which
 // used to land on the fallback.
 const ICON_MAP = {
-  ListChecks, Wallet, FileText, CalendarDays, Puzzle, Globe, Briefcase, Image, Terminal, Link2, Compass, BookOpen, Plane, Bookmark, Users, Sparkles,
+  ListChecks, Wallet, FileText, CalendarDays, Puzzle, Globe, Briefcase, Image, Terminal, Link2, Compass, BookOpen, Plane, Bookmark, Users, Sparkles, MapPinned,
   Mountain,
   // Road trip was seeded as 'Route'; the car says what it is better than a line does.
   Route: CarFront,

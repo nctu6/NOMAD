@@ -151,6 +151,15 @@ export const DEFAULT_ADDONS: AddonRow[] = [
     sort_order: 18,
   },
   {
+    id: 'cities',
+    name: 'Cities',
+    description: 'Compare cities using open cost, climate, safety, and connectivity data',
+    type: 'global',
+    icon: 'MapPinned',
+    enabled: 1,
+    sort_order: 36,
+  },
+  {
     id: 'collections',
     name: 'Collections',
     description:

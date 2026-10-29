@@ -43,9 +43,10 @@ interface TripFormModalProps {
   onSave: (data: TripCreateRequest & { date_shift_mode?: DateShiftMode }) => Promise<{ trip?: Trip } | void> | void
   trip: Trip | null
   onCoverUpdate?: (tripId: number, coverUrl: string | null) => void
+  preset?: { title?: string; description?: string } | null
 }
 
-export default function TripFormModal({ isOpen, onClose, onSave, trip, onCoverUpdate }: TripFormModalProps) {
+export default function TripFormModal({ isOpen, onClose, onSave, trip, onCoverUpdate, preset }: TripFormModalProps) {
   const isEditing = !!trip
   const fileRef = useRef<HTMLInputElement>(null)
   const toast = useToast()
@@ -103,7 +104,15 @@ export default function TripFormModal({ isOpen, onClose, onSave, trip, onCoverUp
       setCustomReminder(![0, 1, 3, 9].includes(rd))
       cover.resetCover(trip.cover_image || null)
     } else {
-      setFormData({ title: '', description: '', start_date: '', end_date: '', currency: defaultCurrency, reminder_days: tripRemindersEnabled ? 3 : 0, day_count: 7 })
+      setFormData({
+        title: preset?.title || '',
+        description: preset?.description || '',
+        start_date: '',
+        end_date: '',
+        currency: defaultCurrency,
+        reminder_days: tripRemindersEnabled ? 3 : 0,
+        day_count: 7,
+      })
       setCustomReminder(false)
       cover.resetCover(null)
     }
@@ -123,7 +132,7 @@ export default function TripFormModal({ isOpen, onClose, onSave, trip, onCoverUp
         tripsApi.getMembers(trip.id).then(d => setExistingMembers(d.members || [])).catch(() => {})
       }
     }
-  }, [trip, isOpen])
+  }, [trip, isOpen, preset?.title, preset?.description])
 
   useEffect(() => {
     if (!trip && isOpen) {

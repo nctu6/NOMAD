@@ -6,7 +6,7 @@ import { useSettingsStore } from '../../store/settingsStore'
 import { useAddonStore } from '../../store/addonStore'
 import { usePluginStore } from '../../store/pluginStore'
 import { useTranslation } from '../../i18n'
-import { Plane, LogOut, Settings, ChevronDown, Shield, ArrowLeft, ChevronLeft, Moon, Sun, Monitor, CalendarDays, Briefcase, Globe, Compass, BookOpen, Bookmark } from 'lucide-react'
+import { Plane, LogOut, Settings, ChevronDown, Shield, ArrowLeft, ChevronLeft, Moon, Sun, Monitor, CalendarDays, Briefcase, Globe, Compass, BookOpen, Bookmark, MapPinned } from 'lucide-react'
 import type { LucideIcon } from 'lucide-react'
 import InAppNotificationBell from './InAppNotificationBell.tsx'
 import HelpButton from '../Help/HelpButton'
@@ -15,7 +15,7 @@ import { resolvePluginIcon } from '../shared/PluginIcon'
 import { visibleManagedNavItems } from '../../managed'
 import { useCollapseOnOverflow } from '../../hooks/useCollapseOnOverflow'
 
-const ADDON_ICONS: Record<string, LucideIcon> = { CalendarDays, Briefcase, Globe, Compass, Bookmark }
+const ADDON_ICONS: Record<string, LucideIcon> = { CalendarDays, Briefcase, Globe, Compass, Bookmark, MapPinned }
 
 interface NavbarProps {
   tripTitle?: string
@@ -219,7 +219,7 @@ export default function Navbar({ tripTitle, tripId, onBack, showBack, onSettings
           }}
         >
           {tabs.map(tab => {
-            const isActive = location.pathname === tab.path
+            const isActive = location.pathname === tab.path || (tab.path !== '/dashboard' && location.pathname.startsWith(`${tab.path}/`))
             return (
               <Link key={tab.id} to={tab.path}
                 title={tab.label} aria-label={tab.label}

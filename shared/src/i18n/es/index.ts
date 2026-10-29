@@ -20,6 +20,7 @@ import atlas from './atlas';
 import backup from './backup';
 import budget from './budget';
 import categories from './categories';
+import cities from './cities';
 import collab from './collab';
 import collection from './collection';
 import common from './common';
@@ -113,6 +114,7 @@ const locale = {
   ...packing,
   ...members,
   ...categories,
+  ...cities,
   ...backup,
   ...pdf,
   ...planner,

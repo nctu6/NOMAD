@@ -740,6 +740,11 @@ export const addonsApi = {
   enabled: () => apiClient.get('/addons').then(r => r.data),
 }
 
+export const citiesApi = {
+  list: (params?: Record<string, string | number | undefined>) => apiClient.get('/cities', { params }).then(r => r.data),
+  get: (slug: string) => apiClient.get(`/cities/${encodeURIComponent(slug)}`).then(r => r.data),
+}
+
 /** A host-rendered column/action a plugin contributes into a native planner view
  * (reservations/places/day) via the tableContributor hook. Every field is bounded +
  * normalized server-side; a column url is guaranteed http/https/mailto. */

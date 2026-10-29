@@ -676,6 +676,8 @@ const admin: TranslationStrings = {
   'admin.addons.catalog.documents.description': 'Store and manage travel documents',
   'admin.addons.catalog.vacay.name': 'Vacay',
   'admin.addons.catalog.vacay.description': 'Personal vacation planner with calendar view',
+  'admin.addons.catalog.cities.name': 'Cities',
+  'admin.addons.catalog.cities.description': 'Compare cities using open cost, climate, safety, and connectivity data',
   'admin.addons.catalog.atlas.name': 'Atlas',
   'admin.addons.catalog.atlas.description': 'World map with visited countries and travel stats',
   'admin.addons.catalog.collab.name': 'Collab',
