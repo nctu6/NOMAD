@@ -4243,7 +4243,7 @@ const help: TranslationStrings = {
   'help.ctx.settings-plugins.summary':
     'Cài đặt riêng của bạn cho các plugin mà quản trị viên đã cài: các khóa và tùy chọn mỗi plugin cần ở bạn, cùng nhật ký những việc plugin đã làm thay bạn. Tab này chỉ hiện khi có plugin đang hoạt động.',
   'help.ctx.settings-about.bullet.3':
-    'Ko-fi, “Mua cho tôi một ly cà phê” và Discord là nơi bạn có thể ủng hộ TREK hoặc trò chuyện với những người làm ra nó.',
+    'Ko-fi và Discord là nơi bạn có thể ủng hộ TREK hoặc trò chuyện với những người làm ra nó.',
   'help.guide.language-region.step.3':
     'Chọn “Tiền tệ hiển thị”, hoặc giữ “Tiền tệ của chuyến đi” để xem mỗi chuyến đi theo tiền tệ riêng. Sau đó chọn “Đơn vị nhiệt độ”, “Đơn vị khoảng cách”, “Định dạng thời gian” và ngày “Tuần bắt đầu vào”.',
   'help.guide.travel-map-prefs.step.3':
@@ -5943,7 +5943,7 @@ const help: TranslationStrings = {
   'help.guide.plugin-settings.step.2':
     '“Hoạt động của plugin” liệt kê mọi hành động mà plugin đã thực hiện thay bạn, mới nhất ở trên. Bấm “Làm mới” để tải mục mới nhất.',
   'help.ctx.admin-github.bullet.3':
-    '“Về”: Ko-fi, “Mua cho tôi một ly cà phê”, Discord, “Báo cáo lỗi”, “Yêu cầu tính năng” và Wiki.',
+    '“Về”: Ko-fi, Discord, “Báo cáo lỗi”, “Yêu cầu tính năng” và Wiki.',
   'help.guide.default-user-settings.goal':
     'Đặt sẵn đơn vị, chế độ màu và tiền tệ hợp lý cho mọi tài khoản, không cần ai phải mở “Cài đặt”.',
   'help.guide.default-map.step.3':

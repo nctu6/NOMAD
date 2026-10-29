@@ -3733,7 +3733,7 @@ const help: TranslationStrings = {
   'help.guide.link-trip.tip.3': '要在尚未關聯的旅行日期上寫條目嗎？編輯器會直接提供「關聯旅行」。',
   'help.ctx.settings-plugins.summary':
     '管理員安裝的外掛的個人設定：每個外掛向你要求的金鑰和偏好，以及外掛以你的名義執行的操作記錄。只有在有外掛啟用時才會出現這個分頁。',
-  'help.ctx.settings-about.bullet.3': 'Ko-fi、Buy Me a Coffee 和 Discord 是你支持 TREK 或認識幕後團隊的地方。',
+  'help.ctx.settings-about.bullet.3': 'Ko-fi 和 Discord 是你支持 TREK 或認識幕後團隊的地方。',
   'help.guide.language-region.step.3':
     '設定「顯示貨幣」，或保持「行程貨幣」，讓每趟旅行以自己的貨幣顯示。然後選擇「溫度單位」、「距離單位」、「時間格式」和「每週開始於」哪一天。',
   'help.guide.travel-map-prefs.step.3':
@@ -5121,7 +5121,7 @@ const help: TranslationStrings = {
     '將金鑰以 Authorization: Bearer 或 X-API-Key 的形式傳送到 /api/v1。一個帳號最多可持有 10 把金鑰。',
   'help.guide.plugin-settings.step.2':
     '「外掛活動」會依時間由新到舊列出外掛代你執行的每個操作，點擊「重新整理」可載入最新內容。',
-  'help.ctx.admin-github.bullet.3': '「關於」：Ko-fi、Buy Me a Coffee、Discord、「回報錯誤」、「功能建議」和 Wiki。',
+  'help.ctx.admin-github.bullet.3': '「關於」：Ko-fi、Discord、「回報錯誤」、「功能建議」和 Wiki。',
   'help.guide.default-user-settings.goal': '為每個帳號預設合適的單位、顏色模式和貨幣，不用每個人自己開啟「設定」。',
   'help.guide.default-map.step.3': '每個欄位在你離開時就會儲存。欄位名稱旁的重設連結可恢復 TREK 的預設值。',
   'help.guide.own-routing-engine.tip.2':

@@ -4344,7 +4344,7 @@ const help: TranslationStrings = {
   'help.ctx.settings-plugins.summary':
     'Je eigen instellingen voor de plugins die de beheerder heeft geïnstalleerd: de sleutels en voorkeuren die elke plugin vraagt, en een logboek van wat plugins namens jou hebben gedaan. Het tabblad verschijnt alleen zolang er een plugin actief is.',
   'help.ctx.settings-about.bullet.3':
-    'Via Ko-fi, Buy Me a Coffee en Discord kun je TREK steunen of met de makers praten.',
+    'Via Ko-fi en Discord kun je TREK steunen of met de makers praten.',
   'help.guide.language-region.step.3':
     'Stel de ‘Weergavevaluta’ in, of kies ‘Valuta van de reis’ om elke reis in zijn eigen valuta te zien. Kies daarna ‘Temperatuureenheid’, ‘Afstandseenheid’, ‘Tijdnotatie’ en bij ‘Week begint op’ de eerste dag van de week.',
   'help.guide.travel-map-prefs.step.3':
@@ -6079,7 +6079,7 @@ const help: TranslationStrings = {
   'help.guide.plugin-settings.step.2':
     'Plugin-activiteit toont alle acties die een plugin namens jou heeft uitgevoerd, de nieuwste bovenaan. Met ‘Vernieuwen’ laad je de laatste.',
   'help.ctx.admin-github.bullet.3':
-    'Over: Ko-fi, Buy Me a Coffee, Discord, ‘Bug melden’, ‘Feature aanvragen’ en de Wiki.',
+    'Over: Ko-fi, Discord, ‘Bug melden’, ‘Feature aanvragen’ en de Wiki.',
   'help.guide.default-user-settings.goal':
     'Geef elk account handige eenheden, een kleurmodus en een valuta, zonder dat iemand Instellingen hoeft te openen.',
   'help.guide.default-map.step.3':

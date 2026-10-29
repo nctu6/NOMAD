@@ -4259,7 +4259,7 @@ const help: TranslationStrings = {
   'help.ctx.settings-plugins.summary':
     'Dina egna inställningar för de plugin som administratören har installerat: nycklar och inställningar som varje plugin ber dig om, och en logg över vad pluginen har gjort åt dig. Fliken visas bara när ett plugin är aktivt.',
   'help.ctx.settings-about.bullet.3':
-    'Via Ko-fi, Buy Me a Coffee och Discord kan du stötta TREK eller prata med dem som utvecklar det.',
+    'Via Ko-fi och Discord kan du stötta TREK eller prata med dem som utvecklar det.',
   'help.guide.language-region.step.3':
     'Ställ in Visningsvaluta, eller behåll ”Resans valuta” för att se varje resa i dess egen valuta. Välj sedan Temperaturenhet, Avståndsenhet, Tidsformat och vilken dag veckan ska börja på under ”Vecka börjar på”.',
   'help.guide.travel-map-prefs.step.3':
@@ -5946,7 +5946,7 @@ const help: TranslationStrings = {
   'help.guide.plugin-settings.step.2':
     'Plugin-aktivitet listar varje åtgärd som ett plugin har utfört å dina vägnar, de nyaste först. Uppdatera läser in de senaste.',
   'help.ctx.admin-github.bullet.3':
-    'Om: Ko-fi, Buy Me a Coffee, Discord, Rapportera en bugg, Förslag på ny funktion och Wikin.',
+    'Om: Ko-fi, Discord, Rapportera en bugg, Förslag på ny funktion och Wikin.',
   'help.guide.default-user-settings.goal':
     'Ge alla konton rimliga enheter, färgläge och valuta utan att någon behöver öppna Inställningar.',
   'help.guide.default-map.step.3':

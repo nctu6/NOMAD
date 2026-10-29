@@ -45,7 +45,6 @@ const system_notice: TranslationStrings = {
   'system_notice.thank_you_support.highlight_opensource': 'GitHubで100%オープンソース',
   'system_notice.thank_you_support.highlight_free': '永久に無料 — 有料プランは一切なし',
   'system_notice.thank_you_support.highlight_community': 'コミュニティと一緒に作っています',
-  'system_notice.thank_you_support.cta_bmc': 'Buy Me a Coffee',
   'system_notice.thank_you_support.cta_kofi': 'Ko-fiで応援する',
   'system_notice.pager.prev': '前へ',
   'system_notice.pager.next': '次へ',
@@ -87,7 +86,6 @@ const system_notice: TranslationStrings = {
     'TREKは無料で、これからもずっと無料です。でも、サーバーやドメイン、数えきれない夜なべはタダではありません。',
   'system_notice.release_notes.support_text':
     'TREKがあなたの旅に欠かせないものになっていたら、コーヒーを一杯おごってください。次のリリースを届ける力になります。',
-  'system_notice.release_notes.cta_bmc': 'コーヒーをおごる',
   'system_notice.release_notes.cta_kofi': 'Ko-fiで応援する',
 };
 export default system_notice;

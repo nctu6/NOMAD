@@ -16,5 +16,7 @@ describe('MSettingsAbout', () => {
       'https://github.com/liketrek/TREK/discussions/new?category=feature-requests'
     );
     expect(screen.getByText('Wiki').closest('a')).toHaveAttribute('href', 'https://github.com/liketrek/TREK/wiki');
+    expect(screen.getByText('Ko-fi').closest('a')).toHaveAttribute('href', 'https://ko-fi.com/0x6ai');
+    expect(screen.queryByText('Buy Me a Coffee')).not.toBeInTheDocument();
   });
 });

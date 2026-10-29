@@ -42,7 +42,7 @@ const system_notice: TranslationStrings = {
   'system_notice.v3_mcp.highlight_tools': 'Eines i indicacions ampliades',
   'system_notice.v3_thankyou.title': 'Una nota personal de part meva',
   'system_notice.v3_thankyou.body':
-    "Abans de continuar — vull prendre'm un moment.\n\nTREK va començar com un projecte personal que vaig construir per als meus propis viatges. Mai vaig imaginar que créixeria fins a convertir-se en una eina en què 4.000 de vosaltres confieu per planificar les vostres aventures. Cada estrella, cada issue, cada sol·licitud de funcionalitat — les llegeixo totes, i són el que em manté dempeus durant les nits llargues entre un treball a jornada completa i la universitat.\n\nVull que sapigueu: TREK sempre serà open source, sempre autoallotjat, sempre vostre. Sense rastreig, sense subscripcions, sense lletra petita. Només una eina feta per algú que estima viatjar tant com vosaltres.\n\nUn agraïment especial a [jubnl](https://github.com/jubnl) — t'has convertit en un col·laborador increïble. Molt del que fa gran la versió 3.0 porta la teva empremta. Gràcies per creure en aquest projecte quan encara era un esborrany.\n\nI a cadascun de vosaltres que va informar d'un error, va traduir un text, va compartir TREK amb un amic o simplement el va utilitzar per planificar un viatge — **gràcies**. Vosaltres sou la raó que això existeixi.\n\nPer moltes més aventures junts.\n\n— Maurice\n\n---\n\n[Uneix-te a la comunitat a Discord](https://discord.gg/7Q6M6jDwzf)\n\nSi TREK millora els teus viatges, un [petit cafè](https://ko-fi.com/mauriceboe) sempre manté els llums encesos.",
+    "Abans de continuar — vull prendre'm un moment.\n\nTREK va començar com un projecte personal que vaig construir per als meus propis viatges. Mai vaig imaginar que créixeria fins a convertir-se en una eina en què 4.000 de vosaltres confieu per planificar les vostres aventures. Cada estrella, cada issue, cada sol·licitud de funcionalitat — les llegeixo totes, i són el que em manté dempeus durant les nits llargues entre un treball a jornada completa i la universitat.\n\nVull que sapigueu: TREK sempre serà open source, sempre autoallotjat, sempre vostre. Sense rastreig, sense subscripcions, sense lletra petita. Només una eina feta per algú que estima viatjar tant com vosaltres.\n\nUn agraïment especial a [jubnl](https://github.com/jubnl) — t'has convertit en un col·laborador increïble. Molt del que fa gran la versió 3.0 porta la teva empremta. Gràcies per creure en aquest projecte quan encara era un esborrany.\n\nI a cadascun de vosaltres que va informar d'un error, va traduir un text, va compartir TREK amb un amic o simplement el va utilitzar per planificar un viatge — **gràcies**. Vosaltres sou la raó que això existeixi.\n\nPer moltes més aventures junts.\n\n— Maurice\n\n---\n\n[Uneix-te a la comunitat a Discord](https://discord.gg/7Q6M6jDwzf)\n\nSi TREK millora els teus viatges, un [petit cafè](https://ko-fi.com/0x6ai) sempre manté els llums encesos.",
   'system_notice.v3014_whitespace_collision.title': "Acció requerida: conflicte de compte d'usuari",
   'system_notice.v3014_whitespace_collision.body':
     "L'actualització 3.0.14 va detectar un o més conflictes de nom d'usuari o correu electrònic causats per espais en blanc al principi o al final dels valors emmagatzemats. Els comptes afectats es van reanomenar automàticament. Revisa els registres del servidor a la recerca de línies que comencin per **[migration] WHITESPACE COLLISION** per identificar quins comptes necessiten revisió.",
@@ -53,7 +53,6 @@ const system_notice: TranslationStrings = {
   'system_notice.thank_you_support.highlight_opensource': '100% codi obert a GitHub',
   'system_notice.thank_you_support.highlight_free': 'Gratuït per sempre — sense nivells de pagament',
   'system_notice.thank_you_support.highlight_community': 'Construït conjuntament amb la comunitat',
-  'system_notice.thank_you_support.cta_bmc': 'Buy Me a Coffee',
   'system_notice.thank_you_support.cta_kofi': 'Dona suport a Ko-fi',
   'system_notice.release_notes.eyebrow': 'Actualització instal·lada',
   'system_notice.release_notes.headline': 'El TREK més gran fins ara.',
@@ -88,7 +87,6 @@ const system_notice: TranslationStrings = {
     'TREK és gratuït i ho serà sempre, però els servidors, els dominis i tantes nits llargues no ho són.',
   'system_notice.release_notes.support_text':
     "Si s'ha guanyat un lloc als teus viatges, convida'm a un cafè i ajuda a fer que arribi la propera versió.",
-  'system_notice.release_notes.cta_bmc': 'Buy me a coffee',
   'system_notice.release_notes.cta_kofi': 'Dona suport a Ko-fi',
   'system_notice.release_notes.intro':
     'Excursions per a cada dia a l’aire lliure, un estudi per als teus fotollibres, un assistent que planifica amb tu i ajuda a cada pantalla.',

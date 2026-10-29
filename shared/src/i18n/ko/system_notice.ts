@@ -27,7 +27,7 @@ const system_notice: TranslationStrings = {
   'system_notice.v3_mcp.highlight_tools': '확장된 도구 모음 및 프롬프트',
   'system_notice.v3_thankyou.title': '개인적인 감사 인사',
   'system_notice.v3_thankyou.body':
-    '떠나시기 전에 잠깐 시간을 내주세요.\n\nTREK은 제 자신의 여행을 위해 만든 사이드 프로젝트로 시작했습니다. 4,000명이 넘는 분들이 모험을 계획하는 데 신뢰해 주실 줄은 상상도 못 했습니다. 모든 별, 모든 이슈, 모든 기능 요청 — 저는 다 읽고, 그것들이 풀타임 직장과 대학 사이의 늦은 밤을 버티게 해줍니다.\n\n알아주셨으면 합니다: TREK은 항상 오픈 소스이고, 항상 자체 호스팅이며, 항상 여러분의 것입니다. 추적 없음, 구독 없음, 조건 없음. 그저 여러분만큼 여행을 사랑하는 누군가가 만든 도구입니다.\n\n[jubnl](https://github.com/jubnl)에게 특별한 감사를. 당신은 훌륭한 협력자가 되었습니다. 3.0을 훌륭하게 만든 많은 부분에 당신의 손길이 담겨 있습니다. 거칠던 초기에 이 프로젝트를 믿어줘서 고맙습니다.\n\n그리고 버그를 제출하고, 문자열을 번역하고, TREK을 친구에게 공유하거나, 단순히 여행 계획에 사용해 주신 모든 분들께 — **감사합니다**. 여러분이 바로 이것이 존재하는 이유입니다.\n\n함께하는 더 많은 모험을 위해.\n\n— Maurice\n\n---\n\n[Discord 커뮤니티에 참여하세요](https://discord.gg/7Q6M6jDwzf)\n\nTREK이 여행을 더 즐겁게 만들어 준다면, [커피 한 잔](https://ko-fi.com/mauriceboe)으로 불을 켜두는 데 도움이 됩니다.',
+    '떠나시기 전에 잠깐 시간을 내주세요.\n\nTREK은 제 자신의 여행을 위해 만든 사이드 프로젝트로 시작했습니다. 4,000명이 넘는 분들이 모험을 계획하는 데 신뢰해 주실 줄은 상상도 못 했습니다. 모든 별, 모든 이슈, 모든 기능 요청 — 저는 다 읽고, 그것들이 풀타임 직장과 대학 사이의 늦은 밤을 버티게 해줍니다.\n\n알아주셨으면 합니다: TREK은 항상 오픈 소스이고, 항상 자체 호스팅이며, 항상 여러분의 것입니다. 추적 없음, 구독 없음, 조건 없음. 그저 여러분만큼 여행을 사랑하는 누군가가 만든 도구입니다.\n\n[jubnl](https://github.com/jubnl)에게 특별한 감사를. 당신은 훌륭한 협력자가 되었습니다. 3.0을 훌륭하게 만든 많은 부분에 당신의 손길이 담겨 있습니다. 거칠던 초기에 이 프로젝트를 믿어줘서 고맙습니다.\n\n그리고 버그를 제출하고, 문자열을 번역하고, TREK을 친구에게 공유하거나, 단순히 여행 계획에 사용해 주신 모든 분들께 — **감사합니다**. 여러분이 바로 이것이 존재하는 이유입니다.\n\n함께하는 더 많은 모험을 위해.\n\n— Maurice\n\n---\n\n[Discord 커뮤니티에 참여하세요](https://discord.gg/7Q6M6jDwzf)\n\nTREK이 여행을 더 즐겁게 만들어 준다면, [커피 한 잔](https://ko-fi.com/0x6ai)으로 불을 켜두는 데 도움이 됩니다.',
   'system_notice.v3014_whitespace_collision.title': '조치 필요: 사용자 계정 충돌',
   'system_notice.v3014_whitespace_collision.body':
     '3.0.14 업그레이드 중 저장된 계정의 앞뒤 공백으로 인한 사용자 이름 또는 이메일 충돌이 감지되었습니다. 영향받은 계정은 자동으로 이름이 변경되었습니다. 검토가 필요한 계정을 확인하려면 **[migration] WHITESPACE COLLISION**으로 시작하는 줄의 서버 로그를 확인하세요.',
@@ -47,7 +47,6 @@ const system_notice: TranslationStrings = {
   'system_notice.thank_you_support.highlight_opensource': 'GitHub에서 100% 오픈 소스',
   'system_notice.thank_you_support.highlight_free': '영원히 무료 — 유료 등급 절대 없음',
   'system_notice.thank_you_support.highlight_community': '커뮤니티와 함께 만들어 갑니다',
-  'system_notice.thank_you_support.cta_bmc': 'Buy Me a Coffee',
   'system_notice.thank_you_support.cta_kofi': 'Ko-fi에서 후원하기',
   'system_notice.pager.prev': '이전 공지',
   'system_notice.pager.next': '다음 공지',
@@ -89,7 +88,6 @@ const system_notice: TranslationStrings = {
     'TREK은 무료이고 앞으로도 그렇겠지만, 서버와 도메인, 수많은 늦은 밤은 무료가 아닙니다.',
   'system_notice.release_notes.support_text':
     'TREK이 여러분의 여행에 자리를 잡았다면, 커피 한 잔으로 다음 릴리스가 계속 나올 수 있게 도와주세요.',
-  'system_notice.release_notes.cta_bmc': 'Buy me a coffee',
   'system_notice.release_notes.cta_kofi': 'Ko-fi에서 후원하기',
 };
 export default system_notice;

@@ -55,14 +55,11 @@ async function renderPanel(props: { isPrerelease?: boolean } = {}) {
 }
 
 describe('MAdminGitHubPanel', () => {
-  it('FE-MOB-AGH-001: renders the six support cards with their external hrefs', async () => {
+  it('FE-MOB-AGH-001: renders the support cards with their external hrefs', async () => {
     await renderPanel();
 
-    expect(screen.getByText('Ko-fi').closest('a')).toHaveAttribute('href', 'https://ko-fi.com/mauriceboe');
-    expect(screen.getByText('Buy Me a Coffee').closest('a')).toHaveAttribute(
-      'href',
-      'https://buymeacoffee.com/mauriceboe',
-    );
+    expect(screen.getByText('Ko-fi').closest('a')).toHaveAttribute('href', 'https://ko-fi.com/0x6ai');
+    expect(screen.queryByText('Buy Me a Coffee')).not.toBeInTheDocument();
     const discord = screen.getByText('Discord').closest('a')!;
     expect(discord).toHaveAttribute('href', 'https://discord.gg/NhZBDSd4qW');
     expect(discord).toHaveAttribute('target', '_blank');
@@ -70,7 +67,7 @@ describe('MAdminGitHubPanel', () => {
     expect(screen.getByText('Report a Bug')).toBeInTheDocument();
     expect(screen.getByText('Feature Request')).toBeInTheDocument();
     expect(screen.getByText('Wiki').closest('a')).toHaveAttribute('href', 'https://github.com/liketrek/TREK/wiki');
-    expect(screen.getAllByText('Helps me keep building TREK')).toHaveLength(2);
+    expect(screen.getAllByText('Helps me keep building TREK')).toHaveLength(1);
   });
 
   it('FE-MOB-AGH-002: shows a spinner while the releases request is in flight', () => {

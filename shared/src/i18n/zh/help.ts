@@ -3694,7 +3694,7 @@ const help: TranslationStrings = {
   'help.guide.link-trip.tip.3': '如果你在尚未关联的旅行的某一天写条目，编辑器会直接在条目里提供“关联旅行”。',
   'help.ctx.settings-plugins.summary':
     '管理员安装的插件的个人设置：每个插件向你索取的密钥和偏好，以及插件以你的名义执行操作的记录。只有在有插件启用时才会显示此标签页。',
-  'help.ctx.settings-about.bullet.3': 'Ko-fi、Buy Me a Coffee 和 Discord 是你支持 TREK 或联系开发团队的地方。',
+  'help.ctx.settings-about.bullet.3': 'Ko-fi 和 Discord 是你支持 TREK 或联系开发团队的地方。',
   'help.guide.language-region.step.3':
     '设置“显示货币”，或保留“行程货币”，让每个旅行按自己的货币显示。然后选择“温度单位”“距离单位”“时间格式”以及“每周开始于”星期几。',
   'help.guide.travel-map-prefs.step.3':
@@ -5070,7 +5070,7 @@ const help: TranslationStrings = {
   'help.guide.api-keys.tip.3':
     '把密钥以 Authorization: Bearer 或 X-API-Key 的形式发送到 /api/v1。一个账号最多可以有 10 个密钥。',
   'help.guide.plugin-settings.step.2': '“插件活动”按时间从新到旧列出插件代你执行的所有操作，点击“刷新”可加载最新记录。',
-  'help.ctx.admin-github.bullet.3': '关于：Ko-fi、Buy Me a Coffee、Discord、“报告错误”、“功能建议”和 Wiki。',
+  'help.ctx.admin-github.bullet.3': '关于：Ko-fi、Discord、“报告错误”、“功能建议”和 Wiki。',
   'help.guide.default-user-settings.goal': '为每个账号预设合理的单位、颜色模式和货币，无需用户自己打开“设置”。',
   'help.guide.default-map.step.3': '每个字段在你离开它时自动保存。字段名称旁的重置链接会恢复 TREK 的默认值。',
   'help.guide.own-routing-engine.tip.2':

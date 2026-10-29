@@ -27,7 +27,7 @@ const system_notice: TranslationStrings = {
   'system_notice.v3_mcp.highlight_tools': 'Bộ công cụ và lời nhắc mở rộng',
   'system_notice.v3_thankyou.title': 'Một lưu ý cá nhân từ tôi',
   'system_notice.v3_thankyou.body':
-    'Trước khi bạn đi - tôi muốn dành một chút thời gian.\n\nTREK bắt đầu như một dự án phụ mà tôi xây dựng cho những chuyến đi của riêng mình. Tôi chưa bao giờ tưởng tượng nó sẽ phát triển thành thứ mà 4.000 người trong số các bạn hiện đang tin tưởng để lên kế hoạch cho chuyến phiêu lưu của mình. Mọi ngôi sao, mọi số báo, mọi yêu cầu về tính năng - tôi đọc tất cả và chúng khiến tôi phải thức khuya giữa công việc toàn thời gian và trường đại học.\n\nTôi muốn bạn biết: TREK sẽ luôn là nguồn mở, luôn tự lưu trữ, luôn là của bạn. Không theo dõi, không đăng ký, không ràng buộc. Chỉ là một công cụ được xây dựng bởi một người cũng yêu thích du lịch như bạn.\n\nĐặc biệt cảm ơn [jubnl](https://github.com/jubnl) - bạn đã trở thành một cộng tác viên đáng kinh ngạc. Rất nhiều điều tạo nên sự tuyệt vời của 3.0 đều mang dấu ấn của bạn. Cảm ơn bạn đã tin tưởng vào dự án này khi nó vẫn còn nhiều khó khăn.\n\nVà gửi tới từng người trong số các bạn đã phát hiện lỗi, dịch một chuỗi, chia sẻ TREK với bạn bè hoặc đơn giản sử dụng nó để lên kế hoạch cho chuyến đi — **cảm ơn**. Bạn là lý do điều này tồn tại.\n\nĐây là nhiều cuộc phiêu lưu cùng nhau.\n\n— Maurice\n\n---\n\n[Tham gia cộng đồng trên Discord](https://discord.gg/7Q6M6jDwzf)\n\nNếu TREK giúp chuyến du lịch của bạn trở nên thú vị hơn thì một [cà phê nhỏ](https://ko-fi.com/mauriceboe) luôn luôn bật đèn.',
+    'Trước khi bạn đi - tôi muốn dành một chút thời gian.\n\nTREK bắt đầu như một dự án phụ mà tôi xây dựng cho những chuyến đi của riêng mình. Tôi chưa bao giờ tưởng tượng nó sẽ phát triển thành thứ mà 4.000 người trong số các bạn hiện đang tin tưởng để lên kế hoạch cho chuyến phiêu lưu của mình. Mọi ngôi sao, mọi số báo, mọi yêu cầu về tính năng - tôi đọc tất cả và chúng khiến tôi phải thức khuya giữa công việc toàn thời gian và trường đại học.\n\nTôi muốn bạn biết: TREK sẽ luôn là nguồn mở, luôn tự lưu trữ, luôn là của bạn. Không theo dõi, không đăng ký, không ràng buộc. Chỉ là một công cụ được xây dựng bởi một người cũng yêu thích du lịch như bạn.\n\nĐặc biệt cảm ơn [jubnl](https://github.com/jubnl) - bạn đã trở thành một cộng tác viên đáng kinh ngạc. Rất nhiều điều tạo nên sự tuyệt vời của 3.0 đều mang dấu ấn của bạn. Cảm ơn bạn đã tin tưởng vào dự án này khi nó vẫn còn nhiều khó khăn.\n\nVà gửi tới từng người trong số các bạn đã phát hiện lỗi, dịch một chuỗi, chia sẻ TREK với bạn bè hoặc đơn giản sử dụng nó để lên kế hoạch cho chuyến đi — **cảm ơn**. Bạn là lý do điều này tồn tại.\n\nĐây là nhiều cuộc phiêu lưu cùng nhau.\n\n— Maurice\n\n---\n\n[Tham gia cộng đồng trên Discord](https://discord.gg/7Q6M6jDwzf)\n\nNếu TREK giúp chuyến du lịch của bạn trở nên thú vị hơn thì một [cà phê nhỏ](https://ko-fi.com/0x6ai) luôn luôn bật đèn.',
   'system_notice.v3014_whitespace_collision.title': 'Hành động bắt buộc: xung đột tài khoản người dùng',
   'system_notice.v3014_whitespace_collision.body':
     'Bản nâng cấp 3.0.14 đã phát hiện một hoặc nhiều xung đột tên người dùng hoặc email do khoảng trắng ở đầu/cuối trong tài khoản được lưu trữ. Các tài khoản bị ảnh hưởng đã được đổi tên tự động. Kiểm tra nhật ký máy chủ để tìm các dòng bắt đầu bằng **[migration] WHITESPACE COLLISION** để xác định tài khoản nào cần xem xét.',
@@ -48,7 +48,6 @@ const system_notice: TranslationStrings = {
   'system_notice.thank_you_support.highlight_opensource': 'Nguồn mở 100% trên GitHub',
   'system_notice.thank_you_support.highlight_free': 'Miễn phí mãi mãi - không bao giờ có bất kỳ cấp độ trả phí nào',
   'system_notice.thank_you_support.highlight_community': 'Được xây dựng cùng với cộng đồng',
-  'system_notice.thank_you_support.cta_bmc': 'Mua cho tôi một ly cà phê',
   'system_notice.thank_you_support.cta_kofi': 'Hỗ trợ trên Ko-fi',
   'system_notice.pager.prev': 'Thông báo trước',
   'system_notice.pager.next': 'Thông báo tiếp theo',
@@ -92,7 +91,6 @@ const system_notice: TranslationStrings = {
     'TREK miễn phí và sẽ luôn như vậy, nhưng máy chủ, tên miền và rất nhiều đêm thức khuya thì không.',
   'system_notice.release_notes.support_text':
     'Nếu TREK đã có một chỗ trong những chuyến đi của bạn, hãy mời tôi một ly cà phê để bản phát hành tiếp theo tiếp tục ra đời.',
-  'system_notice.release_notes.cta_bmc': 'Mời tôi một ly cà phê',
   'system_notice.release_notes.cta_kofi': 'Hỗ trợ trên Ko-fi',
 };
 export default system_notice;

@@ -6,12 +6,11 @@ The **GitHub** tab (in the **Integrations** group of the admin side navigation) 
 
 ## Support and resources
 
-The **About** card at the top of the tab holds six tiles that link to external resources:
+The **About** card at the top of the tab holds five tiles that link to external resources:
 
 | Card | Link |
 |------|------|
 | **Ko-fi** | Support the project financially |
-| **Buy Me a Coffee** | Alternative support link |
 | **Discord** | Join the TREK community |
 | **Report a Bug** | Open a GitHub issue with the bug report template |
 | **Feature Request** | Open a GitHub Discussion in the feature requests category |

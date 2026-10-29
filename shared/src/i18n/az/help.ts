@@ -4327,7 +4327,7 @@ const help: TranslationStrings = {
   'help.ctx.settings-plugins.summary':
     'Adminin quraşdırdığı plaginlər üçün şəxsi tənzimləmələriniz: hər plaginin sizdən istədiyi açarlar və seçimlər, həmçinin plaginlərin sizin adınızdan etdiklərinin jurnalı. Bu vərəq yalnız aktiv plagin olduqda görünür.',
   'help.ctx.settings-about.bullet.3':
-    'Ko-fi, «Mənə qəhvə al» və Discord vasitəsilə TREK-i dəstəkləyə və ya onu hazırlayan insanlarla danışa bilərsiniz.',
+    'Ko-fi və Discord vasitəsilə TREK-i dəstəkləyə və ya onu hazırlayan insanlarla danışa bilərsiniz.',
   'help.guide.language-region.step.3':
     '«Göstərilən valyuta»nı seçin və ya hər səyahəti öz valyutasında görmək üçün «Səyahət valyutası»nı saxlayın. Sonra «Temperatur vahidi», «Məsafə vahidi», «Vaxt formatı» və həftənin hansı gündən başladığını seçin.',
   'help.guide.travel-map-prefs.step.3':
@@ -6024,7 +6024,7 @@ const help: TranslationStrings = {
   'help.guide.plugin-settings.step.2':
     '«Plagin fəaliyyəti» plaginlərin sizin adınızdan etdiyi bütün əməliyyatları ən yenisi birinci olmaqla sadalayır; «Yenilə» ən sonuncuları yükləyir.',
   'help.ctx.admin-github.bullet.3':
-    '«Haqqında»: Ko-fi, «Mənə qəhvə al», Discord, «Xəta bildir», «Funksiya təklifi» və Wiki.',
+    '«Haqqında»: Ko-fi, Discord, «Xəta bildir», «Funksiya təklifi» və Wiki.',
   'help.guide.default-user-settings.goal':
     'Heç kim «Tənzimləmələr»i açmadan hər hesaba uyğun vahidlər, rəng rejimi və valyuta verin.',
   'help.guide.default-map.step.3':

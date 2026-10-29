@@ -1429,7 +1429,7 @@ const help: TranslationStrings = {
   'help.ctx.settings-about.bullet.2':
     'Report a Bug and Feature Request open the project on GitHub; Wiki opens the documentation.',
   'help.ctx.settings-about.bullet.3':
-    'Ko-fi, Buy Me a Coffee and Discord are where you can support TREK or talk to the people who make it.',
+    'Ko-fi and Discord are where you can support TREK or talk to the people who make it.',
   'help.guide.startup.title': 'Choose what TREK opens with',
   'help.guide.startup.goal': 'Open TREK on the page you use most, not on the dashboard every time.',
   'help.guide.startup.step.1': 'At the top of General, under Startup, set Start page to Dashboard or Active trip.',
@@ -1830,7 +1830,7 @@ const help: TranslationStrings = {
   'help.ctx.admin-github.bullet.2':
     'Update available appears under the page header once a newer release exists; How to Update shows the commands for Docker or the update guide for other installs.',
   'help.ctx.admin-github.bullet.3':
-    'About: Ko-fi, Buy Me a Coffee, Discord, Report a Bug, Feature Request and the Wiki.',
+    'About: Ko-fi, Discord, Report a Bug, Feature Request and the Wiki.',
   'help.ctx.admin-backup.title': 'Backup',
   'help.ctx.admin-backup.summary':
     'Full backups of the database and the uploads, made by hand or on a schedule, kept on the server and downloadable as one file. Use Restore to bring a backup back.',

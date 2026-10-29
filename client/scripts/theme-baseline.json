@@ -154,7 +154,7 @@
   "mobile/screens/admin/MAdminCategoryManager.tsx": 8,
   "mobile/screens/admin/MAdminDefaultUserSettings.tsx": 5,
   "mobile/screens/admin/MAdminDevNotificationsPanel.tsx": 6,
-  "mobile/screens/admin/MAdminGitHubPanel.tsx": 30,
+  "mobile/screens/admin/MAdminGitHubPanel.tsx": 28,
   "mobile/screens/admin/MAdminMcpTokensPanel.tsx": 14,
   "mobile/screens/admin/MAdminNotifyMatrix.tsx": 5,
   "mobile/screens/admin/MAdminPackingTemplateManager.tsx": 8,

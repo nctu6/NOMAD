@@ -4320,7 +4320,7 @@ const help: TranslationStrings = {
   'help.ctx.settings-plugins.summary':
     'Pengaturanmu sendiri untuk plugin yang dipasang admin: kunci dan preferensi yang diminta tiap plugin, serta log tentang apa saja yang dilakukan plugin atas namamu. Tab ini hanya muncul selama ada plugin yang aktif.',
   'help.ctx.settings-about.bullet.3':
-    'Lewat Ko-fi, Buy Me a Coffee, dan Discord, kamu bisa mendukung TREK atau mengobrol dengan orang-orang yang membuatnya.',
+    'Lewat Ko-fi dan Discord, kamu bisa mendukung TREK atau mengobrol dengan orang-orang yang membuatnya.',
   'help.guide.language-region.step.3':
     'Atur “Mata uang tampilan”, atau biarkan “Mata uang perjalanan” agar setiap perjalanan tampil dalam mata uangnya sendiri. Lalu pilih “Satuan Suhu”, “Satuan Jarak”, “Format Waktu”, dan hari “Awal minggu”.',
   'help.guide.travel-map-prefs.step.3':
@@ -6042,7 +6042,7 @@ const help: TranslationStrings = {
   'help.guide.plugin-settings.step.2':
     '“Aktivitas plugin” mencantumkan setiap tindakan yang dilakukan plugin atas namamu, mulai dari yang terbaru; “Segarkan” memuat data terbaru.',
   'help.ctx.admin-github.bullet.3':
-    '“Tentang”: Ko-fi, Buy Me a Coffee, Discord, “Laporkan Bug”, “Permintaan Fitur”, dan Wiki.',
+    '“Tentang”: Ko-fi, Discord, “Laporkan Bug”, “Permintaan Fitur”, dan Wiki.',
   'help.guide.default-user-settings.goal':
     'Beri setiap akun satuan, mode warna, dan mata uang yang masuk akal tanpa ada yang perlu membuka “Pengaturan”.',
   'help.guide.default-map.step.3':

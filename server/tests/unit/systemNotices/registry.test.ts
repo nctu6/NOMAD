@@ -99,7 +99,7 @@ describe('registry integrity', () => {
   it('the thank-you notice hands over to the release modal at 4.0.0', () => {
     const thankYou = SYSTEM_NOTICES.find((n) => n.id === 'thank-you-support');
     expect(thankYou).toBeDefined();
-    // Both carry the same thank-you and the same two support links, so exactly
+    // Both carry the same thank-you and the same support link, so exactly
     // one of them may be active at any version.
     expect(isNoticeVersionActive(thankYou!, '3.4.1')).toBe(true);
     expect(isNoticeVersionActive(thankYou!, '4.0.0')).toBe(false);

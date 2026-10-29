@@ -4413,7 +4413,7 @@ const help: TranslationStrings = {
   'help.ctx.settings-plugins.summary':
     'Vos réglages personnels pour les plugins installés par l’administrateur : les clés et préférences demandées par chaque plugin, et l’historique de ce que les plugins ont fait en votre nom. L’onglet n’apparaît que si un plugin est actif.',
   'help.ctx.settings-about.bullet.3':
-    'Ko-fi, Buy Me a Coffee et Discord : c’est là que vous pouvez soutenir TREK ou échanger avec l’équipe qui le développe.',
+    'Ko-fi et Discord : c’est là que vous pouvez soutenir TREK ou échanger avec l’équipe qui le développe.',
   'help.guide.language-region.step.3':
     "Réglez la « Devise d'affichage », ou gardez « Devise du voyage » pour voir chaque voyage dans sa propre devise. Choisissez ensuite « Unité de température », « Unité de distance », « Format de l'heure » et le jour où commence la semaine.",
   'help.guide.travel-map-prefs.step.3':
@@ -6174,7 +6174,7 @@ const help: TranslationStrings = {
   'help.guide.plugin-settings.step.2':
     '« Activité des plugins » liste toutes les actions effectuées par un plugin en votre nom, des plus récentes aux plus anciennes ; « Actualiser » charge les dernières.',
   'help.ctx.admin-github.bullet.3':
-    '« À propos » : Ko-fi, Buy Me a Coffee, Discord, « Signaler un bug », « Proposer une fonctionnalité » et le Wiki.',
+    '« À propos » : Ko-fi, Discord, « Signaler un bug », « Proposer une fonctionnalité » et le Wiki.',
   'help.guide.default-user-settings.goal':
     'Attribuer à chaque compte des unités, un mode de couleur et une devise adaptés, sans que personne ait à ouvrir les paramètres.',
   'help.guide.default-map.step.3':

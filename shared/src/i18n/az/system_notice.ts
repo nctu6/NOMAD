@@ -27,7 +27,7 @@ const system_notice: TranslationStrings = {
   'system_notice.v3_mcp.highlight_tools': 'Genişləndirilmiş alətlər və sorğular',
   'system_notice.v3_thankyou.title': 'Məndən şəxsi bir qeyd',
   'system_notice.v3_thankyou.body':
-    'Getməzdən əvvəl bir anlıq dayanmaq istəyirəm.\n\nTREK öz səyahətlərim üçün hazırladığım kiçik əlavə layihə kimi başladı. Onun böyüyərək macəralarını planlaşdırmaq üçün indi 4 000 nəfərin etibar etdiyi bir layihəyə çevriləcəyini heç vaxt təsəvvür etməzdim. Hər ulduzu, hər problem bildirişini və hər funksiya təklifini oxuyuram. Onlar tam iş günü və universitet arasında gecə saatlarında işləməyə davam etməyimə kömək edir.\n\nBunu bilməyinizi istəyirəm: TREK həmişə açıq mənbəli, həmişə şəxsi serverinizdə işləyən və həmişə sizə məxsus olacaq. İzləmə, abunəlik və gizli şərt yoxdur. Sadəcə səyahəti sizin qədər sevən birinin hazırladığı alətdir.\n\n[jubnl](https://github.com/jubnl) üçün xüsusi təşəkkür — inanılmaz əməkdaş oldunuz. 3.0 versiyasını möhtəşəm edən xüsusiyyətlərin çoxunda sizin iziniz var. Layihə hələ tam hazır olmadığı vaxtda ona inandığınız üçün təşəkkür edirəm.\n\nXəta bildirən, bir sətri tərcümə edən, TREK-i dostu ilə paylaşan və ya sadəcə səyahət planlaşdırmaq üçün istifadə edən hər birinizə — **təşəkkür edirəm**. Bunun mövcud olmasının səbəbi sizsiniz.\n\nBirlikdə daha çox macəralara.\n\n— Maurice\n\n---\n\n[Discord icmasına qoşulun](https://discord.gg/7Q6M6jDwzf)\n\nTREK səyahətlərinizi yaxşılaşdırırsa, [kiçik bir qəhvə](https://ko-fi.com/mauriceboe) layihənin davam etməsinə həmişə kömək edir.',
+    'Getməzdən əvvəl bir anlıq dayanmaq istəyirəm.\n\nTREK öz səyahətlərim üçün hazırladığım kiçik əlavə layihə kimi başladı. Onun böyüyərək macəralarını planlaşdırmaq üçün indi 4 000 nəfərin etibar etdiyi bir layihəyə çevriləcəyini heç vaxt təsəvvür etməzdim. Hər ulduzu, hər problem bildirişini və hər funksiya təklifini oxuyuram. Onlar tam iş günü və universitet arasında gecə saatlarında işləməyə davam etməyimə kömək edir.\n\nBunu bilməyinizi istəyirəm: TREK həmişə açıq mənbəli, həmişə şəxsi serverinizdə işləyən və həmişə sizə məxsus olacaq. İzləmə, abunəlik və gizli şərt yoxdur. Sadəcə səyahəti sizin qədər sevən birinin hazırladığı alətdir.\n\n[jubnl](https://github.com/jubnl) üçün xüsusi təşəkkür — inanılmaz əməkdaş oldunuz. 3.0 versiyasını möhtəşəm edən xüsusiyyətlərin çoxunda sizin iziniz var. Layihə hələ tam hazır olmadığı vaxtda ona inandığınız üçün təşəkkür edirəm.\n\nXəta bildirən, bir sətri tərcümə edən, TREK-i dostu ilə paylaşan və ya sadəcə səyahət planlaşdırmaq üçün istifadə edən hər birinizə — **təşəkkür edirəm**. Bunun mövcud olmasının səbəbi sizsiniz.\n\nBirlikdə daha çox macəralara.\n\n— Maurice\n\n---\n\n[Discord icmasına qoşulun](https://discord.gg/7Q6M6jDwzf)\n\nTREK səyahətlərinizi yaxşılaşdırırsa, [kiçik bir qəhvə](https://ko-fi.com/0x6ai) layihənin davam etməsinə həmişə kömək edir.',
   'system_notice.v3014_whitespace_collision.title': 'Əməliyyat tələb olunur: istifadəçi hesabı ziddiyyəti',
   'system_notice.v3014_whitespace_collision.body':
     '3.0.14 yeniləməsi saxlanılan hesablardakı adların əvvəlində və ya sonunda olan boşluqların yaratdığı bir və ya daha çox istifadəçi adı və ya e-poçt ziddiyyəti aşkarladı. Təsirlənmiş hesabların adları avtomatik dəyişdirildi. Hansı hesabların yoxlanılmalı olduğunu müəyyən etmək üçün server jurnallarında **[migration] WHITESPACE COLLISION** ilə başlayan sətirləri yoxlayın.',
@@ -49,7 +49,6 @@ const system_notice: TranslationStrings = {
   'system_notice.thank_you_support.highlight_opensource': 'GitHub-da 100% açıq mənbəlidir',
   'system_notice.thank_you_support.highlight_free': 'Həmişə pulsuzdur — heç vaxt ödənişli səviyyə olmayacaq',
   'system_notice.thank_you_support.highlight_community': 'İcma ilə birlikdə hazırlanır',
-  'system_notice.thank_you_support.cta_bmc': 'Mənə qəhvə al',
   'system_notice.thank_you_support.cta_kofi': 'Ko-fi-da dəstəklə',
 
   // The release modal. One stable set of keys: each big release swaps the copy in place.
@@ -88,7 +87,6 @@ const system_notice: TranslationStrings = {
     'TREK pulsuzdur və həmişə belə qalacaq, lakin serverlər, domenlər və çoxsaylı gecə işləri pulsuz deyil.',
   'system_notice.release_notes.support_text':
     'TREK səyahətlərinizdə öz yerini qazanıbsa, mənə qəhvə alın və növbəti buraxılışın hazırlanmasına kömək edin.',
-  'system_notice.release_notes.cta_bmc': 'Mənə qəhvə al',
   'system_notice.release_notes.cta_kofi': 'Ko-fi-da dəstəklə',
   'system_notice.pager.prev': 'Əvvəlki bildiriş',
   'system_notice.pager.next': 'Növbəti bildiriş',

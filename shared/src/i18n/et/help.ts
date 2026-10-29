@@ -4234,7 +4234,7 @@ const help: TranslationStrings = {
   'help.ctx.settings-plugins.summary':
     'Sinu isiklikud seaded administraatori paigaldatud pluginatele: võtmed ja eelistused, mida iga plugin küsib, ning logi sellest, mida pluginad sinu nimel tegid. Vaheleht on näha ainult siis, kui mõni plugin on aktiivne.',
   'help.ctx.settings-about.bullet.3':
-    'Ko-fi, „Osta mulle kohv“ ja Discordi kaudu saad TREKi toetada või selle tegijatega suhelda.',
+    'Ko-fi ja Discordi kaudu saad TREKi toetada või selle tegijatega suhelda.',
   'help.guide.language-region.step.3':
     'Määra „Kuvamisvaluuta“ või jäta „Reisi valuuta“, et näha iga reisi tema enda valuutas. Seejärel vali „Temperatuuriühik“, „Vahemaaühik“, „Ajavorming“ ja „Nädala alguspäev“.',
   'help.guide.travel-map-prefs.step.3':
@@ -5906,7 +5906,7 @@ const help: TranslationStrings = {
   'help.guide.plugin-settings.step.2':
     '„Pluginate tegevus“ loetleb kõik toimingud, mida pluginad sinu nimel tegid, uusimad eespool; „Värskenda“ laadib viimased.',
   'help.ctx.admin-github.bullet.3':
-    '„Teave“: Ko-fi, „Osta mulle kohv“, Discord, „Teata veast“, „Funktsioonisoov“ ja Wiki.',
+    '„Teave“: Ko-fi, Discord, „Teata veast“, „Funktsioonisoov“ ja Wiki.',
   'help.guide.default-user-settings.goal':
     'Anna igale kontole mõistlikud ühikud, värvirežiim ja valuuta, ilma et keegi peaks seadeid avama.',
   'help.guide.default-map.step.3':
