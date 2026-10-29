@@ -88,7 +88,15 @@ export default function MPlaceSheet({ planner, shell }: MTripSheetsProps) {
     return rows
   }, [place, planner.days, planner.assignments])
 
-  const unassignedDays = planner.days.filter(d => !placeAssignments.some(r => r.day.id === d.id))
+  // Days the place is not on, plus days it is already on as an ordinary visit
+  // so it can be added again. A tour cannot be on a day twice (the server
+  // refuses it). A lodging booking's stop is not offered either.
+  const offerDays = planner.days.filter(d => {
+    const rows = (planner.assignments[String(d.id)] || []).filter(a => a.place?.id === place?.id)
+    if (rows.some(a => a.accommodation_id != null)) return false
+    if (isTourPlace) return rows.length === 0
+    return true
+  })
 
   // Participants belong to the assignment in the selected day (desktop parity).
   const dayAssignments = planner.selectedDayId ? (planner.assignments[String(planner.selectedDayId)] || []) : []
@@ -344,7 +352,7 @@ export default function MPlaceSheet({ planner, shell }: MTripSheetsProps) {
                   )}
                 </span>
               ))}
-              {canEditDays && unassignedDays.length > 0 && (
+              {canEditDays && offerDays.length > 0 && (
                 <button
                   type="button"
                   onClick={() => setDayPickerOpen(v => !v)}
@@ -358,15 +366,20 @@ export default function MPlaceSheet({ planner, shell }: MTripSheetsProps) {
             </div>
             {dayPickerOpen && (
               <div className="mt-[6px] max-h-[180px] overflow-y-auto rounded-[14px] border border-[color:var(--m-rowbr)] bg-[color:var(--m-sheetop)] p-[6px]">
-                {unassignedDays.map(d => (
+                {offerDays.map(d => {
+                  const times = (planner.assignments[String(d.id)] || []).filter(a => a.place?.id === place?.id && a.accommodation_id == null).length
+                  return (
                   <button
                     key={d.id}
                     type="button"
-                    onClick={() => { planner.handleAssignToDay(place.id, d.id); setDayPickerOpen(false) }}
+                    onClick={() => { if (place) planner.handleAssignToDay(place.id, d.id); setDayPickerOpen(false) }}
                     className="flex w-full items-center gap-2 rounded-[10px] px-[10px] py-[9px] text-start text-[0.78125rem] font-semibold"
                   >
                     <span className="min-w-0 flex-1 truncate">
                       {d.title || t('planner.dayN', { n: (d.day_number ?? planner.days.indexOf(d) + 1) || '?' })}
+                      {times > 0 && (
+                        <span className="ms-1.5 font-bold text-m-faint" aria-label={t('inspector.onThisDay', { count: times })}>×{times}</span>
+                      )}
                     </span>
                     {d.date && (
                       <span className="flex-none font-geist text-[0.65625rem] text-m-faint">
@@ -374,7 +387,8 @@ export default function MPlaceSheet({ planner, shell }: MTripSheetsProps) {
                       </span>
                     )}
                   </button>
-                ))}
+                  )
+                })}
               </div>
             )}
 

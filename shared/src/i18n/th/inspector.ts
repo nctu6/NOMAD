@@ -10,6 +10,8 @@ const inspector: TranslationStrings = {
   'inspector.remove': 'ลบ',
   'inspector.removeFromDay': 'ลบออกจากวัน',
   'inspector.addToDay': 'เพิ่มไปยังวัน',
+  'inspector.addAgain': 'เพิ่มอีกครั้ง',
+  'inspector.onThisDay': 'ในวันนี้ {count} แห่ง',
   'inspector.confirmedRes': 'ยืนยันการจองแล้ว',
   'inspector.pendingRes': 'อยู่ระหว่างดำเนินการจอง',
   'inspector.google': 'Google แผนที่',

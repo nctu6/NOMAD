@@ -23,6 +23,7 @@ import type { MenuEntry } from './planParts'
 import { useListImport, type ListImportProvider } from './useListImport'
 import { usePlacesPool, type PlacesFilter } from './usePlacesPool'
 import { usePlacesColumnFileImport } from './usePlacesColumnFileImport'
+import { dayPlaceCounts } from './dayPlaceCounts'
 
 /** Stable identity — a fresh [] default would invalidate the planned memo on every render. */
 const NO_ACCOMMODATIONS: PlannedAccommodation[] = []
@@ -263,6 +264,14 @@ export function usePlacesSidebar(props: PlacesSidebarProps) {
     return ids
   }, [assignments, storedDayAssignments, selectedDayId])
 
+  // Ordinary visits can be added again (a cafe twice in one day). A place a
+  // booking already holds cannot: that second row is the duplicate the night
+  // exists to prevent. The store is read as well as the list, same as inDaySet.
+  const dayStats = useMemo(() => {
+    if (!selectedDayId) return dayPlaceCounts([])
+    return dayPlaceCounts([...(assignments[String(selectedDayId)] || []), ...(storedDayAssignments ?? [])])
+  }, [assignments, storedDayAssignments, selectedDayId])
+
   const isAssignedToSelectedDay = (placeId) => inDaySet.has(placeId)
 
   /**
@@ -274,7 +283,7 @@ export function usePlacesSidebar(props: PlacesSidebarProps) {
     const website = safeHttpUrl(place.website)
     const entries: Array<MenuEntry | false> = [
       canEditPlaces && { label: t('common.edit'), icon: Pencil, onClick: () => onEditPlace(place) },
-      !!dayId && { label: t('planner.addToDay'), icon: CalendarDays, onClick: () => onAssignToDay(place.id, dayId) },
+      !!dayId && !dayStats.blocked.has(place.id) && { label: t('planner.addToDay'), icon: CalendarDays, onClick: () => onAssignToDay(place.id, dayId) },
       !!website && { label: t('inspector.website'), icon: ExternalLink, onClick: () => window.open(website, '_blank', 'noopener,noreferrer') },
       !!googleMapsUrl && { label: t('inspector.google'), icon: Navigation, onClick: () => window.open(googleMapsUrl, '_blank') },
       collectionsEnabled && { label: t('inspector.saveToCollection'), icon: Bookmark, onClick: () => useSaveToCollectionStore.getState().open(placeToSaveTarget(place)) },
@@ -283,7 +292,7 @@ export function usePlacesSidebar(props: PlacesSidebarProps) {
       canEditPlaces && { label: t('common.delete'), icon: Trash2, danger: true, onClick: () => onDeletePlace(place.id) },
     ]
     return entries.filter((entry): entry is MenuEntry => entry !== false)
-  }, [canEditPlaces, collectionsEnabled, t, onEditPlace, onAssignToDay, onDeletePlace, ai])
+  }, [canEditPlaces, collectionsEnabled, t, onEditPlace, onAssignToDay, onDeletePlace, ai, dayStats])
 
   // The day is read when the menu opens, so it stays stable across day switches.
   const openCtxMenu = ctxMenu.open
@@ -316,7 +325,7 @@ export function usePlacesSidebar(props: PlacesSidebarProps) {
     markSelectionVisited, markVisitedBusy,
     exitSelectMode, toggleSelected, toggleCategoryFilter, dayPickerPlace, setDayPickerPlace,
     mobileShowDays, setMobileShowDays,
-    hasTracks, plannedIds, plannedFilterIds, dayScoped, filtered, registerPlaceRow, isAssignedToSelectedDay, inDaySet,
+    hasTracks, plannedIds, plannedFilterIds, dayScoped, filtered, registerPlaceRow, isAssignedToSelectedDay, inDaySet, dayStats,
     openContextMenu, placeMenuItems,
   }
 }

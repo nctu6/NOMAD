@@ -16,7 +16,10 @@ interface MemoPlaceRowProps {
   category: Category | undefined
   isSelected: boolean
   isPlanned: boolean
-  inDay: boolean
+  /** Ordinary visits of this place already on the selected day. */
+  dayCount: number
+  /** A lodging booking already holds this place on the selected day. */
+  addBlocked: boolean
   isChecked: boolean
   selectMode: boolean
   selectedDayId: number | null
@@ -34,7 +37,7 @@ interface MemoPlaceRowProps {
 }
 
 export const MemoPlaceRow = React.memo(function MemoPlaceRow({
-  place, category: cat, isSelected, inDay, isChecked,
+  place, category: cat, isSelected, dayCount, addBlocked, isChecked,
   selectMode, selectedDayId, isMobile, t,
   onPlaceClick, onContextMenu, menuItems, onAssignToDay, toggleSelected, setDayPickerPlace, registerPlaceRow,
 }: MemoPlaceRowProps) {
@@ -42,7 +45,9 @@ export const MemoPlaceRow = React.memo(function MemoPlaceRow({
   const hasGeometry = Boolean(place.route_geometry)
   // Touch is reached through a long press instead of being locked out (#1616).
   const dragDisabled = isMobile
-  const showAddToDay = !selectMode && !inDay && selectedDayId !== null
+  // A place already on the day can go on it again. A booked night cannot.
+  const showAddToDay = !selectMode && selectedDayId !== null && !addBlocked
+  const addLabel = dayCount > 0 ? t('inspector.addAgain') : t('planner.addToDay')
   // Below lg a tap opens the day picker sheet, which carries the same actions.
   const showMore = !selectMode && !isMobile
   // One place for what a row does, so the keyboard path below cannot drift from the click.
@@ -136,15 +141,20 @@ export const MemoPlaceRow = React.memo(function MemoPlaceRow({
         // The row selects on click; the buttons and the menu they open act on their own.
         <div role="presentation" className="flex flex-none items-center gap-0.5" onClick={e => e.stopPropagation()}>
           {showAddToDay && (
-            <Tooltip label={t('planner.addToDay')}>
+            <Tooltip label={addLabel}>
               <button type="button"
                 onClick={() => onAssignToDay(place.id)}
-                aria-label={t('planner.addToDay')}
+                aria-label={addLabel}
                 className="grid h-[26px] w-[26px] place-items-center rounded-full bg-surface-card text-content-muted shadow-sm ring-1 ring-edge-faint transition-colors hover:bg-accent hover:text-accent-text hover:ring-transparent"
               >
                 <Plus size={13} strokeWidth={2.4} />
               </button>
             </Tooltip>
+          )}
+          {dayCount > 0 && (
+            <span className="font-bold tabular-nums text-content-faint" style={fs(10)} aria-label={t('inspector.onThisDay', { count: dayCount })}>
+              ×{dayCount}
+            </span>
           )}
           {showMore && <MoreButton label={t('files.menu')} items={menuItems(place, selectedDayId)} />}
         </div>

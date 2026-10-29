@@ -10,6 +10,8 @@ const inspector: TranslationStrings = {
   'inspector.remove': 'Di dời',
   'inspector.removeFromDay': 'Xóa khỏi ngày',
   'inspector.addToDay': 'Thêm vào ngày',
+  'inspector.addAgain': 'Thêm lại',
+  'inspector.onThisDay': '{count} trong ngày này',
   'inspector.confirmedRes': 'Đã xác nhận đặt chỗ',
   'inspector.pendingRes': 'Đang chờ đặt chỗ',
   'inspector.google': 'Google Maps',

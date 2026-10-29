@@ -108,6 +108,15 @@ export const AMAP_SATELLITE = 'https://webst01.is.autonavi.com/appmaptile?style=
 export const AMAP_ATTRIBUTION = '&copy; <a href="https://amap.com">高德地图</a>'
 
 /**
+ * Google road tiles, the basemap the older googlemap branch offered as a map
+ * setting. Leaflet draws them like any other raster template. This is not the
+ * Maps JavaScript API and it does not need a Places key; the name stays
+ * "Google Maps" because that is the name on the tiles.
+ */
+export const GOOGLE_ROAD = 'https://mt1.google.com/vt/lyrs=m&x={x}&y={y}&z={z}'
+export const GOOGLE_ATTRIBUTION = '&copy; <a href="https://www.google.com/maps">Google</a>'
+
+/**
  * Attribution for whatever basemap a map ended up with. OpenFreeMap asks for a
  * credit of its own, and printing OpenStreetMap alone under its tiles is both
  * wrong and a licence problem, so the URL decides rather than a flag at the
@@ -118,6 +127,7 @@ export function attributionForTile(url: string | null | undefined): string {
   if (url.includes('openfreemap.org')) return OFM_ATTRIBUTION
   if (url.includes('arcgisonline.com')) return SATELLITE_TILE_ATTRIBUTION
   if (url.includes('autonavi.com')) return AMAP_ATTRIBUTION
+  if (url.includes('google.com')) return GOOGLE_ATTRIBUTION
   return OSM_ATTRIBUTION
 }
 

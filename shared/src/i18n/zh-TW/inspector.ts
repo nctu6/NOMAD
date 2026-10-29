@@ -10,6 +10,8 @@ const inspector: TranslationStrings = {
   'inspector.removeFromDay': '從當天移除',
   'inspector.remove': '刪除',
   'inspector.addToDay': '新增到當天',
+  'inspector.addAgain': '再次加入',
+  'inspector.onThisDay': '當天 {count} 次',
   'inspector.confirmedRes': '已確認預訂',
   'inspector.pendingRes': '待確認預訂',
   'inspector.google': 'Google Maps',

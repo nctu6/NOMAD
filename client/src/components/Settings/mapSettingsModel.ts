@@ -1,4 +1,4 @@
-import { AMAP_ROAD, AMAP_SATELLITE } from '../../constants/mapDefaults';
+import { AMAP_ROAD, AMAP_SATELLITE, GOOGLE_ROAD } from '../../constants/mapDefaults';
 import type { Place } from '../../types';
 import {
   MAPBOX_DEFAULT_STYLE,
@@ -39,6 +39,9 @@ export const MAP_PRESETS: MapPreset[] = [
   // basemap here that is genuinely good inside mainland China.
   { name: '高德地图 (Amap)', url: AMAP_ROAD },
   { name: '高德卫星 (Amap Satellite)', url: AMAP_SATELLITE },
+  // Last, so the presets already offered stay in the order people know.
+  // "Google Maps" is the product name and is not translated.
+  { name: 'Google Maps', url: GOOGLE_ROAD },
 ];
 
 export type MapProvider = 'leaflet' | GlMapProvider;

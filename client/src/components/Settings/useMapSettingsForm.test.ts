@@ -3,7 +3,7 @@ import { act, renderHook } from '@testing-library/react';
 
 import { buildSettings } from '../../../tests/helpers/factories';
 import { resetAllStores, seedStore } from '../../../tests/helpers/store';
-import { AMAP_ROAD, AMAP_SATELLITE } from '../../constants/mapDefaults';
+import { AMAP_ROAD, AMAP_SATELLITE, GOOGLE_ROAD } from '../../constants/mapDefaults';
 import { useAuthStore } from '../../store/authStore';
 import { useSettingsStore } from '../../store/settingsStore';
 import type { Settings } from '../../types';
@@ -31,8 +31,9 @@ beforeEach(() => {
 
 describe('mapSettingsModel', () => {
   it('FE-COMP-MAPFORM-001: one preset list, the two Amap presets included, serves users and the admin defaults', () => {
-    expect(MAP_PRESETS).toHaveLength(9);
-    expect(MAP_PRESETS.map((p) => p.url)).toEqual(expect.arrayContaining([AMAP_ROAD, AMAP_SATELLITE]));
+    expect(MAP_PRESETS).toHaveLength(10);
+    expect(MAP_PRESETS.map((p) => p.url)).toEqual(expect.arrayContaining([AMAP_ROAD, AMAP_SATELLITE, GOOGLE_ROAD]));
+    expect(MAP_PRESETS.at(-1)).toEqual({ name: 'Google Maps', url: GOOGLE_ROAD });
   });
 
   it('FE-COMP-MAPFORM-002: provider and style rules', () => {

@@ -6,6 +6,8 @@ import {
   OPENTOPOMAP_TILE_MAXZOOM,
   OPENTOPOMAP_TILE_URL,
   attributionForTile,
+  GOOGLE_ATTRIBUTION,
+  GOOGLE_ROAD,
   OFM_ATTRIBUTION,
 } from '../constants/mapDefaults'
 
@@ -74,6 +76,8 @@ describe('attributionForTile', () => {
     expect(attributionForTile(OFM_POSITRON)).toContain('OpenMapTiles')
     expect(attributionForTile(CUSTOM)).toMatch(/OpenStreetMap/)
     expect(attributionForTile(null)).toMatch(/OpenStreetMap/)
+    expect(attributionForTile(GOOGLE_ROAD)).toBe(GOOGLE_ATTRIBUTION)
+    expect(attributionForTile(GOOGLE_ROAD)).toContain('Google')
   })
 
   it('FE-UTIL-BASEMAP-010: OpenTopoMap carries its required data and style credits', () => {

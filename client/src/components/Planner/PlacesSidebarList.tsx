@@ -18,7 +18,7 @@ export function PlacesList({ header, ...S }: SidebarState & {
 }) {
   const {
     filtered, scrollContainerRef, onScrollTopChange, filter, t, canEditPlaces, onAddPlace,
-    categories, selectedPlaceId, plannedIds, inDaySet, selectedIds, selectMode, selectedDayId,
+    categories, selectedPlaceId, plannedIds, dayStats, selectedIds, selectMode, selectedDayId,
     isMobile, onPlaceClick, openContextMenu, placeMenuItems, onAssignToDay, toggleSelected, setDayPickerPlace, registerPlaceRow, tripId,
   } = S
   // Plugin-contributed columns/actions for the places view, keyed by place id (#plugins).
@@ -58,7 +58,8 @@ export function PlacesList({ header, ...S }: SidebarState & {
                 category={cat}
                 isSelected={place.id === selectedPlaceId}
                 isPlanned={plannedIds.has(place.id)}
-                inDay={inDaySet.has(place.id)}
+                dayCount={dayStats.blocked.has(place.id) ? 0 : (dayStats.counts.get(place.id) ?? 0)}
+                addBlocked={dayStats.blocked.has(place.id)}
                 isChecked={selectedIds.has(place.id)}
                 selectMode={selectMode}
                 selectedDayId={selectedDayId}
