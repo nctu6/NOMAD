@@ -3970,7 +3970,7 @@ const help: TranslationStrings = {
   'help.ctx.settings-plugins.summary':
     '관리자가 설치한 플러그인에 대한 내 설정이에요. 플러그인마다 요청하는 키와 환경설정, 플러그인이 나 대신 한 작업의 기록이 있어요. 이 탭은 활성화된 플러그인이 있을 때만 보여요.',
   'help.ctx.settings-about.bullet.3':
-    'Ko-fi, Buy Me a Coffee, Discord에서 TREK를 후원하거나 만드는 사람들과 이야기할 수 있어요.',
+    'Ko-fi, Discord에서 TREK를 후원하거나 만드는 사람들과 이야기할 수 있어요.',
   'help.guide.language-region.step.3':
     '‘표시 통화’를 정하거나, 여행마다 그 여행의 통화로 보려면 ‘여행 통화’를 그대로 두세요. 그다음 ‘온도 단위’, ‘거리 단위’, ‘시간 형식’, ‘주 시작 요일’을 고르세요.',
   'help.guide.travel-map-prefs.step.3':
@@ -5524,7 +5524,7 @@ const help: TranslationStrings = {
     '키를 Authorization: Bearer 또는 X-API-Key로 /api/v1에 보내세요. 계정당 키는 10개까지 만들 수 있어요.',
   'help.guide.plugin-settings.step.2':
     '‘플러그인 활동’에는 플러그인이 나 대신 한 모든 작업이 최신순으로 나와요. ‘새로 고침’으로 최신 내용을 불러와요.',
-  'help.ctx.admin-github.bullet.3': '‘정보’: Ko-fi, Buy Me a Coffee, Discord, ‘버그 신고’, ‘기능 요청’, 위키.',
+  'help.ctx.admin-github.bullet.3': '‘정보’: Ko-fi, Discord, ‘버그 신고’, ‘기능 요청’, 위키.',
   'help.guide.default-user-settings.goal':
     '아무도 ‘설정’을 열지 않아도 모든 계정에 알맞은 단위, 색상 모드, 통화를 정해 줘요.',
   'help.guide.default-map.step.3':

@@ -17,7 +17,6 @@ const system_notice: TranslationStrings = {
   'system_notice.thank_you_support.highlight_opensource': '在 GitHub 上 100% 開源',
   'system_notice.thank_you_support.highlight_free': '永遠免費 — 絕無任何付費方案',
   'system_notice.thank_you_support.highlight_community': '與社群一起攜手打造',
-  'system_notice.thank_you_support.cta_bmc': 'Buy Me a Coffee',
   'system_notice.thank_you_support.cta_kofi': '在 Ko-fi 上支持我',
   'system_notice.pager.prev': '上一則通知',
   'system_notice.pager.next': '下一則通知',
@@ -49,7 +48,7 @@ const system_notice: TranslationStrings = {
   'system_notice.v3_mcp.highlight_tools': '擴展工具集與提示詞',
   'system_notice.v3_thankyou.title': '來自我的一封私人信',
   'system_notice.v3_thankyou.body':
-    '在你繼續之前——我想停下來說幾句。\n\nTREK 最初只是我為自己的旅行而做的一個業餘專案。我從未想過它會成長為 4,000 人信賴的冒險規劃工具。每一顆星標、每一個 issue、每一個功能請求——我都會讀，它們在全職工作和大學學業之間的深夜裡支撐著我繼續前行。\n\n我想讓你們知道：TREK 將永遠開源，永遠可自託管，永遠屬於你們。沒有追蹤，沒有訂閱，沒有任何附加條件。只是一個熱愛旅行的人為同樣熱愛旅行的你們打造的工具。\n\n特別感謝 [jubnl](https://github.com/jubnl)——你已經成為一位不可思議的合作者。3.0 版本中許多精彩之處都留下了你的印記。感謝你在這個專案還很粗糙的時候就選擇了相信它。\n\n也感謝你們每一位——回報了 bug、翻譯了文字、向朋友分享了 TREK，或者只是用它規劃了一次旅行——**謝謝你們**。你們是這一切存在的原因。\n\n願我們一起踏上更多的冒險旅程。\n\n— Maurice\n\n---\n\n[加入 Discord 社群](https://discord.gg/7Q6M6jDwzf)\n\n如果 TREK 讓你的旅行更美好，一杯[小小的咖啡](https://ko-fi.com/mauriceboe)能讓這盞燈一直亮著。',
+    '在你繼續之前——我想停下來說幾句。\n\nTREK 最初只是我為自己的旅行而做的一個業餘專案。我從未想過它會成長為 4,000 人信賴的冒險規劃工具。每一顆星標、每一個 issue、每一個功能請求——我都會讀，它們在全職工作和大學學業之間的深夜裡支撐著我繼續前行。\n\n我想讓你們知道：TREK 將永遠開源，永遠可自託管，永遠屬於你們。沒有追蹤，沒有訂閱，沒有任何附加條件。只是一個熱愛旅行的人為同樣熱愛旅行的你們打造的工具。\n\n特別感謝 [jubnl](https://github.com/jubnl)——你已經成為一位不可思議的合作者。3.0 版本中許多精彩之處都留下了你的印記。感謝你在這個專案還很粗糙的時候就選擇了相信它。\n\n也感謝你們每一位——回報了 bug、翻譯了文字、向朋友分享了 TREK，或者只是用它規劃了一次旅行——**謝謝你們**。你們是這一切存在的原因。\n\n願我們一起踏上更多的冒險旅程。\n\n— Maurice\n\n---\n\n[加入 Discord 社群](https://discord.gg/7Q6M6jDwzf)\n\n如果 TREK 讓你的旅行更美好，一杯[小小的咖啡](https://ko-fi.com/0x6ai)能讓這盞燈一直亮著。',
   'system_notice.v3014_whitespace_collision.title': '需要操作：使用者帳戶衝突',
   'system_notice.v3014_whitespace_collision.body':
     '3.0.14 版本升級偵測到一個或多個由儲存帳戶中前後空白字元引發的使用者名稱或電子郵件衝突。受影響的帳戶已自動重新命名。請檢查伺服器日誌中以 **[migration] WHITESPACE COLLISION** 開頭的行，以確認哪些帳戶需要審查。',
@@ -88,7 +87,6 @@ const system_notice: TranslationStrings = {
   'system_notice.release_notes.support_lead': 'TREK 現在免費，以後也永遠免費，但伺服器、網域和無數個深夜可不是免費的。',
   'system_notice.release_notes.support_text':
     '如果它已經在你的旅行中佔有一席之地，請我喝杯咖啡，幫我把下一個版本繼續做出來吧。',
-  'system_notice.release_notes.cta_bmc': 'Buy me a coffee',
   'system_notice.release_notes.cta_kofi': '在 Ko-fi 上支持我',
 };
 export default system_notice;

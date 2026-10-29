@@ -27,7 +27,7 @@ const system_notice: TranslationStrings = {
   'system_notice.v3_mcp.highlight_tools': 'Rozšírená sada nástrojov a promptov',
   'system_notice.v3_thankyou.title': 'Osobné slovo odo mňa',
   'system_notice.v3_thankyou.body':
-    'Než pôjdete ďalej — chcem sa na chvíľu zastaviť.\n\nTREK začal ako vedľajší projekt, ktorý som vytvoril pre svoje vlastné cesty. Nikdy som si nepredstavoval, že vyrastie na niečo, čomu teraz 4 000 z vás dôveruje pri plánovaní svojich dobrodružstiev. Každú hviezdičku, každý issue, každú požiadavku na funkciu — všetky ich čítam a práve ony ma držia počas neskorých nocí medzi prácou na plný úväzok a univerzitou.\n\nChcem, aby ste vedeli: TREK bude vždy open source, vždy self-hosted, vždy váš. Žiadne sledovanie, žiadne predplatné, žiadne háčiky. Len nástroj vytvorený niekým, kto miluje cestovanie rovnako ako vy.\n\nOsobitné poďakovanie patrí [jubnl](https://github.com/jubnl) — stal si sa neuveriteľným spolupracovníkom. Toľko z toho, čo robí verziu 3.0 skvelou, nesie tvoj rukopis. Ďakujem, že si veril tomuto projektu, keď bol ešte len v plienkach.\n\nA každému jednému z vás, kto nahlásil chybu, preložil reťazec, zdieľal TREK s priateľom alebo ho jednoducho použil na naplánovanie cesty — **ďakujem**. Vy ste dôvod, prečo toto existuje.\n\nNa mnoho ďalších dobrodružstiev spoločne.\n\n— Maurice\n\n---\n\n[Pridaj sa ku komunite na Discorde](https://discord.gg/7Q6M6jDwzf)\n\nAk ti TREK zlepšuje cestovanie, [malá káva](https://ko-fi.com/mauriceboe) vždy pomôže udržať svetlá rozsvietené.',
+    'Než pôjdete ďalej — chcem sa na chvíľu zastaviť.\n\nTREK začal ako vedľajší projekt, ktorý som vytvoril pre svoje vlastné cesty. Nikdy som si nepredstavoval, že vyrastie na niečo, čomu teraz 4 000 z vás dôveruje pri plánovaní svojich dobrodružstiev. Každú hviezdičku, každý issue, každú požiadavku na funkciu — všetky ich čítam a práve ony ma držia počas neskorých nocí medzi prácou na plný úväzok a univerzitou.\n\nChcem, aby ste vedeli: TREK bude vždy open source, vždy self-hosted, vždy váš. Žiadne sledovanie, žiadne predplatné, žiadne háčiky. Len nástroj vytvorený niekým, kto miluje cestovanie rovnako ako vy.\n\nOsobitné poďakovanie patrí [jubnl](https://github.com/jubnl) — stal si sa neuveriteľným spolupracovníkom. Toľko z toho, čo robí verziu 3.0 skvelou, nesie tvoj rukopis. Ďakujem, že si veril tomuto projektu, keď bol ešte len v plienkach.\n\nA každému jednému z vás, kto nahlásil chybu, preložil reťazec, zdieľal TREK s priateľom alebo ho jednoducho použil na naplánovanie cesty — **ďakujem**. Vy ste dôvod, prečo toto existuje.\n\nNa mnoho ďalších dobrodružstiev spoločne.\n\n— Maurice\n\n---\n\n[Pridaj sa ku komunite na Discorde](https://discord.gg/7Q6M6jDwzf)\n\nAk ti TREK zlepšuje cestovanie, [malá káva](https://ko-fi.com/0x6ai) vždy pomôže udržať svetlá rozsvietené.',
   'system_notice.v3014_whitespace_collision.title': 'Vyžaduje sa akcia: konflikt používateľského účtu',
   'system_notice.v3014_whitespace_collision.body':
     'Aktualizácia 3.0.14 zistila jeden alebo viac konfliktov používateľského mena alebo e-mailu spôsobených medzerami na začiatku/konci uložených účtov. Dotknuté účty boli automaticky premenované. Skontrolujte protokoly servera na riadky začínajúce **[migration] WHITESPACE COLLISION**, aby ste zistili, ktoré účty vyžadujú kontrolu.',
@@ -48,7 +48,6 @@ const system_notice: TranslationStrings = {
   'system_notice.thank_you_support.highlight_opensource': '100 % open source na GitHube',
   'system_notice.thank_you_support.highlight_free': 'Navždy zadarmo — nikdy žiadne platené úrovne',
   'system_notice.thank_you_support.highlight_community': 'Tvorené spoločne s komunitou',
-  'system_notice.thank_you_support.cta_bmc': 'Kúp mi kávu',
   'system_notice.thank_you_support.cta_kofi': 'Podporiť na Ko-fi',
   // The release modal. One stable set of keys: each big release swaps the copy in place.
   'system_notice.release_notes.eyebrow': 'Aktualizácia nainštalovaná',
@@ -86,7 +85,6 @@ const system_notice: TranslationStrings = {
     'TREK je a vždy bude zadarmo, ale servery, domény a množstvo neskorých nocí nie sú.',
   'system_notice.release_notes.support_text':
     'Ak si získal miesto na vašich cestách, kúpte mi kávu a pomôžte, aby prišlo aj ďalšie vydanie.',
-  'system_notice.release_notes.cta_bmc': 'Kúp mi kávu',
   'system_notice.release_notes.cta_kofi': 'Podporiť na Ko-fi',
   'system_notice.pager.prev': 'Predchádzajúce oznámenie',
   'system_notice.pager.next': 'Ďalšie oznámenie',

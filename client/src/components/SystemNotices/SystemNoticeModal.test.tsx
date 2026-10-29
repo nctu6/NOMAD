@@ -749,22 +749,21 @@ describe('ModalRenderer', () => {
     expect(dismissSpy).not.toHaveBeenCalled();
   });
 
-  it('FE-SN-MODAL-028: Buy Me a Coffee and Ko-fi links carry their own brand mark', async () => {
+  it('FE-SN-MODAL-028: a Ko-fi link carries the Ko-fi mark and colour', async () => {
     vi.spyOn(window, 'open').mockImplementation(() => null);
     const notice = makeNotice({
       id: 'brands',
-      cta: { kind: 'link', href: 'https://buymeacoffee.com/trek', labelKey: 'Buy me a coffee' },
-      secondaryCta: { kind: 'link', href: 'https://ko-fi.com/trek', labelKey: 'Ko-fi' },
+      cta: { kind: 'link', href: 'https://ko-fi.com/0x6ai', labelKey: 'Support on Ko-fi' },
     });
     render(<ModalRenderer notices={[notice]} />);
     await flushGraceDelay();
 
     const primary = document.getElementById('notice-cta-brands') as HTMLElement;
-    const secondary = document.getElementById('notice-cta2-brands') as HTMLElement;
 
-    expect((primary.querySelector('path') as SVGPathElement).getAttribute('d')).toContain('M20.216');
-    expect(secondary.className).toContain('bg-[#FF5E5B]');
-    expect((secondary.querySelector('path') as SVGPathElement).getAttribute('d')).toContain('M11.351');
+    expect(primary.className).toContain('bg-[#FF5E5B]');
+    expect(primary.className).not.toContain('bg-[#FFDD00]');
+    expect((primary.querySelector('path') as SVGPathElement).getAttribute('d')).toContain('M11.351');
+    expect(screen.queryByRole('button', { name: 'Buy me a coffee' })).toBeNull();
   });
 
   it('FE-SN-MODAL-029: a "kofi" link without the ko-fi.com host still resolves to the Ko-fi mark', async () => {

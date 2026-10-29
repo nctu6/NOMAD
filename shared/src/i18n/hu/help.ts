@@ -4374,7 +4374,7 @@ const help: TranslationStrings = {
   'help.ctx.settings-plugins.summary':
     'A rendszergazda által telepített pluginek saját beállításaid: a kulcsok és beállítások, amelyeket az egyes pluginek kérnek tőled, valamint egy napló arról, mit végeztek a pluginek a nevedben. A fül csak akkor látszik, ha van aktív plugin.',
   'help.ctx.settings-about.bullet.3':
-    'A Ko-fi, a Buy Me a Coffee és a Discord oldalán támogathatod a TREK-et, vagy beszélgethetsz a fejlesztőkkel.',
+    'A Ko-fi és a Discord oldalán támogathatod a TREK-et, vagy beszélgethetsz a fejlesztőkkel.',
   'help.guide.language-region.step.3':
     'Állítsd be a „Megjelenítési pénznem” értékét, vagy hagyd „Az utazás pénzneme” beállításon, hogy minden utazást a saját pénznemében láss. Ezután válaszd ki a „Hőmérséklet egység”, a „Távolság egység” és az „Időformátum” értékét, valamint azt, melyik nappal kezdődjön a hét („A hét kezdőnapja”).',
   'help.guide.travel-map-prefs.step.3':
@@ -6108,7 +6108,7 @@ const help: TranslationStrings = {
   'help.guide.plugin-settings.step.2':
     'A „Bővítmény-tevékenység” felsorolja a pluginek által a nevedben végzett összes műveletet, a legújabbal kezdve; a „Frissítés” betölti a legfrissebbeket.',
   'help.ctx.admin-github.bullet.3':
-    '„Névjegy”: Ko-fi, Buy Me a Coffee, Discord, „Hiba bejelentése”, „Funkció javaslat” és a Wiki.',
+    '„Névjegy”: Ko-fi, Discord, „Hiba bejelentése”, „Funkció javaslat” és a Wiki.',
   'help.guide.default-user-settings.goal':
     'Minden fiók kapjon ésszerű mértékegységeket, színmódot és pénznemet anélkül, hogy bárkinek meg kellene nyitnia a Beállításokat.',
   'help.guide.default-map.step.3':

@@ -136,17 +136,10 @@ export default function GitHubPanel({ isPrerelease = false }: { isPrerelease?: b
 
   const supportLinks: SupportLink[] = [
     {
-      href: 'https://ko-fi.com/mauriceboe',
+      href: 'https://ko-fi.com/0x6ai',
       brand: '#ff5e5b', // theme-lint-disable: Ko-fi brand colour
       icon: Coffee,
       title: 'Ko-fi',
-      hint: t('admin.github.support'),
-    },
-    {
-      href: 'https://buymeacoffee.com/mauriceboe',
-      brand: '#e0b400', // theme-lint-disable: Buy Me a Coffee brand yellow, deepened so it reads on white
-      icon: Heart,
-      title: 'Buy Me a Coffee',
       hint: t('admin.github.support'),
     },
     {
@@ -310,7 +303,7 @@ export default function GitHubPanel({ isPrerelease = false }: { isPrerelease?: b
 
   return (
     <div className="flex flex-col">
-      {/* Support links: one card, the six places as tiles inside it */}
+      {/* Support links: one card, the places as tiles inside it */}
       <SettingsCard icon={Heart} title={t('settings.about')}>
         <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
           {supportLinks.map((link) => <SupportCard key={link.href} link={link} />)}

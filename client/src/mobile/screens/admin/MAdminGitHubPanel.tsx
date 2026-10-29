@@ -1,5 +1,5 @@
 import { type ReactNode } from 'react'
-import { Tag, Calendar, ExternalLink, ChevronDown, ChevronUp, Loader2, Heart, Coffee, Bug, Lightbulb, BookOpen } from 'lucide-react'
+import { Tag, Calendar, ExternalLink, ChevronDown, ChevronUp, Loader2, Coffee, Bug, Lightbulb, BookOpen } from 'lucide-react'
 import { useTranslation } from '../../../i18n'
 import { useGithubReleases } from '../../../components/Admin/useGithubReleases'
 import { escapeReleaseHtml as escapeHtml, parseReleaseNotes } from '../../../utils/releaseNotes'
@@ -117,8 +117,7 @@ export default function MAdminGitHubPanel({ isPrerelease = false }: { isPrerelea
   )
 
   const cards: LinkCard[] = [
-    { href: 'https://ko-fi.com/mauriceboe', color: '#ff5e5b', icon: <Coffee size={18} className="text-[#ff5e5b]" />, title: 'Ko-fi', sub: t('admin.github.support') },
-    { href: 'https://buymeacoffee.com/mauriceboe', color: '#ffdd00', icon: <Heart size={18} className="text-[#ffdd00]" />, title: 'Buy Me a Coffee', sub: t('admin.github.support') },
+    { href: 'https://ko-fi.com/0x6ai', color: '#ff5e5b', icon: <Coffee size={18} className="text-[#ff5e5b]" />, title: 'Ko-fi', sub: t('admin.github.support') },
     { href: 'https://discord.gg/NhZBDSd4qW', color: '#5865F2', icon: discordIcon, title: 'Discord', sub: 'Join the community' },
     { href: 'https://github.com/liketrek/TREK/issues/new?template=bug_report.yml', color: '#ef4444', icon: <Bug size={18} className="text-[#ef4444]" />, title: t('settings.about.reportBug'), sub: t('settings.about.reportBugHint') },
     { href: 'https://github.com/liketrek/TREK/discussions/new?category=feature-requests', color: '#f59e0b', icon: <Lightbulb size={18} className="text-[#f59e0b]" />, title: t('settings.about.featureRequest'), sub: t('settings.about.featureRequestHint') },

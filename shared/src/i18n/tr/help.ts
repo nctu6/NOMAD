@@ -4274,7 +4274,7 @@ const help: TranslationStrings = {
   'help.ctx.settings-plugins.summary':
     'Yöneticinin kurduğu eklentilere ait kendi ayarlarınız: her eklentinin sizden istediği anahtarlar ve tercihler, bir de eklentilerin adınıza yaptıklarının kaydı. Sekme yalnızca bir eklenti etkinken görünür.',
   'help.ctx.settings-about.bullet.3':
-    "Ko-fi, Buy Me a Coffee ve Discord, TREK'i desteklemek ya da onu geliştiren insanlarla konuşmak için başvurabileceğiniz yerlerdir.",
+    "Ko-fi ve Discord, TREK'i desteklemek ya da onu geliştiren insanlarla konuşmak için başvurabileceğiniz yerlerdir.",
   'help.guide.language-region.step.3':
     "Görüntüleme para birimi'ni ayarlayın ya da her seyahati kendi para biriminde görmek için Gezi para birimi'ni olduğu gibi bırakın. Sonra Sıcaklık Birimi, Mesafe Birimi, Saat Biçimi ve Hafta başlangıcı gününü seçin.",
   'help.guide.travel-map-prefs.step.3':
@@ -5974,7 +5974,7 @@ const help: TranslationStrings = {
   'help.guide.plugin-settings.step.2':
     '“Eklenti etkinliği”, bir eklentinin senin adına yaptığı tüm işlemleri en yenisi başta olacak şekilde listeler. “Yenile” en son işlemleri yükler.',
   'help.ctx.admin-github.bullet.3':
-    'Hakkında: Ko-fi, Buy Me a Coffee, Discord, “Hata Bildir”, “Özellik İsteği” ve Wiki.',
+    'Hakkında: Ko-fi, Discord, “Hata Bildir”, “Özellik İsteği” ve Wiki.',
   'help.guide.default-user-settings.goal':
     'Kimse “Ayarlar”ı açmadan her hesaba uygun birimleri, renk modunu ve para birimini ver.',
   'help.guide.default-map.step.3':

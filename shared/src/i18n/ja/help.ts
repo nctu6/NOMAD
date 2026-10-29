@@ -4165,7 +4165,7 @@ const help: TranslationStrings = {
   'help.ctx.settings-plugins.summary':
     '管理者がインストールしたプラグインの個人設定です。各プラグインが求めるキーや設定と、プラグインがあなたに代わって行った操作の記録があります。このタブは、プラグインが有効なときだけ表示されます。',
   'help.ctx.settings-about.bullet.3':
-    'Ko-fi、Buy Me a Coffee、Discordから、TREKを支援したり、開発者と話したりできます。',
+    'Ko-fi、Discordから、TREKを支援したり、開発者と話したりできます。',
   'help.guide.language-region.step.3':
     '「表示通貨」を設定します。旅行ごとにその旅行の通貨で見たい場合は「旅行の通貨」のままにします。続けて「温度単位」「距離単位」「時刻形式」と、「週の開始」の曜日を選びます。',
   'help.guide.travel-map-prefs.step.3':
@@ -5814,7 +5814,7 @@ const help: TranslationStrings = {
   'help.guide.plugin-settings.step.2':
     '「プラグインのアクティビティ」には、プラグインがあなたに代わって行った操作が新しい順にすべて表示されます。「更新」で最新の状態を読み込みます。',
   'help.ctx.admin-github.bullet.3':
-    '「情報」：Ko-fi、Buy Me a Coffee、Discord、「不具合報告」「機能リクエスト」、Wikiがあります。',
+    '「情報」：Ko-fi、Discord、「不具合報告」「機能リクエスト」、Wikiがあります。',
   'help.guide.default-user-settings.goal':
     '誰も「設定」を開かなくても、すべてのアカウントで適切な単位、カラーモード、通貨が使われるようにします。',
   'help.guide.default-map.step.3':

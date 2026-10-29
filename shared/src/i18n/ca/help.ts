@@ -4353,7 +4353,7 @@ const help: TranslationStrings = {
   'help.ctx.settings-plugins.summary':
     "La teva configuració dels connectors que ha instal·lat l'administrador: les claus i preferències que et demana cada connector, i un registre del que han fet els connectors en nom teu. La pestanya només apareix mentre hi ha algun connector actiu.",
   'help.ctx.settings-about.bullet.3':
-    'A Ko-fi, Buy Me a Coffee i Discord pots donar suport a TREK o parlar amb la gent que el fa.',
+    'A Ko-fi i Discord pots donar suport a TREK o parlar amb la gent que el fa.',
   'help.guide.language-region.step.3':
     "Tria la «Divisa de visualització», o deixa «Divisa del viatge» per veure cada viatge en la seva divisa. Després tria «Unitat de temperatura», «Unitat de distància», «Format d'hora» i, a «La setmana comença el», el dia en què comença la setmana.",
   'help.guide.travel-map-prefs.step.3':
@@ -6080,7 +6080,7 @@ const help: TranslationStrings = {
   'help.guide.plugin-settings.step.2':
     '«Activitat dels connectors» mostra totes les accions que un connector ha fet en nom teu, de la més recent a la més antiga; «Actualitzar» carrega les últimes.',
   'help.ctx.admin-github.bullet.3':
-    "«Quant a»: Ko-fi, Buy Me a Coffee, Discord, «Informa d'un error», «Sol·licita una funció» i la Wiki.",
+    "«Quant a»: Ko-fi, Discord, «Informa d'un error», «Sol·licita una funció» i la Wiki.",
   'help.guide.default-user-settings.goal':
     "Dona a tots els comptes unes unitats, un mode de color i una divisa adequats sense que ningú hagi d'obrir «Configuració».",
   'help.guide.default-map.step.3':

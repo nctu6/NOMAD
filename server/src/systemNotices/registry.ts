@@ -112,13 +112,8 @@ export const SYSTEM_NOTICES: SystemNotice[] = [
     },
     cta: {
       kind: 'link',
-      labelKey: 'system_notice.release_notes.cta_bmc',
-      href: 'https://buymeacoffee.com/mauriceboe',
-    },
-    secondaryCta: {
-      kind: 'link',
       labelKey: 'system_notice.release_notes.cta_kofi',
-      href: 'https://ko-fi.com/mauriceboe',
+      href: 'https://ko-fi.com/0x6ai',
     },
     dismissible: true,
     // Desktop-only: the two-column layout has no phone form, and the phone has its
@@ -149,13 +144,8 @@ export const SYSTEM_NOTICES: SystemNotice[] = [
     ],
     cta: {
       kind: 'link',
-      labelKey: 'system_notice.thank_you_support.cta_bmc',
-      href: 'https://buymeacoffee.com/mauriceboe',
-    },
-    secondaryCta: {
-      kind: 'link',
       labelKey: 'system_notice.thank_you_support.cta_kofi',
-      href: 'https://ko-fi.com/mauriceboe',
+      href: 'https://ko-fi.com/0x6ai',
     },
     dismissible: true,
     // Desktop-only: the support modal is suppressed on small/mobile viewports.
@@ -169,7 +159,7 @@ export const SYSTEM_NOTICES: SystemNotice[] = [
     priority: 100,
     recurring: 'per-version',
     // From 4.0.0 on, the release modal carries the same thank-you and the same
-    // two support links, so this one would be the second half of a message the
+    // support link, so this one would be the second half of a message the
     // reader just read. Retired by version rather than deleted: installs still
     // on 3.x keep it.
     maxVersion: '4.0.0',

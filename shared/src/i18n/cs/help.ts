@@ -4222,7 +4222,7 @@ const help: TranslationStrings = {
   'help.ctx.settings-plugins.summary':
     'Vaše vlastní nastavení pluginů, které nainstaloval správce: klíče a předvolby, o které vás jednotlivé pluginy žádají, a záznam toho, co pluginy udělaly vaším jménem. Karta se zobrazuje jen tehdy, když je nějaký plugin aktivní.',
   'help.ctx.settings-about.bullet.3':
-    'Přes Ko-fi, Buy Me a Coffee a Discord můžete TREK podpořit nebo si promluvit s lidmi, kteří ho vyvíjejí.',
+    'Přes Ko-fi a Discord můžete TREK podpořit nebo si promluvit s lidmi, kteří ho vyvíjejí.',
   'help.guide.language-region.step.3':
     'Nastavte „Zobrazovaná měna“, nebo ponechte „Měna cesty“, aby se každá cesta zobrazovala ve své vlastní měně. Pak zvolte „Jednotky teploty“, „Jednotky vzdálenosti“, „Formát času“ a den, kterým začíná týden („Týden začíná“).',
   'help.guide.travel-map-prefs.step.3':
@@ -5905,7 +5905,7 @@ const help: TranslationStrings = {
   'help.guide.plugin-settings.step.2':
     '„Aktivita pluginů“ vypisuje každou akci, kterou plugin provedl vaším jménem, od nejnovější; „Obnovit“ načte nejnovější stav.',
   'help.ctx.admin-github.bullet.3':
-    '„O aplikaci“: Ko-fi, Buy Me a Coffee, Discord, „Nahlásit chybu“, „Navrhnout funkci“ a Wiki.',
+    '„O aplikaci“: Ko-fi, Discord, „Nahlásit chybu“, „Navrhnout funkci“ a Wiki.',
   'help.guide.default-user-settings.goal':
     'Nastavte všem účtům rozumné jednotky, barevné schéma a měnu, aniž by kdokoli musel otevírat Nastavení.',
   'help.guide.default-map.step.3':

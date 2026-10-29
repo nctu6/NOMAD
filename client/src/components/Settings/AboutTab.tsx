@@ -15,7 +15,6 @@ const DISCORD_PATH = 'M20.317 4.37a19.791 19.791 0 0 0-4.885-1.515.074.074 0 0 0
 // The services' own colours: each tile takes its brand on hover and in its icon square.
 const BRAND = {
   kofi: '#ff5e5b', // theme-lint-disable: brand colour (Ko-fi)
-  bmac: '#ffdd00', // theme-lint-disable: brand colour (Buy Me a Coffee)
   discord: '#5865F2', // theme-lint-disable: brand colour (Discord)
 } as const;
 
@@ -98,7 +97,7 @@ export default function AboutTab({ appVersion }: Props): React.ReactElement {
         </p>
       </div>
 
-      {/* Ko-fi, Buy Me a Coffee, Discord, and the issue/discussion links assume
+      {/* Ko-fi, Discord, and the issue/discussion links assume
           the reader runs this install and can act on it. On a centrally
           administered one they support somebody they are not the customer of,
           and file bugs against an instance they do not operate. The version and
@@ -108,17 +107,10 @@ export default function AboutTab({ appVersion }: Props): React.ReactElement {
       {!managed && (
         <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
           <LinkTile
-            href="https://ko-fi.com/mauriceboe"
+            href="https://ko-fi.com/0x6ai"
             color={BRAND.kofi}
             icon={<Coffee size={19} />}
             title="Ko-fi"
-            hint={t('admin.github.support')}
-          />
-          <LinkTile
-            href="https://buymeacoffee.com/mauriceboe"
-            color={BRAND.bmac}
-            icon={<Heart size={19} />}
-            title="Buy Me a Coffee"
             hint={t('admin.github.support')}
           />
           <LinkTile

@@ -17,7 +17,6 @@ const system_notice: TranslationStrings = {
   'system_notice.thank_you_support.highlight_opensource': '100% open source di GitHub',
   'system_notice.thank_you_support.highlight_free': 'Gratis selamanya — tanpa paket berbayar',
   'system_notice.thank_you_support.highlight_community': 'Dibangun bersama komunitas',
-  'system_notice.thank_you_support.cta_bmc': 'Traktir Kopi',
   'system_notice.thank_you_support.cta_kofi': 'Dukung di Ko-fi',
   'system_notice.pager.prev': 'Pemberitahuan sebelumnya',
   'system_notice.pager.next': 'Pemberitahuan berikutnya',
@@ -50,7 +49,7 @@ const system_notice: TranslationStrings = {
   'system_notice.v3_mcp.highlight_tools': 'Perangkat dan prompt yang diperluas',
   'system_notice.v3_thankyou.title': 'Catatan pribadi dari saya',
   'system_notice.v3_thankyou.body':
-    'Sebelum kamu lanjut — saya ingin berhenti sejenak.\n\nTREK dimulai sebagai proyek sampingan yang saya buat untuk perjalanan saya sendiri. Saya tidak pernah membayangkan ia akan tumbuh menjadi sesuatu yang dipercaya oleh 4.000 dari kalian untuk merencanakan petualangan. Setiap bintang, setiap issue, setiap permintaan fitur — saya membaca semuanya, dan itulah yang membuat saya terus bertahan di malam-malam larut antara pekerjaan penuh waktu dan kuliah.\n\nSaya ingin kalian tahu: TREK akan selalu open source, selalu self-hosted, selalu milik kalian. Tanpa pelacakan, tanpa langganan, tanpa syarat tersembunyi. Hanya sebuah alat yang dibuat oleh seseorang yang mencintai traveling sama seperti kalian.\n\nTerima kasih khusus untuk [jubnl](https://github.com/jubnl) — kamu telah menjadi kolaborator yang luar biasa. Begitu banyak hal yang membuat versi 3.0 hebat memiliki jejakmu. Terima kasih telah percaya pada proyek ini ketika masih kasar.\n\nDan untuk setiap dari kalian yang melaporkan bug, menerjemahkan string, membagikan TREK kepada teman, atau sekadar menggunakannya untuk merencanakan perjalanan — **terima kasih**. Kalianlah alasan semua ini ada.\n\nUntuk lebih banyak petualangan bersama.\n\n— Maurice\n\n---\n\n[Bergabunglah dengan komunitas di Discord](https://discord.gg/7Q6M6jDwzf)\n\nJika TREK membuat perjalananmu lebih baik, [secangkir kopi kecil](https://ko-fi.com/mauriceboe) selalu membantu menjaga lampu tetap menyala.',
+    'Sebelum kamu lanjut — saya ingin berhenti sejenak.\n\nTREK dimulai sebagai proyek sampingan yang saya buat untuk perjalanan saya sendiri. Saya tidak pernah membayangkan ia akan tumbuh menjadi sesuatu yang dipercaya oleh 4.000 dari kalian untuk merencanakan petualangan. Setiap bintang, setiap issue, setiap permintaan fitur — saya membaca semuanya, dan itulah yang membuat saya terus bertahan di malam-malam larut antara pekerjaan penuh waktu dan kuliah.\n\nSaya ingin kalian tahu: TREK akan selalu open source, selalu self-hosted, selalu milik kalian. Tanpa pelacakan, tanpa langganan, tanpa syarat tersembunyi. Hanya sebuah alat yang dibuat oleh seseorang yang mencintai traveling sama seperti kalian.\n\nTerima kasih khusus untuk [jubnl](https://github.com/jubnl) — kamu telah menjadi kolaborator yang luar biasa. Begitu banyak hal yang membuat versi 3.0 hebat memiliki jejakmu. Terima kasih telah percaya pada proyek ini ketika masih kasar.\n\nDan untuk setiap dari kalian yang melaporkan bug, menerjemahkan string, membagikan TREK kepada teman, atau sekadar menggunakannya untuk merencanakan perjalanan — **terima kasih**. Kalianlah alasan semua ini ada.\n\nUntuk lebih banyak petualangan bersama.\n\n— Maurice\n\n---\n\n[Bergabunglah dengan komunitas di Discord](https://discord.gg/7Q6M6jDwzf)\n\nJika TREK membuat perjalananmu lebih baik, [secangkir kopi kecil](https://ko-fi.com/0x6ai) selalu membantu menjaga lampu tetap menyala.',
   'system_notice.v3014_whitespace_collision.title': 'Tindakan diperlukan: konflik akun pengguna',
   'system_notice.v3014_whitespace_collision.body':
     'Pembaruan 3.0.14 mendeteksi satu atau lebih konflik nama pengguna atau email yang disebabkan oleh spasi di awal atau akhir nilai yang tersimpan. Akun yang terpengaruh telah diganti nama secara otomatis. Periksa log server untuk baris yang dimulai dengan **[migration] WHITESPACE COLLISION** guna mengidentifikasi akun mana yang perlu ditinjau.',
@@ -89,7 +88,6 @@ const system_notice: TranslationStrings = {
     'TREK gratis dan akan selalu begitu, tetapi server, domain, dan begitu banyak malam larut tidaklah gratis.',
   'system_notice.release_notes.support_text':
     'Jika TREK sudah mendapat tempat dalam perjalananmu, traktir saya secangkir kopi dan bantu rilis berikutnya terus hadir.',
-  'system_notice.release_notes.cta_bmc': 'Traktir aku kopi',
   'system_notice.release_notes.cta_kofi': 'Dukung di Ko-fi',
 };
 export default system_notice;

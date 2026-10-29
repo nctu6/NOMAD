@@ -4286,7 +4286,7 @@ const help: TranslationStrings = {
   'help.ctx.settings-plugins.summary':
     'Twoje własne ustawienia wtyczek zainstalowanych przez administratora: klucze i preferencje, o które prosi każda wtyczka, oraz dziennik tego, co wtyczki zrobiły w twoim imieniu. Karta jest widoczna tylko wtedy, gdy jakaś wtyczka jest aktywna.',
   'help.ctx.settings-about.bullet.3':
-    'Przez Ko-fi, Buy Me a Coffee i Discord możesz wesprzeć TREK albo porozmawiać z jego twórcami.',
+    'Przez Ko-fi i Discord możesz wesprzeć TREK albo porozmawiać z jego twórcami.',
   'help.guide.language-region.step.3':
     'Ustaw „Waluta wyświetlania” albo zostaw „Waluta wyjazdu”, żeby każda podróż była pokazywana we własnej walucie. Potem wybierz „Jednostka temperatury”, „Jednostka odległości”, „Format czasu” i dzień, od którego zaczyna się tydzień („Tydzień zaczyna się w”).',
   'help.guide.travel-map-prefs.step.3':
@@ -6004,7 +6004,7 @@ const help: TranslationStrings = {
   'help.guide.plugin-settings.step.2':
     '„Aktywność wtyczek” pokazuje wszystkie działania wykonane przez wtyczki w Twoim imieniu, od najnowszych. „Odśwież” wczytuje najnowsze.',
   'help.ctx.admin-github.bullet.3':
-    'O aplikacji: Ko-fi, Buy Me a Coffee, Discord, „Zgłoś błąd”, „Zaproponuj funkcję” i Wiki.',
+    'O aplikacji: Ko-fi, Discord, „Zgłoś błąd”, „Zaproponuj funkcję” i Wiki.',
   'help.guide.default-user-settings.goal':
     'Zapewnij każdemu kontu sensowne jednostki, motyw i walutę, bez konieczności otwierania ustawień.',
   'help.guide.default-map.step.3':

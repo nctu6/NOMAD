@@ -17,7 +17,6 @@ const system_notice: TranslationStrings = {
   'system_notice.thank_you_support.highlight_opensource': '100% open source en GitHub',
   'system_notice.thank_you_support.highlight_free': 'Gratis para siempre — nunca habrá planes de pago',
   'system_notice.thank_you_support.highlight_community': 'Construido junto a la comunidad',
-  'system_notice.thank_you_support.cta_bmc': 'Invítame a un café',
   'system_notice.thank_you_support.cta_kofi': 'Apóyame en Ko-fi',
   'system_notice.pager.prev': 'Aviso anterior',
   'system_notice.pager.next': 'Siguiente aviso',
@@ -50,7 +49,7 @@ const system_notice: TranslationStrings = {
   'system_notice.v3_mcp.highlight_tools': 'Herramientas y prompts ampliados',
   'system_notice.v3_thankyou.title': 'Una nota personal de mi parte',
   'system_notice.v3_thankyou.body':
-    'Antes de seguir — quiero tomarme un momento.\n\nTREK empezó como un proyecto personal que construí para mis propios viajes. Nunca imaginé que crecería hasta convertirse en algo en lo que 4.000 de vosotros confían para planificar sus aventuras. Cada estrella, cada issue, cada solicitud de funcionalidad — los leo todos, y son lo que me mantiene en pie durante las noches largas entre un trabajo a jornada completa y la universidad.\n\nQuiero que sepáis: TREK siempre será open source, siempre self-hosted, siempre vuestro. Sin rastreo, sin suscripciones, sin letra pequeña. Solo una herramienta hecha por alguien que ama viajar tanto como vosotros.\n\nUn agradecimiento especial a [jubnl](https://github.com/jubnl) — te has convertido en un colaborador increíble. Mucho de lo que hace grande la versión 3.0 lleva tu huella. Gracias por creer en este proyecto cuando todavía era un borrador.\n\nY a cada uno de vosotros que reportó un bug, tradujo un texto, compartió TREK con un amigo o simplemente lo usó para planificar un viaje — **gracias**. Vosotros sois la razón de que esto exista.\n\nPor muchas más aventuras juntos.\n\n— Maurice\n\n---\n\n[Únete a la comunidad en Discord](https://discord.gg/7Q6M6jDwzf)\n\nSi TREK mejora tus viajes, un [pequeño café](https://ko-fi.com/mauriceboe) siempre mantiene las luces encendidas.',
+    'Antes de seguir — quiero tomarme un momento.\n\nTREK empezó como un proyecto personal que construí para mis propios viajes. Nunca imaginé que crecería hasta convertirse en algo en lo que 4.000 de vosotros confían para planificar sus aventuras. Cada estrella, cada issue, cada solicitud de funcionalidad — los leo todos, y son lo que me mantiene en pie durante las noches largas entre un trabajo a jornada completa y la universidad.\n\nQuiero que sepáis: TREK siempre será open source, siempre self-hosted, siempre vuestro. Sin rastreo, sin suscripciones, sin letra pequeña. Solo una herramienta hecha por alguien que ama viajar tanto como vosotros.\n\nUn agradecimiento especial a [jubnl](https://github.com/jubnl) — te has convertido en un colaborador increíble. Mucho de lo que hace grande la versión 3.0 lleva tu huella. Gracias por creer en este proyecto cuando todavía era un borrador.\n\nY a cada uno de vosotros que reportó un bug, tradujo un texto, compartió TREK con un amigo o simplemente lo usó para planificar un viaje — **gracias**. Vosotros sois la razón de que esto exista.\n\nPor muchas más aventuras juntos.\n\n— Maurice\n\n---\n\n[Únete a la comunidad en Discord](https://discord.gg/7Q6M6jDwzf)\n\nSi TREK mejora tus viajes, un [pequeño café](https://ko-fi.com/0x6ai) siempre mantiene las luces encendidas.',
   'system_notice.v3014_whitespace_collision.title': 'Acción requerida: conflicto de cuenta de usuario',
   'system_notice.v3014_whitespace_collision.body':
     'La actualización 3.0.14 detectó uno o más conflictos de nombre de usuario o correo electrónico causados por espacios en blanco al inicio o al final de los valores almacenados. Las cuentas afectadas se renombraron automáticamente. Revisa los registros del servidor en busca de líneas que empiecen por **[migration] WHITESPACE COLLISION** para identificar qué cuentas necesitan revisión.',
@@ -90,7 +89,6 @@ const system_notice: TranslationStrings = {
     'TREK es gratis y siempre lo será, pero los servidores, los dominios y tantas noches en vela no lo son.',
   'system_notice.release_notes.support_text':
     'Si se ha ganado un sitio en tus viajes, invítame a un café y ayuda a que llegue la próxima versión.',
-  'system_notice.release_notes.cta_bmc': 'Invítame a un café',
   'system_notice.release_notes.cta_kofi': 'Apóyame en Ko-fi',
 };
 export default system_notice;

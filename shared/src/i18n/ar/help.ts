@@ -4030,7 +4030,7 @@ const help: TranslationStrings = {
     'إذا كتبت تدوينة في يوم من رحلة غير مربوطة بعد، يعرض عليك المحرر «ربط الرحلة» مباشرة داخل التدوينة.',
   'help.ctx.settings-plugins.summary':
     'إعداداتك الخاصة للإضافات التي ثبّتها المسؤول: المفاتيح والتفضيلات التي تطلبها منك كل إضافة، وسجلّ بما فعلته الإضافات نيابةً عنك. لا يظهر هذا التبويب إلا عند وجود إضافة نشطة.',
-  'help.ctx.settings-about.bullet.3': 'عبر Ko-fi وBuy Me a Coffee وDiscord يمكنك دعم TREK أو التحدث مع صانعيه.',
+  'help.ctx.settings-about.bullet.3': 'عبر Ko-fi وDiscord يمكنك دعم TREK أو التحدث مع صانعيه.',
   'help.guide.language-region.step.3':
     'اضبط «عملة العرض»، أو أبقِ «عملة الرحلة» لترى كل رحلة بعملتها. ثم اختر «وحدة الحرارة» و«وحدة المسافة» و«تنسيق الوقت»، واليوم الذي يبدأ به الأسبوع في «يبدأ الأسبوع في».',
   'help.guide.travel-map-prefs.step.3':
@@ -5581,7 +5581,7 @@ const help: TranslationStrings = {
     'أرسل المفتاح في Authorization: Bearer أو X-API-Key إلى /api/v1. ويمكن أن يحتوي الحساب على 10 مفاتيح كحد أقصى.',
   'help.guide.plugin-settings.step.2':
     'يسرد «نشاط الإضافات» كل إجراء نفّذته إضافة نيابةً عنك، الأحدث أولًا؛ و«تحديث» يحمّل الأحدث.',
-  'help.ctx.admin-github.bullet.3': '«حول»: Ko-fi وBuy Me a Coffee وDiscord و«الإبلاغ عن خطأ» و«اقتراح ميزة» وWiki.',
+  'help.ctx.admin-github.bullet.3': '«حول»: Ko-fi وDiscord و«الإبلاغ عن خطأ» و«اقتراح ميزة» وWiki.',
   'help.guide.default-user-settings.goal':
     'امنح كل حساب وحدات ونمط ألوان وعملة مناسبة دون أن يحتاج أحد إلى فتح «الإعدادات».',
   'help.guide.default-map.step.3':

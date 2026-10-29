@@ -22,13 +22,13 @@ describe('AboutTab', () => {
   it('FE-COMP-ABOUT-003: displays Ko-fi link with correct href', () => {
     render(<AboutTab appVersion="2.9.10" />);
     const link = screen.getByText('Ko-fi').closest('a');
-    expect(link).toHaveAttribute('href', 'https://ko-fi.com/mauriceboe');
+    expect(link).toHaveAttribute('href', 'https://ko-fi.com/0x6ai');
   });
 
-  it('FE-COMP-ABOUT-004: displays Buy Me a Coffee link with correct href', () => {
+  it('FE-COMP-ABOUT-004: does not offer a Buy Me a Coffee link', () => {
     render(<AboutTab appVersion="2.9.10" />);
-    const link = screen.getByText('Buy Me a Coffee').closest('a');
-    expect(link).toHaveAttribute('href', 'https://buymeacoffee.com/mauriceboe');
+    expect(screen.queryByText('Buy Me a Coffee')).not.toBeInTheDocument();
+    expect(document.querySelector('a[href*="buymeacoffee"]')).toBeNull();
   });
 
   it('FE-COMP-ABOUT-005: displays Discord link with correct href', () => {
@@ -60,7 +60,7 @@ describe('AboutTab', () => {
   it('FE-COMP-ABOUT-009: all external links have rel="noopener noreferrer"', () => {
     render(<AboutTab appVersion="2.9.10" />);
     const links = document.querySelectorAll('a');
-    expect(links).toHaveLength(6);
+    expect(links).toHaveLength(5);
     links.forEach((link) => {
       expect(link).toHaveAttribute('rel', 'noopener noreferrer');
     });
@@ -90,15 +90,8 @@ describe('AboutTab', () => {
   it('FE-COMP-ABOUT-012: the Ko-fi tile carries its brand colour for the hover border', () => {
     render(<AboutTab appVersion="1.0.0" />);
     const link = screen.getByText('Ko-fi').closest('a') as HTMLAnchorElement;
-    expect(link).toHaveAttribute('href', 'https://ko-fi.com/mauriceboe');
+    expect(link).toHaveAttribute('href', 'https://ko-fi.com/0x6ai');
     expect(tile(link)).toEqual({ color: '#ff5e5b', hovers: true });
-  });
-
-  it('FE-COMP-ABOUT-013: the Buy Me a Coffee tile carries its brand colour for the hover border', () => {
-    render(<AboutTab appVersion="1.0.0" />);
-    const link = screen.getByText('Buy Me a Coffee').closest('a') as HTMLAnchorElement;
-    expect(link).toHaveAttribute('href', 'https://buymeacoffee.com/mauriceboe');
-    expect(tile(link)).toEqual({ color: '#ffdd00', hovers: true });
   });
 
   it('FE-COMP-ABOUT-014: the Discord tile carries its brand colour for the hover border', () => {
