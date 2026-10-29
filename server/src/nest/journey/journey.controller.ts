@@ -1,0 +1,893 @@
+import {
+  Body,
+  Controller,
+  Delete,
+  Get,
+  Headers,
+  HttpCode,
+  HttpException,
+  Param,
+  Patch,
+  Post,
+  Put,
+  UploadedFile,
+  UploadedFiles,
+  UseGuards,
+  UseInterceptors,
+} from '@nestjs/common';
+import { FileInterceptor, FilesInterceptor, FileFieldsInterceptor } from '@nestjs/platform-express';
+import type { Options } from 'multer';
+import type { Request } from 'express';
+import path from 'node:path';
+import fs from 'node:fs';
+import crypto from 'node:crypto';
+import type { User } from '../../types';
+import { RuntimeEnvService } from '../app-config/runtime-env.service';
+import { isDemoWriteBlocked, DEMO_WRITE_ERROR } from '../common/demo-write';
+import { StorageService } from '../storage/storage.service';
+import { journeyThumbName } from '../memories/thumbnail.service';
+import { JourneyService } from './journey.service';
+import { JourneyBookService } from './journey-book.service';
+import { JourneyPhotoCaptureService, type ProviderPhotoBatch, type ProviderPhotoTarget } from './journey-photo-capture.service';
+import { JourneyPhotoLinksService } from './journey-photo-links.service';
+import { AddonGuard } from '../addons/addon.guard';
+import { RequireAddon } from '../addons/require-addon.decorator';
+import { ADDON_IDS } from '../../addons';
+import { JwtAuthGuard } from '../auth-core/jwt-auth.guard';
+import { CurrentUser } from '../auth-core/current-user.decorator';
+import {
+  JourneyAddTripDto, JourneyContributorAddDto, JourneyContributorUpdateDto, JourneyCreateDto,
+  JourneyEntryCreateDto, JourneyEntryPhotoUploadDto, JourneyEntryUpdateDto, JourneyGalleryVideoDto,
+  JourneyLinkPhotoDto, JourneyPhotosMoveDto, JourneyPhotoUpdateDto, JourneyPreferencesDto, JourneyProviderPhotosDto,
+  JourneyReorderEntriesDto,
+  JourneyReorderEntryPhotosDto, JourneyShareLinkDto, JourneyUpdateDto,
+  BookSaveDto,
+} from './journey.dto';
+import { isVideoMime, isVideoExtension, MAX_VIDEO_SIZE } from '../files/files.constants';
+import { AllowedFileTypesService } from '../files/allowed-file-types.service';
+import { logError } from '../audit/audit-log.logger';
+import { ResponseContract } from '../common/response-contract';
+import {
+  emptyResponseSchema,
+  journeyListResponseSchema,
+  journeyPhotosMoveResponseSchema,
+  journeySchema,
+  journeyShareLinkResponseSchema,
+  journeyShareLinkSetResponseSchema,
+  journeyStatsSchema,
+  journeyTracksResponseSchema,
+  successResponseSchema,
+} from '@trek/shared';
+
+/**
+ * One filename hook for all four journey upload routes (consumed by
+ * journey.module.ts's storage-upload factory). Field routing is exact: the
+ * image routes only ever admit 'photos'/'cover' fields and the video route
+ * only 'video'/'poster' — any other part dies in multer with
+ * LIMIT_UNEXPECTED_FILE before this hook runs.
+ */
+export const journeyUploadFilename = (_req: Request, file: Express.Multer.File): string => {
+  // The poster is ALWAYS stored as .jpg, never the client-supplied extension:
+  // otherwise a poster declared image/* but named x.html / x.js would land on
+  // disk with that extension and be served inline same-origin (stored XSS,
+  // reachable via the public share proxy). The video extension is validated by
+  // the fileFilter, so it is safe to keep.
+  const ext =
+    file.fieldname === 'poster' ? '.jpg'
+    : file.fieldname === 'video' ? (path.extname(file.originalname).toLowerCase() || '.mp4')
+    : (path.extname(file.originalname).toLowerCase() || '.jpg');
+  return `${crypto.randomUUID()}${ext}`;
+};
+
+/**
+ * Journey image upload filter, built from the container.
+ *
+ * Same reason as the trip-file factory: it reads the operator's
+ * allowed-extension list at request time. The module's multer options carry NO
+ * defParamCharset, unlike the trip-file ones; that difference is deliberate
+ * and predates the move.
+ */
+export function journeyImageFileFilter(allowedTypes: AllowedFileTypesService): Options['fileFilter'] {
+  return (_req, file, cb) => {
+    if (!file.mimetype.startsWith('image/') || file.mimetype.includes('svg')) {
+      const err: Error & { statusCode?: number } = new Error('Only image files are allowed');
+      err.statusCode = 400;
+      return cb(err);
+    }
+    const ext = path.extname(file.originalname).toLowerCase().replace('.', '');
+    const reject = () => {
+      const err: Error & { statusCode?: number } = new Error(`File type .${ext} is not allowed`);
+      err.statusCode = 400;
+      cb(err);
+    };
+    // R1.5: multer's fileFilter is a callback API that cannot await, and the
+    // allowed-extension list is now an async read. The decision runs in a
+    // detached async function that always answers through `cb`; a rejection
+    // refuses the file, so the filter still fails closed. Only the await is
+    // wrapped in try/catch; a throw from cb() itself lands in the trailing
+    // .catch, which logs it and answers multer one final time.
+    (async () => {
+      let allowed: string[];
+      try {
+        allowed = (await allowedTypes.get()).split(',').map((e) => e.trim().toLowerCase());
+      } catch {
+        return reject();
+      }
+      if (!allowed.includes('*') && !allowed.includes(ext)) return reject();
+      cb(null, true);
+    })().catch((err: unknown) => {
+      logError(`journey photo fileFilter: ${err instanceof Error ? err.message : String(err)}`);
+      // cb() itself is the only thing that can reach here (every await is
+      // inside the try above); answer once more so multer never hangs, but a
+      // second throw from cb() means multer already answered — swallow it.
+      try {
+        cb(err instanceof Error ? err : new Error(String(err)));
+      } catch {
+        /* multer already answered */
+      }
+    });
+  };
+}
+
+// Gallery video upload (#823): one video plus an optional client-captured poster
+// image, written to the same uploads/journey store. Larger cap than images since
+// phone clips are big; videos are stored as-is and streamed with HTTP Range.
+// Passed inline on the video route; the storage engine (spool destination +
+// journeyUploadFilename) is inherited from the module options via the
+// interceptor's shallow merge.
+const VIDEO_FILE_FILTER: Options['fileFilter'] = (_req, file, cb) => {
+  const reject = (msg: string) => {
+    const err: Error & { statusCode?: number } = new Error(msg);
+    err.statusCode = 400;
+    cb(err);
+  };
+  if (file.fieldname === 'poster') {
+    if (!file.mimetype.startsWith('image/') || file.mimetype.includes('svg')) return reject('Poster must be an image');
+    return cb(null, true);
+  }
+  // 'video' field
+  const ext = path.extname(file.originalname).toLowerCase().replace('.', '');
+  if (!isVideoMime(file.mimetype)) return reject('Only video files are allowed');
+  if (!isVideoExtension(ext)) return reject(`Video type .${ext} is not allowed`);
+  cb(null, true);
+};
+
+/**
+ * /api/journeys — cross-trip travel narrative (journeys, entries, photo gallery
+ * + provider mirroring, contributors, preferences, share links).
+ *
+ * Byte-identical to the legacy Express route (server/src/routes/journey.ts):
+ * the Journey-addon gate (404) runs before auth, the service owns access
+ * control (null/false → 403/404), create routes answer 201 while cover/trips/
+ * share-link/reorder/patch answer 200 and the two unlink/gallery-delete routes
+ * answer 204. Static prefixes (/suggestions, /available-trips, /entries, /photos)
+ * are declared before /:id so they win over the param.
+ */
+@Controller('api/journeys')
+@UseGuards(AddonGuard, JwtAuthGuard)
+@RequireAddon(ADDON_IDS.JOURNEY, 'Journey')
+export class JourneyController {
+  constructor(
+    private readonly journey: JourneyService,
+    private readonly storage: StorageService,
+    private readonly books: JourneyBookService,
+    private readonly photoCapture: JourneyPhotoCaptureService,
+    // Which entries the gallery's photos sit on, told to every tab once written.
+    private readonly photoLinks: JourneyPhotoLinksService,
+    // Whether DEMO_MODE is on, read on every upload (refuseDemoUpload).
+    private readonly env: RuntimeEnvService,
+  ) {}
+
+  /**
+   * Commit spooled multer files to their final uploads/journey location. On any
+   * failure: best-effort removal of both spool leftovers and already-committed
+   * names, then rethrow (500) — so a DB row never references a missing file.
+   */
+  private async commitJourneyUploads(files: Express.Multer.File[]): Promise<void> {
+    try {
+      for (const f of files) await this.storage.put('journey', f.filename, { tmpPath: f.path });
+    } catch (err) {
+      for (const f of files) {
+        if (f.path) { try { fs.unlinkSync(f.path); } catch { /* best-effort */ } }
+      }
+      for (const f of files) {
+        await this.storage.delete('journey', f.filename).catch(() => {});
+      }
+      throw err;
+    }
+  }
+
+  /**
+   * Drop uploads that were committed before the authorization result was known.
+   *
+   * The commit has to happen first (the Immich mirror reads the final path), so
+   * every refusal after it has to take the bytes back out. Nothing sweeps
+   * orphans, and a loop of rejected POSTs would otherwise just fill the disk.
+   * A demo instance keeps them all the same (StorageService.delete).
+   */
+  private async discardJourneyUploads(files: Express.Multer.File[]): Promise<void> {
+    for (const f of files) {
+      if (f.path) { try { fs.unlinkSync(f.path); } catch { /* best-effort */ } }
+      await this.storage.delete('journey', f.filename).catch(() => {});
+    }
+  }
+
+  /**
+   * Refuse the shared demo account's upload in demo mode, with the 403 the
+   * other upload routes answer (common/demo-write.ts). Called in the handler,
+   * once multer has drained the body, so the 403 arrives instead of an
+   * ECONNRESET. It runs before the commit: the spooled parts are all there is
+   * to take back, and a committed object would stay, since a demo instance
+   * keeps what is deleted (StorageService.delete).
+   */
+  private refuseDemoUpload(user: User, files: ReadonlyArray<Express.Multer.File | undefined>): void {
+    if (!isDemoWriteBlocked(this.env, user.email)) return;
+    for (const f of files) {
+      if (f?.path) { try { fs.unlinkSync(f.path); } catch { /* best-effort */ } }
+    }
+    throw new HttpException(DEMO_WRITE_ERROR, 403);
+  }
+
+  // ── Static prefix routes (before /:id) ──────────────────────────────────
+  @Get()
+  @ResponseContract(journeyListResponseSchema)
+  async list(@CurrentUser() user: User) {
+    return { journeys: await this.journey.listJourneys(user.id) };
+  }
+
+  @Post()
+  @ResponseContract(journeySchema)
+  create(@CurrentUser() user: User, @Body() body: JourneyCreateDto, @Headers('x-socket-id') socketId?: string) {
+    if (!body.title || typeof body.title !== 'string' || !body.title.trim()) {
+      throw new HttpException({ error: 'Title is required' }, 400);
+    }
+    return this.journey.createJourney(user.id, {
+      // The guard three lines up proved both of these; the schema stays
+      // permissive so that guard keeps answering, not the pipe.
+      title: (body.title as string).trim(),
+      subtitle: body.subtitle as string | undefined,
+      trip_ids: Array.isArray(body.trip_ids) ? body.trip_ids.map(Number) : [],
+    }, socketId);
+  }
+
+  @Get('suggestions')
+  async suggestions(@CurrentUser() user: User) {
+    return { trips: await this.journey.getSuggestions(user.id) };
+  }
+
+  @Get('available-trips')
+  async availableTrips(@CurrentUser() user: User) {
+    return { trips: await this.journey.listUserTrips(user.id) };
+  }
+
+  // ── Entries (prefix /entries — before /:id) ─────────────────────────────
+  @Patch('entries/:entryId')
+  async updateEntry(@CurrentUser() user: User, @Param('entryId') entryId: string, @Body() body: JourneyEntryUpdateDto, @Headers('x-socket-id') socketId?: string) {
+    const result = await this.journey.updateEntry(Number(entryId), user.id, body, socketId);
+    if (!result) {
+      throw new HttpException({ error: 'Entry not found' }, 404);
+    }
+    return result;
+  }
+
+  @Put('entries/:entryId/photos/reorder')
+  @ResponseContract(successResponseSchema)
+  async reorderEntryPhotos(@CurrentUser() user: User, @Param('entryId') entryId: string, @Body() body: JourneyReorderEntryPhotosDto, @Headers('x-socket-id') socketId?: string) {
+    if (!(await this.journey.reorderEntryPhotos(Number(entryId), user.id, body.orderedIds, socketId))) {
+      throw new HttpException({ error: 'Entry not found' }, 404);
+    }
+    return { success: true };
+  }
+
+  @Delete('entries/:entryId')
+  @ResponseContract(successResponseSchema)
+  async deleteEntry(@CurrentUser() user: User, @Param('entryId') entryId: string, @Headers('x-socket-id') socketId?: string) {
+    if (!(await this.journey.deleteEntry(Number(entryId), user.id, socketId))) {
+      throw new HttpException({ error: 'Entry not found' }, 404);
+    }
+    return { success: true };
+  }
+
+  @Post('entries/:entryId/photos')
+  @UseInterceptors(FilesInterceptor('photos'))
+  async uploadEntryPhotos(@CurrentUser() user: User, @Param('entryId') entryId: string, @UploadedFiles() files: Express.Multer.File[] | undefined, @Body() body: JourneyEntryPhotoUploadDto) {
+    this.refuseDemoUpload(user, files ?? []);
+    if (!files?.length) {
+      throw new HttpException({ error: 'No files uploaded' }, 400);
+    }
+    // Commit to final storage BEFORE the addPhoto loop: the Immich mirror below
+    // reads each file at its final uploads/journey path.
+    await this.commitJourneyUploads(files);
+    const results: unknown[] = [];
+    const refused: Express.Multer.File[] = [];
+    for (const file of files) {
+      const relativePath = `journey/${file.filename}`;
+      const photo = await this.journey.addPhoto(Number(entryId), user.id, relativePath, undefined, body?.caption as string | undefined);
+      if (!photo) {
+        // No row points at this file, so nothing would ever clean it up.
+        refused.push(file);
+        continue;
+      }
+      // Mirror to Immich only when the user explicitly opted in (#730).
+      if (await this.journey.immichAutoUploadEnabled(user.id)) {
+        try {
+          const immichId = await this.journey.uploadToImmich(user.id, relativePath, file.originalname);
+          if (immichId) {
+            await this.journey.setPhotoProvider(photo.id, 'immich', immichId, user.id);
+            Object.assign(photo, { provider: 'immich', asset_id: immichId, owner_id: user.id });
+          }
+        } catch {
+          // best-effort mirror; the local photo is already saved
+        }
+      }
+      results.push(photo);
+    }
+    if (refused.length) {
+      await this.discardJourneyUploads(refused);
+    }
+    if (!results.length) {
+      throw new HttpException({ error: 'Not allowed' }, 403);
+    }
+    // When and where the picture was taken is read from the file afterwards
+    // (#1614). Detached, so the add never waits for it, and without the journey
+    // refresh the provider adds send (#1587): the client uploads one file per
+    // request and reloads once after the last.
+    this.photoCapture.scheduleUpload(results, user.id);
+    return { photos: results };
+  }
+
+  /**
+   * A clip on an entry.
+   *
+   * The gallery has taken video since #823 and an entry could not: everything an
+   * entry uploaded went through the images-only filter above, so picking an mp4
+   * in the editor came back 400 and the save reported "1 of 1 photos failed"
+   * (issue #2341). Same two parts as the gallery route — the clip plus the poster
+   * frame the browser grabbed — and the same absence of transcoding.
+   */
+  @Post('entries/:entryId/video')
+  @UseInterceptors(FileFieldsInterceptor(
+    [{ name: 'video', maxCount: 1 }, { name: 'poster', maxCount: 1 }],
+    { limits: { fileSize: MAX_VIDEO_SIZE }, fileFilter: VIDEO_FILE_FILTER },
+  ))
+  async uploadEntryVideo(
+    @CurrentUser() user: User,
+    @Param('entryId') entryId: string,
+    @UploadedFiles() files: { video?: Express.Multer.File[]; poster?: Express.Multer.File[] } | undefined,
+    @Body() body: JourneyGalleryVideoDto,
+  ) {
+    const video = files?.video?.[0];
+    const poster = files?.poster?.[0];
+    this.refuseDemoUpload(user, [video, poster]);
+    const cleanup = () => {
+      for (const f of [video, poster]) {
+        if (f?.path) { try { fs.unlinkSync(f.path); } catch { /* best-effort */ } }
+      }
+    };
+    if (!video) {
+      cleanup();
+      throw new HttpException({ error: 'No video uploaded' }, 400);
+    }
+    await this.commitJourneyUploads(poster ? [video, poster] : [video]);
+    const durationMs = body?.duration_ms != null ? Number(body.duration_ms) : null;
+    const photo = await this.journey.addPhoto(
+      Number(entryId),
+      user.id,
+      `journey/${video.filename}`,
+      poster ? `journey/${poster.filename}` : undefined,
+      undefined,
+      { mediaType: 'video', durationMs: durationMs != null && Number.isFinite(durationMs) ? durationMs : null },
+    );
+    if (!photo) {
+      // Committed already, so the pre-commit unlink would orphan the bytes.
+      await this.storage.delete('journey', video.filename).catch(() => {});
+      if (poster) await this.storage.delete('journey', poster.filename).catch(() => {});
+      throw new HttpException({ error: 'Not allowed' }, 403);
+    }
+    return { photos: [photo] };
+  }
+
+  @Post('entries/:entryId/provider-photos')
+  async providerPhotos(@CurrentUser() user: User, @Param('entryId') entryId: string, @Body() body: JourneyProviderPhotosDto, @Headers('x-socket-id') socketId?: string) {
+    return this.addProviderPhotos({ entryId: Number(entryId) }, user, body, socketId);
+  }
+
+  /**
+   * Both provider-photo routes: a batch (`asset_ids`) answers what landed, a
+   * single asset answers the photo or 403 when it did not land. The adds, the
+   * event and the capture refresh are JourneyPhotoCaptureService's, as for MCP.
+   */
+  private async addProviderPhotos(target: ProviderPhotoTarget, user: User, body: JourneyProviderPhotosDto, socketId?: string) {
+    const passphrase = body.passphrase && typeof body.passphrase === 'string' ? body.passphrase : undefined;
+    // The gallery add has never stored a caption.
+    const caption = 'entryId' in target ? (body.caption as string | undefined) : undefined;
+    if (Array.isArray(body.asset_ids) && body.provider) {
+      const mediaTypes = Array.isArray(body.media_types) ? body.media_types : undefined;
+      const batch: ProviderPhotoBatch = { provider: String(body.provider), assetIds: body.asset_ids.map(String), mediaTypes, caption, passphrase };
+      const added = await this.photoCapture.addProviderPhotos(target, user.id, batch, socketId);
+      return { photos: added, added: added.length };
+    }
+    if (!body.provider || !body.asset_id) {
+      throw new HttpException({ error: 'provider and asset_id required' }, 400);
+    }
+    const batch: ProviderPhotoBatch = { provider: String(body.provider), assetIds: [String(body.asset_id)], mediaTypes: [body.media_type], caption, passphrase };
+    const [photo] = await this.photoCapture.addProviderPhotos(target, user.id, batch, socketId);
+    if (!photo) {
+      throw new HttpException({ error: 'Not allowed or duplicate' }, 403);
+    }
+    return photo;
+  }
+
+  @Post('entries/:entryId/link-photo')
+  async linkPhoto(@CurrentUser() user: User, @Param('entryId') entryId: string, @Body() body: JourneyLinkPhotoDto, @Headers('x-socket-id') socketId?: string) {
+    const journeyPhotoId = body.journey_photo_id ?? body.photo_id;
+    if (!journeyPhotoId) {
+      throw new HttpException({ error: 'journey_photo_id required' }, 400);
+    }
+    const result = await this.photoLinks.link(Number(entryId), Number(journeyPhotoId), user.id, socketId);
+    if (!result) {
+      throw new HttpException({ error: 'Not allowed' }, 403);
+    }
+    return result;
+  }
+
+  // Photos of this entry moved to another entry of the journey, in one write (POST, 200: nothing is created).
+  @Post('entries/:entryId/photos/move')
+  @HttpCode(200)
+  @ResponseContract(journeyPhotosMoveResponseSchema)
+  async movePhotos(@CurrentUser() user: User, @Param('entryId') entryId: string, @Body() body: JourneyPhotosMoveDto, @Headers('x-socket-id') socketId?: string) {
+    return this.photoLinks.move(Number(entryId), body, user.id, socketId);
+  }
+
+  @Delete('entries/:entryId/photos/:journeyPhotoId')
+  @HttpCode(204)
+  @ResponseContract(emptyResponseSchema)
+  async unlinkPhoto(@CurrentUser() user: User, @Param('entryId') entryId: string, @Param('journeyPhotoId') journeyPhotoId: string, @Headers('x-socket-id') socketId?: string): Promise<void> {
+    if (!(await this.photoLinks.unlink(Number(entryId), Number(journeyPhotoId), user.id, socketId))) {
+      throw new HttpException({ error: 'Not found or not allowed' }, 404);
+    }
+  }
+
+  @Patch('photos/:photoId')
+  async updatePhoto(@CurrentUser() user: User, @Param('photoId') photoId: string, @Body() body: JourneyPhotoUpdateDto, @Headers('x-socket-id') socketId?: string) {
+    const result = await this.photoLinks.updatePhoto(Number(photoId), user.id, body, socketId);
+    if (!result) {
+      throw new HttpException({ error: 'Photo not found' }, 404);
+    }
+    return result;
+  }
+
+  @Delete('photos/:photoId')
+  @ResponseContract(successResponseSchema)
+  async deletePhoto(@CurrentUser() user: User, @Param('photoId') photoId: string) {
+    const photo = await this.journey.deletePhoto(Number(photoId), user.id);
+    if (!photo) {
+      throw new HttpException({ error: 'Photo not found' }, 404);
+    }
+    await this.deletePhotoObject(photo.file_path);
+    await this.reclaimDerived(photo.file_path, photo.thumbnail_path);
+    return { success: true };
+  }
+
+  /**
+   * Best-effort removal of a deleted photo's bytes. file_path rows are the
+   * uploads-relative 'journey/<file>' form every writer stores; anything else
+   * (provider rows have null) has no local object.
+   */
+  private async deletePhotoObject(filePath: string | null | undefined): Promise<void> {
+    if (!filePath) return;
+    const name = filePath.startsWith('journey/') ? filePath.slice('journey/'.length) : null;
+    if (!name) return;
+    await this.storage.delete('journey', name).catch(() => { /* file already gone */ });
+  }
+
+  /**
+   * Delete a photo's derived artifacts with it (spec In-scope fix #2): the
+   * hash-named thumbnail derivable from file_path, and whatever
+   * thumbnail_path recorded — a generated thumb (usually the same object) or
+   * a video's uploaded poster. Both best-effort, both idempotent.
+   */
+  private async reclaimDerived(filePath: string | null | undefined, thumbnailPath: string | null | undefined): Promise<void> {
+    if (filePath?.startsWith('journey/')) {
+      await this.storage.delete('journey', journeyThumbName(filePath)).catch(() => { /* already gone */ });
+    }
+    if (thumbnailPath?.startsWith('journey/')) {
+      await this.storage.delete('journey', thumbnailPath.slice('journey/'.length)).catch(() => { /* already gone */ });
+    }
+  }
+
+  // ── Gallery (prefix /:id/gallery — before /:id) ─────────────────────────
+  @Post(':id/gallery/photos')
+  @UseInterceptors(FilesInterceptor('photos'))
+  async uploadGalleryPhotos(@CurrentUser() user: User, @Param('id') id: string, @UploadedFiles() files: Express.Multer.File[] | undefined) {
+    this.refuseDemoUpload(user, files ?? []);
+    if (!files?.length) {
+      throw new HttpException({ error: 'No files uploaded' }, 400);
+    }
+    await this.commitJourneyUploads(files);
+    const filePaths = files.map((f) => ({ path: `journey/${f.filename}` }));
+    const photos = await this.journey.uploadGalleryPhotos(Number(id), user.id, filePaths);
+    if (!photos.length) {
+      await this.discardJourneyUploads(files);
+      throw new HttpException({ error: 'Not allowed' }, 403);
+    }
+    // An uploaded file carries its own EXIF; reading it is what puts the photo on
+    // the map later. Detached, like the provider branch, but without its journey
+    // refresh: one file per request would mean one reload per photo (#1587).
+    this.photoCapture.scheduleUpload(photos, user.id);
+    return { photos };
+  }
+
+  @Post(':id/gallery/video')
+  @UseInterceptors(FileFieldsInterceptor(
+    [{ name: 'video', maxCount: 1 }, { name: 'poster', maxCount: 1 }],
+    // Inherits the module's storage engine (spool + journeyUploadFilename) via
+    // the interceptor's shallow options merge; overrides only cap and filter.
+    { limits: { fileSize: MAX_VIDEO_SIZE }, fileFilter: VIDEO_FILE_FILTER },
+  ))
+  async uploadGalleryVideo(
+    @CurrentUser() user: User,
+    @Param('id') id: string,
+    @UploadedFiles() files: { video?: Express.Multer.File[]; poster?: Express.Multer.File[] } | undefined,
+    @Body() body: JourneyGalleryVideoDto,
+  ) {
+    const video = files?.video?.[0];
+    const poster = files?.poster?.[0];
+    this.refuseDemoUpload(user, [video, poster]);
+    // multer already spooled both parts; clean them up on a pre-commit rejection
+    // so a bad POST doesn't orphan a 500 MB clip (#823).
+    const cleanup = () => {
+      for (const f of [video, poster]) {
+        if (f?.path) { try { fs.unlinkSync(f.path); } catch { /* best-effort */ } }
+      }
+    };
+    if (!video) {
+      cleanup();
+      throw new HttpException({ error: 'No video uploaded' }, 400);
+    }
+    await this.commitJourneyUploads(poster ? [video, poster] : [video]);
+    const durationMs = body?.duration_ms != null ? Number(body.duration_ms) : null;
+    const photos = await this.journey.uploadGalleryPhotos(Number(id), user.id, [{
+      path: `journey/${video.filename}`,
+      thumbnail: poster ? `journey/${poster.filename}` : undefined,
+      mediaType: 'video',
+      durationMs: durationMs != null && Number.isFinite(durationMs) ? durationMs : null,
+    }]);
+    if (!photos.length) {
+      // The parts are already committed (file.path is consumed), so the
+      // pre-commit unlink cleanup would silently orphan them — delete the
+      // final objects instead. Same observable outcome as before: bytes gone.
+      await this.storage.delete('journey', video.filename).catch(() => {});
+      if (poster) await this.storage.delete('journey', poster.filename).catch(() => {});
+      throw new HttpException({ error: 'Not allowed' }, 403);
+    }
+    return { photos };
+  }
+
+  @Post(':id/gallery/provider-photos')
+  async galleryProviderPhotos(@CurrentUser() user: User, @Param('id') id: string, @Body() body: JourneyProviderPhotosDto, @Headers('x-socket-id') socketId?: string) {
+    return this.addProviderPhotos({ journeyId: Number(id) }, user, body, socketId);
+  }
+
+  @Delete(':id/gallery/:journeyPhotoId')
+  @HttpCode(204)
+  @ResponseContract(emptyResponseSchema)
+  async deleteGalleryPhoto(@CurrentUser() user: User, @Param('journeyPhotoId') journeyPhotoId: string): Promise<void> {
+    const photo = await this.journey.deleteGalleryPhoto(Number(journeyPhotoId), user.id);
+    if (!photo) {
+      throw new HttpException({ error: 'Photo not found or not allowed' }, 404);
+    }
+    await this.deletePhotoObject(photo.file_path);
+    await this.reclaimDerived(photo.file_path, photo.thumbnail_path);
+  }
+
+  // ── Journeys /:id ───────────────────────────────────────────────────────
+  @Get(':id')
+  async get(@CurrentUser() user: User, @Param('id') id: string) {
+    const data = await this.journey.getJourneyFull(Number(id), user.id);
+    if (!data) {
+      throw new HttpException({ error: 'Journey not found' }, 404);
+    }
+    return data;
+  }
+
+  @Patch(':id')
+  async update(@CurrentUser() user: User, @Param('id') id: string, @Body() body: JourneyUpdateDto, @Headers('x-socket-id') socketId?: string) {
+    const result = await this.journey.updateJourney(Number(id), user.id, body, socketId);
+    if (!result) {
+      throw new HttpException({ error: 'Journey not found' }, 404);
+    }
+    return result;
+  }
+
+  @Post(':id/cover')
+  @HttpCode(200) // Express answers cover with res.json (200).
+  @UseInterceptors(FileInterceptor('cover'))
+  async cover(@CurrentUser() user: User, @Param('id') id: string, @UploadedFile() file: Express.Multer.File | undefined, @Headers('x-socket-id') socketId?: string) {
+    this.refuseDemoUpload(user, [file]);
+    if (!file) {
+      throw new HttpException({ error: 'No file uploaded' }, 400);
+    }
+    await this.commitJourneyUploads([file]);
+    const result = await this.journey.updateJourney(Number(id), user.id, { cover_image: `journey/${file.filename}` }, socketId);
+    if (!result) {
+      await this.discardJourneyUploads([file]);
+      throw new HttpException({ error: 'Journey not found' }, 404);
+    }
+    return result;
+  }
+
+  @Delete(':id')
+  @ResponseContract(successResponseSchema)
+  async remove(@CurrentUser() user: User, @Param('id') id: string, @Headers('x-socket-id') socketId?: string) {
+    if (!(await this.journey.deleteJourney(Number(id), user.id, socketId))) {
+      throw new HttpException({ error: 'Journey not found' }, 404);
+    }
+    return { success: true };
+  }
+
+  // ── Journey trips ───────────────────────────────────────────────────────
+  @Post(':id/trips')
+  @HttpCode(200) // Express answers with res.json (200).
+  @ResponseContract(successResponseSchema)
+  async addTrip(@CurrentUser() user: User, @Param('id') id: string, @Body() body: JourneyAddTripDto) {
+    if (!body.trip_id) {
+      throw new HttpException({ error: 'trip_id required' }, 400);
+    }
+    if (!(await this.journey.addTripToJourney(Number(id), Number(body.trip_id), user.id))) {
+      throw new HttpException({ error: 'Not allowed' }, 403);
+    }
+    return { success: true };
+  }
+
+  @Delete(':id/trips/:tripId')
+  @ResponseContract(successResponseSchema)
+  async removeTrip(@CurrentUser() user: User, @Param('id') id: string, @Param('tripId') tripId: string, @Headers('x-socket-id') socketId?: string) {
+    if (!(await this.journey.removeTripFromJourney(Number(id), Number(tripId), user.id, socketId))) {
+      throw new HttpException({ error: 'Not allowed' }, 403);
+    }
+    return { success: true };
+  }
+
+  // ── Entries under journey ───────────────────────────────────────────────
+  @Get(':id/entries')
+  async listEntries(@CurrentUser() user: User, @Param('id') id: string) {
+    const entries = await this.journey.listEntries(Number(id), user.id);
+    if (!entries) {
+      throw new HttpException({ error: 'Journey not found' }, 404);
+    }
+    return { entries };
+  }
+
+  /**
+   * The GPX tracks drawn on this journey's map (#1260). Read-only and derived: the
+   * geometries belong to the trips the entries came from, so uploading a GPX in the
+   * planner is all it takes for it to show up here.
+   */
+  @Get(':id/tracks')
+  @ResponseContract(journeyTracksResponseSchema)
+  async listTracks(@CurrentUser() user: User, @Param('id') id: string) {
+    const tracks = await this.journey.journeyTracks(Number(id), user.id);
+    if (!tracks) {
+      throw new HttpException({ error: 'Journey not found' }, 404);
+    }
+    return { tracks };
+  }
+
+  /**
+   * The figures TREK Studio prints on a page — distance, days, steps, photos,
+   * countries and the route itself (#1973).
+   *
+   * Read-only and derived, like /tracks above it: nothing here is stored, it is
+   * what the trips added to this journey add up to. Studio freezes the answer
+   * into the book document when an element is placed, so this is called while
+   * designing and never while printing.
+   */
+  @Get(':id/stats')
+  @ResponseContract(journeyStatsSchema)
+  async stats(@CurrentUser() user: User, @Param('id') id: string) {
+    const stats = await this.journey.journeyStats(Number(id), user.id);
+    if (!stats) {
+      throw new HttpException({ error: 'Journey not found' }, 404);
+    }
+    return stats;
+  }
+
+  /*
+   * ── The Studio book (#1973) ──────────────────────────────────────────
+   *
+   * A book belongs to its journey and inherits its access exactly: every
+   * contributor may open and edit it. No second permission model over the same
+   * object — that is how two rules end up disagreeing about who may do what.
+   */
+
+  @Get(':id/book')
+  async getBook(@CurrentUser() user: User, @Param('id') id: string) {
+    const book = await this.books.getBook(Number(id), user.id);
+    if (book === null && !(await this.books.canOpen(Number(id), user.id))) {
+      throw new HttpException({ error: 'Journey not found' }, 404);
+    }
+    // A journey with no book yet is not an error: Studio opens, lays one out
+    // and saves it. Answering 404 would make "no book" and "no journey"
+    // indistinguishable to the client.
+    return { book };
+  }
+
+  @Put(':id/book')
+  @HttpCode(200)
+  async saveBook(
+    @CurrentUser() user: User,
+    @Param('id') id: string,
+    @Body() body: BookSaveDto,
+    @Headers('x-socket-id') socketId?: string,
+  ) {
+    // The service announces the save after its commit, leaving out this tab.
+    const result = await this.books.saveBook(
+      Number(id),
+      user.id,
+      { title: body.title ?? '', document: body.document, baseVersion: body.baseVersion },
+      { socketId },
+    );
+    if (result === null) {
+      throw await this.bookRefusal(Number(id), user.id);
+    }
+    if ('conflict' in result) {
+      /*
+       * 409, with the current record in the body.
+       *
+       * Two people editing is the normal case here, not an exception — the
+       * client needs to be able to show what the other version is, and a bare
+       * status code would make that a second round trip at exactly the moment
+       * someone is worried about losing work.
+       */
+      throw new HttpException(
+        { error: 'Book was changed by someone else', current: result.conflict },
+        409,
+      );
+    }
+    return result.record;
+  }
+
+  @Delete(':id/book')
+  @HttpCode(204)
+  @ResponseContract(emptyResponseSchema)
+  async deleteBook(@CurrentUser() user: User, @Param('id') id: string) {
+    const removed = await this.books.deleteBook(Number(id), user.id);
+    if (removed === null) {
+      throw await this.bookRefusal(Number(id), user.id);
+    }
+  }
+
+  /**
+   * Why a book write was refused, in a way the editor can act on.
+   *
+   * Both refusals come back as null, and answering 404 for both would tell a
+   * viewer who has just spent an hour laying out pages that their journey does
+   * not exist. Someone who cannot see the journey at all still gets the 404 —
+   * the status is not an existence oracle for them.
+   */
+  private async bookRefusal(journeyId: number, userId: number): Promise<HttpException> {
+    return (await this.books.canOpen(journeyId, userId))
+      ? new HttpException({ error: 'Not allowed' }, 403)
+      : new HttpException({ error: 'Journey not found' }, 404);
+  }
+
+  @Post(':id/entries')
+  async createEntry(@CurrentUser() user: User, @Param('id') id: string, @Body() body: JourneyEntryCreateDto, @Headers('x-socket-id') socketId?: string) {
+    if (!body.entry_date) {
+      throw new HttpException({ error: 'entry_date is required' }, 400);
+    }
+    const entry = await this.journey.createEntry(Number(id), user.id, body, socketId);
+    if (!entry) {
+      throw new HttpException({ error: 'Journey not found' }, 404);
+    }
+    return entry;
+  }
+
+  @Put(':id/entries/reorder')
+  @ResponseContract(successResponseSchema)
+  async reorderEntries(@CurrentUser() user: User, @Param('id') id: string, @Body() body: JourneyReorderEntriesDto, @Headers('x-socket-id') socketId?: string) {
+    const orderedIds = body.orderedIds;
+    if (!Array.isArray(orderedIds) || !orderedIds.every((v) => Number.isFinite(Number(v)))) {
+      throw new HttpException({ error: 'orderedIds must be an array of numbers' }, 400);
+    }
+    if (!(await this.journey.reorderEntries(Number(id), user.id, orderedIds.map(Number), socketId))) {
+      throw new HttpException({ error: 'Not allowed' }, 403);
+    }
+    return { success: true };
+  }
+
+  // ── Contributors ────────────────────────────────────────────────────────
+  @Post(':id/contributors')
+  @ResponseContract(successResponseSchema)
+  async addContributor(@CurrentUser() user: User, @Param('id') id: string, @Body() body: JourneyContributorAddDto) {
+    if (!body.user_id) {
+      throw new HttpException({ error: 'user_id required' }, 400);
+    }
+    if (!(await this.journey.addContributor(Number(id), user.id, Number(body.user_id), (body.role as 'editor' | 'viewer') || 'viewer'))) {
+      throw new HttpException({ error: 'Not allowed' }, 403);
+    }
+    return { success: true };
+  }
+
+  @Patch(':id/contributors/:userId')
+  @ResponseContract(successResponseSchema)
+  async updateContributor(@CurrentUser() user: User, @Param('id') id: string, @Param('userId') userId: string, @Body() body: JourneyContributorUpdateDto) {
+    if (!(await this.journey.updateContributorRole(Number(id), user.id, Number(userId), body.role as 'editor' | 'viewer'))) {
+      throw new HttpException({ error: 'Not allowed' }, 403);
+    }
+    return { success: true };
+  }
+
+  @Delete(':id/contributors/:userId')
+  @ResponseContract(successResponseSchema)
+  async removeContributor(@CurrentUser() user: User, @Param('id') id: string, @Param('userId') userId: string) {
+    if (!(await this.journey.removeContributor(Number(id), user.id, Number(userId)))) {
+      throw new HttpException({ error: 'Not allowed' }, 403);
+    }
+    return { success: true };
+  }
+
+  // ── Suggestions ─────────────────────────────────────────────────────────
+  @Post(':id/suggestions/restore')
+  @HttpCode(200)
+  async restoreSuggestions(@CurrentUser() user: User, @Param('id') id: string, @Headers('x-socket-id') socketId?: string) {
+    const result = await this.journey.restoreDismissedSuggestions(Number(id), user.id, socketId);
+    if (!result) {
+      throw new HttpException({ error: 'Not allowed' }, 403);
+    }
+    return result;
+  }
+
+  // ── User Preferences ────────────────────────────────────────────────────
+  @Patch(':id/preferences')
+  async preferences(@CurrentUser() user: User, @Param('id') id: string, @Body() body: JourneyPreferencesDto, @Headers('x-socket-id') socketId?: string) {
+    const result = await this.journey.updateJourneyPreferences(Number(id), user.id, body, socketId);
+    if (!result) {
+      throw new HttpException({ error: 'Not allowed' }, 403);
+    }
+    return result;
+  }
+
+  // ── Share Link ──────────────────────────────────────────────────────────
+  @Get(':id/share-link')
+  @ResponseContract(journeyShareLinkResponseSchema)
+  async getShareLink(@CurrentUser() user: User, @Param('id') id: string) {
+    // Reading the token is owner-only. It refuses like its siblings rather than
+    // answering with a null link: "not published" and "not yours to see" are
+    // different answers, and a client told the first one offers a create button
+    // that the POST below then refuses.
+    const result = await this.journey.getJourneyShareLink(Number(id), user.id);
+    if (!result.allowed) {
+      throw new HttpException({ error: 'Not allowed' }, 403);
+    }
+    return { link: result.link };
+  }
+
+  @Post(':id/share-link')
+  @HttpCode(200) // Express answers with res.json (200).
+  @ResponseContract(journeyShareLinkSetResponseSchema)
+  async setShareLink(@CurrentUser() user: User, @Param('id') id: string, @Body() body: JourneyShareLinkDto) {
+    const result = await this.journey.createOrUpdateJourneyShareLink(Number(id), user.id, {
+      share_timeline: body.share_timeline as boolean | undefined,
+      share_gallery: body.share_gallery as boolean | undefined,
+      share_map: body.share_map as boolean | undefined,
+      newest_first: body.newest_first as boolean | undefined,
+      share_plan: body.share_plan,
+      share_recordings: body.share_recordings,
+    });
+    if (!result) {
+      throw new HttpException({ error: 'Not allowed' }, 403);
+    }
+    return result;
+  }
+
+  @Delete(':id/share-link')
+  @ResponseContract(successResponseSchema)
+  async deleteShareLink(@CurrentUser() user: User, @Param('id') id: string) {
+    if (!(await this.journey.deleteJourneyShareLink(Number(id), user.id))) {
+      throw new HttpException({ error: 'Not allowed' }, 403);
+    }
+    return { success: true };
+  }
+}

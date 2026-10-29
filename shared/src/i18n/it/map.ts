@@ -1,0 +1,49 @@
+import type { TranslationStrings } from '../types';
+
+const map: TranslationStrings = {
+  'map.connections': 'Connessioni',
+  'map.showConnections': 'Mostra percorsi prenotati',
+  'map.hideConnections': 'Nascondi percorsi prenotati',
+  'poi.searchThisArea': 'Cerca in questa zona',
+  'poi.cat.restaurants': 'Ristoranti',
+  'poi.cat.cafes': 'Caffè',
+  'poi.cat.bars': 'Bar e vita notturna',
+  'poi.cat.hotels': 'Alloggi',
+  'poi.cat.sights': 'Attrazioni',
+  'poi.cat.museums': 'Musei e cultura',
+  'poi.cat.nature': 'Natura e parchi',
+  'poi.cat.activities': 'Attività',
+  'poi.pluginCategories': 'Categorie dai plugin',
+  'map.showAllConnections': 'Mostra tutti i percorsi prenotati',
+  'map.hideAllConnections': 'Nascondi tutti i percorsi prenotati',
+  'map.baseLayer.default': 'Mappa',
+  'map.baseLayer.satellite': 'Satellite', // same-as-en
+  'map.baseLayer.hiking': 'Escursionismo',
+  'map.baseLayer.hikingDown':
+    "OpenHikingMap al momento non risponde. Passa a un'altra mappa; il tuo percorso resta com'è.",
+  'map.baseLayer.cycle': 'Bici',
+  'map.baseLayer.cycleDown': "CyclOSM al momento non risponde. Passa a un'altra mappa; il tuo giro resta com'è.",
+  'map.baseLayer.switchToSatellite': 'Passa alla vista satellitare',
+  'map.baseLayer.switchToDefault': 'Passa alla vista mappa',
+  'map.location.denied':
+    'L’accesso alla posizione è bloccato. Controlla le impostazioni del dispositivo; un’app installata ha un proprio permesso di localizzazione, separato dal browser.',
+  'map.location.unavailable': 'Impossibile determinare la tua posizione.',
+  'map.location.timeout': 'La localizzazione ha richiesto troppo tempo. Riprova con una visuale più libera del cielo.',
+  'map.overview.show': 'Mostra tutto il viaggio',
+  'map.lock.lock': 'Blocca la vista della mappa',
+  'map.lock.unlock': 'Lascia che la mappa segua la selezione',
+  'map.overview.hide': 'Nascondi tutto il viaggio',
+  'map.overview.total': 'Distanza totale',
+  'map.attribution': 'Crediti della mappa',
+  'map.overview.unrouted':
+    'Per {count} tratte non è stato possibile calcolare il percorso, quindi le distanze sono incomplete.',
+  'map.overview.unrouted.one':
+    'Per {count} tratta non è stato possibile calcolare il percorso, quindi le distanze sono incomplete.',
+  'map.overview.dayUnrouted': 'Per {count} tratte di questo giorno non è stato possibile calcolare il percorso',
+  'map.overview.dayUnrouted.one': 'Per {count} tratta di questo giorno non è stato possibile calcolare il percorso',
+  'map.baseLayer.topo': 'Topografica',
+  'map.webgl2.fallback':
+    'Questo browser non offre WebGL2, necessario alle mappe GL, quindi le mappe vengono mostrate con Leaflet.',
+  'map.webgl2.terrain': 'Il 3D richiede WebGL2, che questo browser non offre. La mappa resta in 2D.',
+};
+export default map;

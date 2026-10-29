@@ -1,0 +1,45 @@
+import type { TranslationStrings } from '../types';
+
+const map: TranslationStrings = {
+  'map.connections': 'Koneksi',
+  'map.showConnections': 'Tampilkan rute pemesanan',
+  'map.hideConnections': 'Sembunyikan rute pemesanan',
+  'poi.searchThisArea': 'Cari di area ini',
+  'poi.cat.restaurants': 'Restoran',
+  'poi.cat.cafes': 'Kafe',
+  'poi.cat.bars': 'Bar & hiburan malam',
+  'poi.cat.hotels': 'Penginapan',
+  'poi.cat.sights': 'Tempat wisata',
+  'poi.cat.museums': 'Museum & budaya',
+  'poi.cat.nature': 'Alam & taman',
+  'poi.cat.activities': 'Aktivitas',
+  'poi.pluginCategories': 'Kategori dari plugin',
+  'map.showAllConnections': 'Tampilkan semua rute pemesanan',
+  'map.hideAllConnections': 'Sembunyikan semua rute pemesanan',
+  'map.baseLayer.default': 'Peta',
+  'map.baseLayer.satellite': 'Satelit',
+  'map.baseLayer.hiking': 'Pendakian',
+  'map.baseLayer.hikingDown': 'OpenHikingMap sedang tidak merespons. Beralih ke peta lain; turmu tetap seperti semula.',
+  'map.baseLayer.cycle': 'Sepeda',
+  'map.baseLayer.cycleDown': 'CyclOSM sedang tidak merespons. Beralih ke peta lain; turmu tetap seperti semula.',
+  'map.baseLayer.switchToSatellite': 'Beralih ke tampilan satelit',
+  'map.baseLayer.switchToDefault': 'Beralih ke tampilan peta',
+  'map.location.denied':
+    'Akses lokasi diblokir. Periksa pengaturan perangkat; aplikasi yang terpasang punya izin lokasi sendiri, terpisah dari browser.',
+  'map.location.unavailable': 'Lokasi Anda tidak dapat ditentukan.',
+  'map.location.timeout':
+    'Penentuan lokasi terlalu lama. Coba lagi di tempat dengan pandangan langit yang lebih terbuka.',
+  'map.overview.show': 'Tampilkan seluruh perjalanan',
+  'map.lock.lock': 'Kunci tampilan peta',
+  'map.lock.unlock': 'Biarkan peta mengikuti pilihan',
+  'map.overview.hide': 'Sembunyikan seluruh perjalanan',
+  'map.overview.total': 'Jarak total',
+  'map.attribution': 'Kredit peta',
+  'map.overview.unrouted': 'Rute untuk {count} ruas tidak dapat dihitung, jadi jaraknya belum lengkap.',
+  'map.overview.dayUnrouted': 'Rute untuk {count} ruas pada hari ini tidak dapat dihitung',
+  'map.baseLayer.topo': 'Topografi',
+  'map.webgl2.fallback':
+    'Browser ini tidak menyediakan WebGL2 yang dibutuhkan peta GL, jadi peta ditampilkan dengan Leaflet.',
+  'map.webgl2.terrain': '3D membutuhkan WebGL2, yang tidak disediakan browser ini. Peta tetap dalam 2D.',
+};
+export default map;

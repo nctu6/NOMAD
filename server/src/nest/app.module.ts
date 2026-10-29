@@ -1,0 +1,263 @@
+import { AppSettings } from '../db/entities/AppSettings.entity';
+import { IdempotencyKeys } from '../db/entities/IdempotencyKeys.entity';
+import { Users } from '../db/entities/Users.entity';
+import { WebauthnCredentials } from '../db/entities/WebauthnCredentials.entity';
+import {
+  trekDemoToolGate,
+  trekMcpAccessPolicy,
+  trekMcpErrorMapper,
+  trekMcpValidateAccess,
+} from '../mcp/nest-mcp-policy';
+import mikroOrmConfig from '../mikro-orm.config';
+import { McpModule } from '../nest-mcp';
+import { AccommodationsModule } from './accommodations/accommodations.module';
+import { AddonsModule } from './addons/addons.module';
+import { AdminModule } from './admin/admin.module';
+import { AiConnectionsModule } from './ai-connections/ai-connections.module';
+import { AirportsModule } from './airports/airports.module';
+import { AppConfigModule } from './app-config/app-config.module';
+import { AssignmentsModule } from './assignments/assignments.module';
+import { AssistantModule } from './assistant/assistant.module';
+import { AtlasModule } from './atlas/atlas.module';
+import { AuditModule } from './audit/audit.module';
+import { GlobalAuthGuard } from './auth-core/global-auth.guard';
+import { MfaPolicyGuard } from './auth-core/mfa-policy.guard';
+import { AuthModule } from './auth/auth.module';
+import { SessionRenewalInterceptor } from './auth/session-renewal.interceptor';
+import { BackupModule } from './backup/backup.module';
+import { BookingImportModule } from './booking-import/booking-import.module';
+import { BudgetModule } from './budget/budget.module';
+import { CategoriesModule } from './categories/categories.module';
+import { CollabModule } from './collab/collab.module';
+import { CollectionsModule } from './collections/collections.module';
+import { DemoModule } from './common/demo.module';
+import { DemoService } from './common/demo.service';
+import { IdempotencyCleanupJob } from './common/idempotency-cleanup.job';
+import { IdempotencyInterceptor } from './common/idempotency.interceptor';
+import { ManagedGuard } from './common/managed.guard';
+import { TrekExceptionFilter } from './common/trek-exception.filter';
+import { ZodValidationPipe } from './common/zod-validation.pipe';
+import { ConfigModule } from './config/config.module';
+import { DatabaseLifecycleModule } from './database/database-lifecycle.module';
+import { OrmModule } from './database/orm.module';
+import { DayNotesModule } from './day-notes/day-notes.module';
+import { DaysModule } from './days/days.module';
+import { DocSyncModule } from './doc-sync/doc-sync.module';
+import { FeedsModule } from './feeds/feeds.module';
+import { FerratasModule } from './ferratas/ferratas.module';
+import { FilesModule } from './files/files.module';
+import { GeoModule } from './geo/geo.module';
+import { GoogleQuotaModule } from './google-quota/google-quota.module';
+import { HealthModule } from './health/health.module';
+import { HelpModule } from './help/help.module';
+import { AirtrailModule } from './integrations/airtrail.module';
+import { DawarichModule } from './integrations/dawarich.module';
+import { JourneyRecordingsModule } from './journey-recordings/journey-recordings.module';
+import { JourneyAccessModule } from './journey/journey-access.module';
+import { JourneyModule } from './journey/journey.module';
+import { TripJournalLinkModule } from './journey/trip-journal-link.module';
+import { LlmParseModule } from './llm-parse/llm-parse.module';
+import { ManagedExtModule } from './managed/managed-ext.module';
+import { MapsModule } from './maps/maps.module';
+import { McpTransportModule } from './mcp-transport/mcp-transport.module';
+import { MemoriesModule } from './memories/memories.module';
+import { NotificationsModule } from './notifications/notifications.module';
+import { OauthModule } from './oauth/oauth.module';
+import { OidcModule } from './oidc/oidc.module';
+import { PackingModule } from './packing/packing.module';
+import { PaddleObstaclesModule } from './paddle-obstacles/paddle-obstacles.module';
+import { PaddleRoutingModule } from './paddle-routing/paddle-routing.module';
+import { PermissionsModule } from './permissions/permissions.module';
+import { PhotosModule } from './photos/photos.module';
+import { PlaceEnrichmentModule } from './place-enrichment/place-enrichment.module';
+import { PlaceImportModule } from './place-import/place-import.module';
+import { PlaceShadowModule } from './place-shadow/place-shadow.module';
+import { PlacesModule } from './places/places.module';
+import { PlatformModule } from './platform/platform.module';
+import { SpaFallbackFilter } from './platform/spa-fallback.filter';
+import { PluginsModule } from './plugins/plugins.module';
+import { PublicApiModule } from './public-api/public-api.module';
+import { RealtimeGatewayModule } from './realtime/realtime-gateway.module';
+import { RealtimeModule } from './realtime/realtime.module';
+import { ReceiptScanModule } from './receipt-scan/receipt-scan.module';
+import { ReservationImportModule } from './reservation-import/reservation-import.module';
+import { ReservationsModule } from './reservations/reservations.module';
+import { RoadtripModule } from './roadtrip/roadtrip.module';
+import { RouteUsageModule } from './route-usage/route-usage.module';
+import { SchedulingModule } from './scheduling/scheduling.module';
+import { SchoolHolidaysModule } from './school-holidays/school-holidays.module';
+import { SessionsModule } from './sessions/sessions.module';
+import { SettingsModule } from './settings/settings.module';
+import { ShareModule } from './share/share.module';
+import { SkiRoutingModule } from './ski-routing/ski-routing.module';
+import { StorageModule } from './storage/storage.module';
+import { SystemNoticesModule } from './system-notices/system-notices.module';
+import { TagsModule } from './tags/tags.module';
+import { TodoModule } from './todo/todo.module';
+import { ToursModule } from './tours/tours.module';
+import { TransitModule } from './transit/transit.module';
+import { TripInviteModule } from './trip-invite/trip-invite.module';
+import { TripsModule } from './trips/trips.module';
+import { VacayModule } from './vacay/vacay.module';
+import { WandererModule } from './wanderer/wanderer.module';
+import { CitiesModule } from './cities/cities.module';
+import { WeatherModule } from './weather/weather.module';
+import { MikroOrmModule } from '@mikro-orm/nestjs';
+import { Module } from '@nestjs/common';
+import { APP_FILTER, APP_GUARD, APP_INTERCEPTOR, APP_PIPE } from '@nestjs/core';
+
+/**
+ * Root NestJS module for the incremental migration. Domain modules
+ * (weather, notifications, integrations, ...) get registered here as they are
+ * migrated.
+ */
+@Module({
+  imports: [
+    AppConfigModule,
+    DemoModule,
+    RealtimeModule,
+    RealtimeGatewayModule,
+    JourneyAccessModule,
+    SchedulingModule,
+    McpModule.forRoot({
+      accessPolicy: trekMcpAccessPolicy,
+      validateAccess: trekMcpValidateAccess,
+      toolGate: {
+        inject: [DemoService],
+        useFactory: (demo: DemoService) => trekDemoToolGate((id) => demo.isDemoUserId(id)),
+      },
+      errorMapper: trekMcpErrorMapper,
+    }),
+    HealthModule,
+    PlatformModule,
+    McpTransportModule,
+    WeatherModule,
+    CitiesModule,
+    PublicApiModule,
+    HelpModule,
+    AirportsModule,
+    ConfigModule,
+    SystemNoticesModule,
+    GeoModule,
+    MapsModule,
+    PlaceImportModule,
+    GoogleQuotaModule,
+    PlaceEnrichmentModule,
+    PlaceShadowModule,
+    RouteUsageModule,
+    CategoriesModule,
+    TagsModule,
+    NotificationsModule,
+    AtlasModule,
+    VacayModule,
+    SchoolHolidaysModule,
+    PackingModule,
+    TodoModule,
+    BudgetModule,
+    ReservationsModule,
+    DaysModule,
+    DayNotesModule,
+    AccommodationsModule,
+    AssignmentsModule,
+    PlacesModule,
+    RoadtripModule,
+    ToursModule,
+    WandererModule,
+    FerratasModule,
+    PaddleObstaclesModule,
+    PaddleRoutingModule,
+    SkiRoutingModule,
+    TripsModule,
+    CollabModule,
+    FilesModule,
+    DocSyncModule,
+    PhotosModule,
+    MemoriesModule,
+    AirtrailModule,
+    DawarichModule,
+    JourneyModule,
+    JourneyRecordingsModule,
+    TripJournalLinkModule,
+    CollectionsModule,
+    ShareModule,
+    TripInviteModule,
+    TransitModule,
+    FeedsModule,
+    SettingsModule,
+    StorageModule,
+    BackupModule,
+    AuthModule,
+    SessionsModule,
+    OidcModule,
+    OauthModule,
+    AdminModule,
+    AddonsModule,
+    AuditModule,
+    PermissionsModule,
+    PluginsModule,
+    BookingImportModule,
+    ReservationImportModule,
+    ReceiptScanModule,
+    LlmParseModule,
+    AiConnectionsModule,
+    AssistantModule,
+    ManagedExtModule,
+    // registerRequestContext off: bootstrap.ts mounts the per-request fork as a
+    // pathless middleware instead, because the module's own '{*all}' route
+    // turned a malformed %-escape into a 400 before any handler ran (UPLOADS-P16).
+    // Partial e2e harnesses keep the default; see tests/helpers/test-orm.ts.
+    MikroOrmModule.forRoot({ ...mikroOrmConfig, registerRequestContext: false }),
+    // `DatabaseModule` (the raw better-sqlite3 `db` Proxy + `DatabaseService`
+    // facade) is gone — Plan 4 Task 4 deleted it once every domain moved onto
+    // repositories/`UnitOfWork`. `OrmModule` is the module that survives.
+    OrmModule,
+    // The connection's open/close/reopen, resolved by buildApp() and index.ts.
+    DatabaseLifecycleModule,
+    // MfaPolicyGuard (Plan 3b Task 1) is registered directly below as this
+    // module's own APP_GUARD, never per-controller — so it is the one place
+    // that needs `forFeature` for its three repositories; `Users` is not
+    // otherwise global (JwtAuthGuard and friends inject `EntityManager`
+    // instead precisely to avoid needing this everywhere — see their own
+    // docstrings). IdempotencyKeys: Plan 4 Task 1 — IdempotencyInterceptor/
+    // IdempotencyCleanupJob are ALSO registered directly here (common/ has
+    // no module of its own), so this is the one place their repository's
+    // `forFeature` needs to live too.
+    MikroOrmModule.forFeature([AppSettings, Users, WebauthnCredentials, IdempotencyKeys]),
+  ],
+  providers: [
+    // Default-deny: a route is authenticated unless it carries @Public() or
+    // @OptionalAuth(), or declares its own @UseGuards chain. Protection used to
+    // be opt-in, which made a forgotten guard a silent bypass instead of an error.
+    { provide: APP_GUARD, useClass: GlobalAuthGuard },
+    // Second, and only second: it reads the user the guard above resolved
+    // instead of verifying the token a second time, which is what the Express
+    // middleware it replaces did on every /api request.
+    { provide: APP_GUARD, useClass: MfaPolicyGuard },
+    // Third, and only third: a stranger gets the 401 the two above would have
+    // given them rather than a 403 that confirms the route exists. Inert unless
+    // the instance is centrally administered AND the route carries the marker.
+    { provide: APP_GUARD, useClass: ManagedGuard },
+    // Global error-envelope normaliser (DI-registered so it also catches
+    // framework-level exceptions like the not-found handler).
+    { provide: APP_FILTER, useClass: TrekExceptionFilter },
+    // SPA fallback: serves index.html for unmatched GETs in production (the Nest
+    // equivalent of the legacy Express app.get('*') catch-all). @Catch(NotFoundException)
+    // is more specific than TrekExceptionFilter, so Nest routes 404s here.
+    { provide: APP_FILTER, useClass: SpaFallbackFilter },
+    // Replays the X-Idempotency-Key the client sends on every write, so retried
+    // mutations don't double-apply.
+    { provide: APP_INTERCEPTOR, useClass: IdempotencyInterceptor },
+    // Sliding session renewal: re-issues the trek_session cookie once a
+    // cookie-authenticated token is past half its lifetime (#1927).
+    { provide: APP_INTERCEPTOR, useClass: SessionRenewalInterceptor },
+    // Its nightly TTL purge — a provider here because common/ has no module.
+    IdempotencyCleanupJob,
+    // Global Zod validation: any parameter typed with a createZodDto class
+    // (the <domain>.dto.ts wrappers over @trek/shared schemas) is validated;
+    // everything else passes through untouched. Paired with the boot gate in
+    // common/validate-body-contracts.ts so unvalidated mutation bodies refuse
+    // to boot instead of shipping silently.
+    { provide: APP_PIPE, useClass: ZodValidationPipe },
+  ],
+})
+export class AppModule {}

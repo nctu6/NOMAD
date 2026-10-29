@@ -1,0 +1,40 @@
+import type { TranslationStrings } from '../types';
+
+const members: TranslationStrings = {
+  'members.inviteUser': 'Inviter un utilisateur',
+  'members.selectUser': 'Sélectionner un utilisateur…',
+  'members.invite': 'Inviter',
+  'members.allHaveAccess': 'Tous les utilisateurs ont déjà accès.',
+  'members.access': 'Accès',
+  'members.persons': 'personnes',
+  'members.persons.one': 'personne',
+  'members.you': 'vous',
+  'members.owner': 'Propriétaire',
+  'members.leaveTrip': 'Quitter le voyage',
+  'members.removeAccess': "Retirer l'accès",
+  'members.confirmLeave': "Quitter le voyage ? Vous perdrez l'accès.",
+  'members.confirmRemove': "Retirer l'accès à cet utilisateur ?",
+  'members.loadError': 'Impossible de charger les membres',
+  'members.added': 'ajouté',
+  'members.addError': "Échec de l'ajout",
+  'members.removed': 'Membre retiré',
+  'members.removeError': 'Échec de la suppression',
+  'members.makeOwner': 'Définir comme propriétaire',
+  'members.confirmTransfer': 'Transférer la propriété à {name} ? Vous deviendrez un membre ordinaire.',
+  'members.transferError': 'Échec du transfert de propriété',
+  'members.guests': 'Invités',
+  'members.guest': 'Invité',
+  'members.guestsHint':
+    'Personnes sans compte. On peut leur attribuer des dépenses, des bagages et des tâches, mais elles ne peuvent pas se connecter.',
+  'members.addGuest': 'Ajouter un invité',
+  'members.guestNamePlaceholder': "Nom de l'invité",
+  'members.guestAdded': 'Invité ajouté',
+  'members.guestAddError': "Échec de l'ajout de l'invité",
+  'members.guestRenameError': "Échec du renommage de l'invité",
+  'members.guestRemoved': 'Invité supprimé',
+  'members.confirmRemoveGuest':
+    'Supprimer cet invité ? Ses affectations seront supprimées et sa part de chaque dépense sera répartie entre les autres participants.',
+  'members.guestHasPayments':
+    "Cet invité a payé une dépense ou fait partie d'un paiement enregistré. Changez d'abord le payeur ou supprimez le paiement.",
+};
+export default members;

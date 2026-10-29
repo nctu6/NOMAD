@@ -1,0 +1,115 @@
+# Photo Providers
+
+TREK can browse your personal photo library on Immich or Synology Photos and attach selected photos to your journeys and TREK Studio books. TREK never copies the original files. It stores only a reference (provider name + asset ID) and proxies all image streams through its own server, so your provider credentials are never sent to the browser.
+
+> **Admin:** Enable at least one photo provider (Immich or Synology Photos) in **Admin → Addons** — photo provider toggles appear as sub-items under the **Journey** addon. Once a provider is on, its settings card appears in each user's **Settings → Integrations**. If your provider runs on a local or private network, the server must be configured to allow internal network access. See [Admin-Addons](Admin-Addons) and [Internal-Network-Access](Internal-Network-Access).
+
+---
+
+## Supported providers
+
+| Provider | Internal ID |
+|----------|-------------|
+| Immich | `immich` |
+| Synology Photos | `synologyphotos` |
+
+Both providers can be active at the same time.
+
+---
+
+## Configuring a provider
+
+Go to **Settings → Integrations**. Each enabled provider gets its own settings card there, titled with the provider's name — **Immich** and/or **Synology Photos**.
+
+<!-- TODO: screenshot: Photo Providers section in Settings > Integrations -->
+
+### Immich
+
+| Field | Required | Notes |
+|-------|----------|-------|
+| Server URL | Yes | Full URL of your Immich instance, e.g. `https://immich.example.com` |
+| API Key | Yes | Stored encrypted; never returned to the browser after saving |
+| Skip SSL certificate verification | No | Switch; lets TREK connect to an Immich server with a self-signed certificate. Off by default |
+| Mirror journey photos to Immich on upload | No | Switch; when on, photos you upload in TREK are also pushed to your Immich library |
+
+Enter the full URL of your Immich instance and an Immich API key. The API key is stored encrypted on the TREK server and is never returned to the browser after it is saved.
+
+#### Self-signed certificates
+
+If your Immich server uses a self-signed certificate (for example behind a reverse proxy on your home network), the connection test fails with `fetch failed (self-signed certificate)`. Turn on **Skip SSL certificate verification**, enter the API key again and test or save.
+
+- The setting is per user and only applies to your own Immich connection. Disconnecting Immich, or saving a different server URL without turning it on again, turns it off.
+- Only the certificate check is skipped. The connection is still encrypted, but TREK can no longer tell your server from an impostor on the same network, and your API key travels over that connection. Prefer a certificate from a trusted CA where you can.
+- Photos you add to a journey are loaded through your connection, so your setting applies when other people view that journey.
+- A server on a local or private address still needs internal network access on the TREK server. See [Internal-Network-Access](Internal-Network-Access).
+
+#### Required API key permissions
+
+When generating the API key in Immich (**Account Settings → API Keys**), grant only the scopes TREK actually uses:
+
+| Permission | Why TREK needs it |
+|------------|-------------------|
+| `user.read` | Verify the API key and identify the connected account |
+| `timeline.read` | Browse photos by date |
+| `asset.read` | Read photo metadata and search results |
+| `asset.view` | Load thumbnails and preview images |
+| `album.read` | List owned + shared albums and their contents |
+| `asset.download` | Download the assets |
+| `asset.upload` | *Only if you enable "Mirror journey photos to Immich on upload"* — push TREK uploads back to your library |
+
+TREK never modifies or deletes anything in Immich, so no `update`, `delete`, or admin scopes are needed.
+
+### Synology Photos
+
+| Field | Required | Notes |
+|-------|----------|-------|
+| Server URL | Yes | Full URL including the Photos app path, e.g. `https://your-nas:5001/photo` |
+| Username | Yes | Synology account username |
+| Password | Yes | Stored encrypted; leave blank to keep the existing password |
+| MFA code (if enabled) | No | One-time password for 2FA; only needed on first connection or when re-authenticating |
+| Skip SSL certificate verification | No | Switch; disables TLS certificate validation for self-signed certificates |
+
+#### Required DSM account permissions
+
+Synology Photos doesn't use API keys — TREK signs in with a regular DSM user account. To minimize blast radius, create a **dedicated low-privilege DSM user** for TREK rather than reusing your admin account:
+
+- A standard (non-admin) DSM user account is sufficient.
+- The account must have access to the **Synology Photos** package (DSM → **Control Panel → User & Group → [user] → Applications**, allow Synology Photos).
+- The account must be able to log in to DSM (not disabled, not IP-blocked).
+- Network access to DSM (typically port `5000` HTTP / `5001` HTTPS, or your reverse-proxy host).
+- 2FA is supported — enter the OTP at first connection; TREK stores the resulting device token so you won't be re-prompted on subsequent saves.
+- Read-only access is enough — TREK only lists albums, lists items, runs searches, and fetches thumbnails. It never writes, uploads, or deletes.
+
+---
+
+## Testing the connection
+
+Each provider card has a **Test connection** button next to **Save**. Clicking it sends your current field values to the server and attempts to authenticate with the provider. The card's badge then reads **Connected** (otherwise **Not connected**); any error message from the provider is shown if it fails.
+
+For Synology, a successful test stores a session token so the OTP code is not required again on subsequent saves (as long as the URL and username remain the same).
+
+---
+
+## Multiple providers
+
+You can configure both Immich and Synology simultaneously. TREK offers the photos of all connected providers side by side in the journey photo pickers.
+
+---
+
+## After setup
+
+Once a provider is connected, you can browse and attach its photos in your journeys and in TREK Studio. Providers are used there only; the trip planner itself has no photo tab. For files such as tickets and PDFs, see [Documents-and-Files](Documents-and-Files).
+
+In the [Journey Journal](Journey-Journal) the same libraries are used in three places:
+
+- the **External photos** tab of the entry editor, which searches the entry's day and puts photos taken near the entry first (see [External photos](Journey-Journal#external-photos));
+- the journey gallery's photo picker, with **Select all** over a day, the **Trip Period**, a **Date Range** or **All Photos**;
+- TREK Studio, where the **Content** section offers **From Immich** and **From Synology Photos** next to **Upload photos** (see [TREK Studio](Journey-Journal#trek-studio)).
+
+---
+
+## See also
+
+- [Admin-Addons](Admin-Addons)
+- [Internal-Network-Access](Internal-Network-Access)
+- [TREK-Studio](TREK-Studio)

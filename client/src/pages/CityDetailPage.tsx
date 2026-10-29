@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { Link, useNavigate, useParams } from 'react-router-dom'
+import { Link, useNavigate, useParams } from 'react-router'
 import { ArrowLeft, Plane } from 'lucide-react'
 import Navbar from '../components/Layout/Navbar'
 import CityMap from '../components/Cities/CityMap'
@@ -100,7 +100,7 @@ export default function CityDetailPage() {
                 <p className="text-xs mt-2" style={{ color: 'var(--text-faint)' }}>
                   {city.overall_score == null
                     ? t('cities.noOverall')
-                    : t('cities.basedOn', { count: city.score_count, total: SCORE_KEYS.length })}
+                    : t('cities.basedOn', { have: city.score_count, total: SCORE_KEYS.length })}
                 </p>
               </div>
               <div className="flex items-center gap-3">
@@ -335,7 +335,7 @@ function rawLine(
   if (key === 'climate') {
     if (city.comfort_months == null) return t('cities.noData')
     const typical = city.typical_temp_c == null ? t('cities.noData') : formatTemp(city.typical_temp_c, fahrenheit)
-    return t('cities.comfortCount', { count: city.comfort_months, temp: typical })
+    return t('cities.comfortCount', { comfortable: city.comfort_months, temp: typical })
   }
   return t('cities.noData')
 }

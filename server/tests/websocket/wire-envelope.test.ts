@@ -1,0 +1,249 @@
+/**
+ * WebSocket wire-envelope tests. Covers WS-030 to WS-036.
+ *
+ * These pin the *shape* of every frame that crosses the socket, not the behaviour
+ * behind it — connection.test.ts already covers the behaviour.
+ *
+ * The reason they exist: the plan is to move this transport onto a Nest gateway
+ * (@nestjs/websockets). Nest's stock WsAdapter dispatches on `message.event` and
+ * answers `{ event, data }`, while TREK speaks a flat `{ type, tripId, ...payload }`
+ * of its own. Swapping the adapter in without a custom serialiser would leave every
+ * `join` silently unhandled: no `welcome.socketId` to echo back as X-Socket-Id, so
+ * every client would receive its own writes back and drag-and-drop would jump.
+ *
+ * None of that shows up in the existing suite, because the 100+ tests that touch
+ * realtime record broadcasts on a FakeRealtimeService and never look at the bytes. So: if a change makes
+ * these fail, it is a breaking change for every deployed client.
+ */
+import { buildApp, getHttpServer } from '../../src/bootstrap';
+import { db as testDb } from '../../src/db/database';
+import { createEphemeralToken } from '../../src/nest/auth-core/ephemeral-tokens';
+import { broadcast, broadcastToUser } from '../../src/nest/realtime/ws-state';
+import { createUser, createTrip } from '../helpers/factories';
+import { resetTestDb } from '../helpers/test-db';
+import type { INestApplication } from '@nestjs/common';
+
+import http from 'http';
+import { describe, it, expect, vi, beforeAll, afterAll, beforeEach } from 'vitest';
+import WebSocket from 'ws';
+
+vi.mock('../../src/db/database', async () => {
+  const { createSnapshotTestDb, buildDbMock } = await import('../helpers/db-mock');
+  return buildDbMock(createSnapshotTestDb());
+});
+
+let server: http.Server;
+let wsUrl: string;
+let nestApp: INestApplication;
+
+beforeAll(async () => {
+  nestApp = await buildApp();
+  // buildApp binds /ws to the server it creates, before app.init().
+  server = getHttpServer();
+  await new Promise<void>((resolve) => server.listen(0, resolve));
+  const addr = server.address() as { port: number };
+  wsUrl = `ws://127.0.0.1:${addr.port}/ws`;
+});
+
+afterAll(async () => {
+  await new Promise<void>((resolve, reject) => server.close((err) => (err ? reject(err) : resolve())));
+  await nestApp.close();
+  testDb.close();
+});
+
+beforeEach(() => resetTestDb(testDb));
+
+/** Minimal buffered client — same idea as connection.test.ts, kept local. */
+class Frames {
+  private buffer: any[] = [];
+  private waiters: Array<(m: any) => void> = [];
+  constructor(private ws: WebSocket) {
+    ws.on('message', (data) => {
+      const msg = JSON.parse(data.toString());
+      const waiter = this.waiters.shift();
+      if (waiter) waiter(msg);
+      else this.buffer.push(msg);
+    });
+  }
+  next(timeoutMs = 3000): Promise<any> {
+    if (this.buffer.length) return Promise.resolve(this.buffer.shift());
+    return new Promise((resolve, reject) => {
+      const waiter = (m: any) => {
+        clearTimeout(timer);
+        resolve(m);
+      };
+      // Drop the waiter on timeout, otherwise it stays queued and swallows the
+      // next frame — which matters here because nextOrNull() times out by design.
+      const timer = setTimeout(() => {
+        const idx = this.waiters.indexOf(waiter);
+        if (idx !== -1) this.waiters.splice(idx, 1);
+        reject(new Error('Message timeout'));
+      }, timeoutMs);
+      this.waiters.push(waiter);
+    });
+  }
+  /** Resolves to null when nothing arrives — used to assert silence. */
+  async nextOrNull(timeoutMs = 400): Promise<any | null> {
+    try {
+      return await this.next(timeoutMs);
+    } catch {
+      return null;
+    }
+  }
+  send(msg: object) {
+    this.ws.send(JSON.stringify(msg));
+  }
+  close() {
+    this.ws.close();
+  }
+}
+
+function connect(token: string): Promise<Frames> {
+  return new Promise((resolve, reject) => {
+    const ws = new WebSocket(`${wsUrl}?token=${encodeURIComponent(token)}`);
+    const frames = new Frames(ws);
+    ws.once('open', () => resolve(frames));
+    ws.once('error', reject);
+  });
+}
+
+async function connectAndJoin(userId: number, tripId: number) {
+  const frames = await connect(createEphemeralToken(userId, 'ws')!);
+  await frames.next(); // welcome
+  frames.send({ type: 'join', tripId });
+  await frames.next(); // joined
+  return frames;
+}
+
+describe('WS wire envelope', () => {
+  it('WS-030 — the welcome frame carries socketId at the top level', async () => {
+    const { user } = createUser(testDb);
+    const frames = await connect(createEphemeralToken(user.id, 'ws')!);
+    try {
+      const msg = await frames.next();
+      expect(Object.keys(msg).sort()).toEqual(['socketId', 'type', 'version']);
+      expect(msg.type).toBe('welcome');
+      expect(typeof msg.socketId).toBe('number');
+      // Added beside the id, never instead of it: a client from before reads
+      // socketId as it always did, a current one compares the version with its
+      // own build (NewVersionNotice).
+      expect(typeof msg.version).toBe('string');
+      // X-Socket-Id is read straight off this field (client/src/api/websocket.ts).
+      // Nesting it under `data` would silently disable echo suppression.
+      expect(msg).not.toHaveProperty('data');
+      expect(msg).not.toHaveProperty('event');
+    } finally {
+      frames.close();
+    }
+  });
+
+  it('WS-031 — join and leave are answered flat, keyed by type', async () => {
+    const { user } = createUser(testDb);
+    const trip = createTrip(testDb, user.id);
+    const frames = await connect(createEphemeralToken(user.id, 'ws')!);
+    try {
+      await frames.next();
+      frames.send({ type: 'join', tripId: trip.id });
+      const joined = await frames.next();
+      expect(Object.keys(joined).sort()).toEqual(['tripId', 'type']);
+      expect(joined).toEqual({ type: 'joined', tripId: trip.id });
+
+      frames.send({ type: 'leave', tripId: trip.id });
+      const left = await frames.next();
+      expect(left).toEqual({ type: 'left', tripId: trip.id });
+    } finally {
+      frames.close();
+    }
+  });
+
+  it('WS-032 — the server dispatches on `type`, not on `event`', async () => {
+    const { user } = createUser(testDb);
+    const trip = createTrip(testDb, user.id);
+    const frames = await connect(createEphemeralToken(user.id, 'ws')!);
+    try {
+      await frames.next();
+      // This is the exact shape Nest's stock WsAdapter would send. It must not
+      // join the room — if it ever does, the two protocols have been mixed.
+      frames.send({ event: 'join', data: { tripId: trip.id } });
+      expect(await frames.nextOrNull()).toBeNull();
+
+      // And the real shape still works afterwards.
+      frames.send({ type: 'join', tripId: trip.id });
+      expect((await frames.next()).type).toBe('joined');
+    } finally {
+      frames.close();
+    }
+  });
+
+  it('WS-033 — a trip broadcast spreads its payload flat next to type and tripId', async () => {
+    const { user } = createUser(testDb);
+    const trip = createTrip(testDb, user.id);
+    const frames = await connectAndJoin(user.id, trip.id);
+    try {
+      broadcast(trip.id, 'place_created', { place: { id: 7 }, source: 'test' });
+      const msg = await frames.next();
+      expect(msg).toEqual({ type: 'place_created', tripId: trip.id, place: { id: 7 }, source: 'test' });
+      // Not { event, data } — the payload keys sit at the top level.
+      expect(msg).not.toHaveProperty('data');
+      expect(msg).not.toHaveProperty('event');
+      expect(msg).not.toHaveProperty('payload');
+    } finally {
+      frames.close();
+    }
+  });
+
+  it('WS-034 — a payload key cannot be shadowed by the envelope', async () => {
+    const { user } = createUser(testDb);
+    const trip = createTrip(testDb, user.id);
+    const frames = await connectAndJoin(user.id, trip.id);
+    try {
+      // The spread runs last, so payload wins over the envelope's tripId. Pinning
+      // this because it decides what a re-implementation has to reproduce.
+      broadcast(trip.id, 'day_updated', { tripId: 999, day: { id: 1 } });
+      const msg = await frames.next();
+      expect(msg.tripId).toBe(999);
+      expect(msg.type).toBe('day_updated');
+    } finally {
+      frames.close();
+    }
+  });
+
+  it('WS-035 — a user broadcast is the payload verbatim, with no tripId added', async () => {
+    const { user } = createUser(testDb);
+    const frames = await connect(createEphemeralToken(user.id, 'ws')!);
+    try {
+      await frames.next();
+      broadcastToUser(user.id, { type: 'trip_invitation', invite: { id: 3 } });
+      const msg = await frames.next();
+      expect(msg).toEqual({ type: 'trip_invitation', invite: { id: 3 } });
+      expect(msg).not.toHaveProperty('tripId');
+    } finally {
+      frames.close();
+    }
+  });
+
+  it('WS-036 — the sender is excluded by socket id, not by connection identity', async () => {
+    const { user } = createUser(testDb);
+    const trip = createTrip(testDb, user.id);
+    const a = await connect(createEphemeralToken(user.id, 'ws')!);
+    const b = await connect(createEphemeralToken(user.id, 'ws')!);
+    try {
+      const aWelcome = await a.next();
+      await b.next();
+      a.send({ type: 'join', tripId: trip.id });
+      await a.next();
+      b.send({ type: 'join', tripId: trip.id });
+      await b.next();
+
+      // Same user, two sockets: the one named by X-Socket-Id stays silent, the
+      // other still gets the event. That is what stops a client echoing its own
+      // writes while a second tab keeps updating.
+      broadcast(trip.id, 'place_created', { place: { id: 1 } }, aWelcome.socketId);
+      expect(await a.nextOrNull()).toBeNull();
+      expect((await b.next()).type).toBe('place_created');
+    } finally {
+      a.close();
+      b.close();
+    }
+  });
+});

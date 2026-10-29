@@ -1,0 +1,41 @@
+import type { TranslationStrings } from '../types';
+
+const members: TranslationStrings = {
+  'members.inviteUser': 'Zaproś użytkownika',
+  'members.selectUser': 'Wybierz użytkownika...',
+  'members.invite': 'Zaproś',
+  'members.allHaveAccess': 'Wszyscy użytkownicy mają już dostęp.',
+  'members.access': 'Dostęp',
+  'members.persons': 'osoby',
+  'members.persons.one': 'osoba',
+  'members.persons.few': 'osoby',
+  'members.persons.many': 'osób',
+  'members.you': 'ty',
+  'members.owner': 'Właściciel',
+  'members.leaveTrip': 'Opuść podróż',
+  'members.removeAccess': 'Usuń dostęp',
+  'members.confirmLeave': 'Opuścić podróż? Stracisz dostęp.',
+  'members.confirmRemove': 'Usunąć dostęp dla tego użytkownika?',
+  'members.loadError': 'Nie udało się załadować członków',
+  'members.added': 'dodano',
+  'members.addError': 'Nie udało się dodać członka',
+  'members.removed': 'Usunięto członka',
+  'members.removeError': 'Nie udało się usunąć członka',
+  'members.makeOwner': 'Ustaw jako właściciela',
+  'members.confirmTransfer': 'Przekazać własność użytkownikowi {name}? Staniesz się zwykłym członkiem.',
+  'members.transferError': 'Nie udało się przekazać własności',
+  'members.guests': 'Goście',
+  'members.guest': 'Gość',
+  'members.guestsHint': 'Osoby bez konta. Można im przypisać koszty, pakowanie i zadania, ale nie mogą się zalogować.',
+  'members.addGuest': 'Dodaj gościa',
+  'members.guestNamePlaceholder': 'Imię gościa',
+  'members.guestAdded': 'Dodano gościa',
+  'members.guestAddError': 'Nie udało się dodać gościa',
+  'members.guestRenameError': 'Nie udało się zmienić nazwy gościa',
+  'members.guestRemoved': 'Usunięto gościa',
+  'members.confirmRemoveGuest':
+    'Usunąć tego gościa? Jego przypisania zostaną usunięte, a jego udział w każdym wydatku zostanie podzielony między pozostałych uczestników.',
+  'members.guestHasPayments':
+    'Ten gość zapłacił za wydatek lub jest stroną zarejestrowanej płatności. Najpierw zmień płatnika lub usuń płatność.',
+};
+export default members;

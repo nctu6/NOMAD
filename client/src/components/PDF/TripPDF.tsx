@@ -1,15 +1,77 @@
 // Trip PDF via browser print window
 import { createElement } from 'react'
 import { getCategoryIcon } from '../shared/categoryIcons'
-import { FileText, Info, Clock, MapPin, Navigation, Train, Plane, Bus, Car, Ship, Coffee, Ticket, Star, Heart, Camera, Flag, Lightbulb, AlertTriangle, ShoppingBag, Bookmark } from 'lucide-react'
-import { mapsApi } from '../../api/client'
-import type { Trip, Day, Place, Category, AssignmentsMap, DayNotesMap } from '../../types'
+import { FileText, Info, Clock, MapPin, Navigation, Train, Plane, Bus, Car, Ship, Sailboat, CableCar, Bike, CarTaxiFront, Route, Coffee, Ticket, Star, Heart, Camera, Flag, Lightbulb, AlertTriangle, ShoppingBag, Bookmark, Hotel, LogIn, LogOut, KeyRound, BedDouble, Utensils, Users, ParkingSquare, LucideIcon } from 'lucide-react'
+import { mapsApi, pluginsApi } from '../../api/client'
+import { accommodationRepo } from '../../repo/accommodationRepo'
+import type { Trip, Day, Place, Category, AssignmentsMap, DayNote, DistanceUnit, BudgetItem } from '../../types'
+import { isDayInAccommodationRange, getDayOrder } from '../../utils/dayOrder'
+import { hidesOnMiddleDay, getTransportForDay, getMergedItems, getSpanPhase, getDisplayTimeForDay } from '../../utils/dayMerge'
+import { safeHexColor } from '../../utils/safeColor'
+import { pdfSwitchOn, rememberPdfSwitch } from '../../utils/pdfSwitch'
+import { renderIconMarkup } from '../../utils/iconMarkup'
+import { formatMoney, formatMoneySum, formatClockTime, splitReservationDateTime, type MoneyEntry } from '../../utils/formatters'
+import { useSettingsStore } from '../../store/settingsStore'
+import { useTripStore } from '../../store/tripStore'
+import { useAddonStore } from '../../store/addonStore'
+import { projectDayItinerary } from '../Map/dayTourProjection'
+import { planCosts } from '../Planner/planCosts'
+import { routeTrip, type TripRouteSummary } from '../Map/tripRouteGeometry'
+import { buildTripMapSvg } from './tripMapSvg'
+import { renderTripMapImage } from './tripMapImage'
+import { formatDistance } from '../../utils/units'
+import { fetchExchangeRates } from '../../hooks/useExchangeRates'
+import { getFlightLegs, getTrainLegs, usesStationRoute } from '../../utils/flightLegs'
+import { isServiceStopType } from '../Roadtrip/roadtripModel'
+import { onlyMyPlan } from './pdfScope'
+import { createPdfMarkdown, PDF_MARKDOWN_CSS } from './pdfMarkdown'
+
+/**
+ * Every day starts a new page by default. On a trip of short days that prints
+ * one sheet per handful of lines, so the preview offers the flowing layout the
+ * in-app view already uses, and remembers which one was picked (#1292).
+ */
+const PAGE_BREAK_KEY = 'trek_pdf_page_break_per_day'
+
+/**
+ * The notes of a flight, train or rental (#1571): printed by default, like the
+ * notes of a place, and a switch in the preview leaves them out for a reader who
+ * wants the plan without the fine print.
+ */
+const TRANSPORT_NOTES_KEY = 'trek_pdf_transport_notes'
+
+/* The overlay is imperative DOM, so the switch from Settings/ToggleSwitch is
+   rebuilt here rather than rendered — as static markup it would carry no
+   behaviour. Same geometry and the same tokens, so it reads as the same control. */
+const TOGGLE_TRACK = 'position:relative;width:44px;height:24px;min-width:44px;flex-shrink:0;border-radius:12px;border:none;padding:0;cursor:pointer;transition:background 0.2s;'
+const TOGGLE_KNOB = 'position:absolute;top:2px;width:20px;height:20px;border-radius:50%;background:white;transition:left 0.2s;box-shadow:0 1px 3px rgba(0,0,0,0.2);'
+const trackColour = (on: boolean) => (on ? 'var(--accent, #111827)' : 'var(--border-primary, #d1d5db)')
+const knobOffset = (on: boolean) => (on ? '22px' : '2px')
+
+function renderLucideIcon(icon:LucideIcon, props = {}) {
+  return renderIconMarkup(
+    createElement(icon, props)
+  );
+}
 
 const NOTE_ICON_MAP = { FileText, Info, Clock, MapPin, Navigation, Train, Plane, Bus, Car, Ship, Coffee, Ticket, Star, Heart, Camera, Flag, Lightbulb, AlertTriangle, ShoppingBag, Bookmark }
 function noteIconSvg(iconId) {
-  if (!_renderToStaticMarkup) return ''
   const Icon = NOTE_ICON_MAP[iconId] || FileText
-  return _renderToStaticMarkup(createElement(Icon, { size: 14, strokeWidth: 1.8, color: '#94a3b8' }))
+  return renderLucideIcon(Icon, { size: 14, strokeWidth: 1.8, color: '#94a3b8' })
+}
+
+const RESERVATION_ICON_MAP = { flight: Plane, train: Train, bus: Bus, car: Car, taxi: CarTaxiFront, bicycle: Bike, cruise: Ship, ferry: Sailboat, cable_car: CableCar, transport_other: Route, restaurant: Utensils, event: Ticket, tour: Users, parking: ParkingSquare, other: FileText }
+const RESERVATION_COLOR_MAP = { flight: '#3b82f6', train: '#06b6d4', bus: '#059669', car: '#6b7280', taxi: '#ca8a04', bicycle: '#84cc16', cruise: '#0ea5e9', ferry: '#0d9488', cable_car: '#dc2626', transport_other: '#6b7280', restaurant: '#ef4444', event: '#f59e0b', tour: '#10b981', parking: '#2563eb', other: '#6b7280' }
+function reservationIconSvg(type) {
+  const Icon = RESERVATION_ICON_MAP[type] || Ticket
+  const color = RESERVATION_COLOR_MAP[type] || '#3b82f6'
+  return renderLucideIcon(Icon, { size: 14, strokeWidth: 1.8, color })
+}
+
+const ACCOMMODATION_ICON_MAP = { accommodation: Hotel, checkin: LogIn, checkout: LogOut, location: MapPin, note: FileText, confirmation: KeyRound }
+function accommodationIconSvg(type) {
+  const Icon = ACCOMMODATION_ICON_MAP[type] || BedDouble
+  return renderLucideIcon(Icon, { size: 14, strokeWidth: 1.8, color: '#03398f', className: 'accommodation-icon' })
 }
 
 // ── SVG inline icons (for chips) ─────────────────────────────────────────────
@@ -17,11 +79,26 @@ const svgPin   = `<svg width="11" height="11" viewBox="0 0 24 24" fill="#94a3b8"
 const svgClock = `<svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="#374151" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 3"/></svg>`
 const svgClock2= `<svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="#d97706" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 3"/></svg>`
 const svgCheck = `<svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="#059669" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12l5 5L19 7"/></svg>`
-const svgEuro  = `<svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="#059669" stroke-width="2" stroke-linecap="round"><path d="M14 5c-3.87 0-7 3.13-7 7s3.13 7 7 7c2.17 0 4.1-.99 5.4-2.55"/><path d="M5 11h8M5 13h8"/></svg>`
+const svgMoney = `<svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="#059669" stroke-width="2"><circle cx="12" cy="12" r="9"/><path d="M9 12h6" stroke-linecap="round"/></svg>`
 
 function escHtml(str) {
   if (!str) return ''
   return String(str).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;')
+}
+
+// The style attribute is decoded back into raw quotes before the CSS is parsed, so
+// escHtml alone cannot stop a cover_image from closing the url() and appending its own
+// declaration. Percent-encoding is transparent to the fetch.
+function cssUrl(url) {
+  return String(url).replace(/["'()\\\s]/g, c => '%' + c.codePointAt(0).toString(16).padStart(2, '0'))
+}
+
+// The day colours come from a fixed palette, but this is a style attribute being built
+// by string concatenation — the same place cssUrl exists for. Anything that is not a
+// plain hex triple is not a colour, and gets the route blue instead of a chance to
+// close the declaration.
+function hexColour(value) {
+  return /^#[0-9a-f]{6}$/i.test(String(value)) ? String(value) : '#0a84ff'
 }
 
 function absUrl(url) {
@@ -33,56 +110,60 @@ function absUrl(url) {
 function safeImg(url) {
   if (!url) return null
   if (url.startsWith('https://') || url.startsWith('http://')) return url
-  return /\.(jpe?g|png|webp|bmp|tiff?)(\?.*)?$/i.test(url) ? absUrl(url) : null
+  // The in-app place-photo proxy always streams a JPEG but has no file extension
+  // (it ends in …/bytes), so the extension check below would wrongly reject it —
+  // which is why persisted place photos showed as category icons in the PDF.
+  if (url.startsWith('/api/maps/place-photo/')) return absUrl(url)
+  // gif is in the list because place-image-upload.ts accepts it; without it an
+  // uploaded GIF hero silently fell back to the category icon in the PDF.
+  return /\.(jpe?g|png|gif|webp|bmp|tiff?)(\?.*)?$/i.test(url) ? absUrl(url) : null
 }
 
 // Generate SVG string from Lucide icon name (for category thumbnails)
-let _renderToStaticMarkup = null
-async function ensureRenderer() {
-  if (!_renderToStaticMarkup) {
-    const mod = await import('react-dom/server')
-    _renderToStaticMarkup = mod.renderToStaticMarkup
-  }
-}
 function categoryIconSvg(iconName, color = '#6366f1', size = 24) {
-  if (!_renderToStaticMarkup) return ''
   const Icon = getCategoryIcon(iconName)
-  return _renderToStaticMarkup(
+  return renderIconMarkup(
     createElement(Icon, { size, strokeWidth: 1.8, color: 'rgba(255,255,255,0.92)' })
   )
 }
 
 function shortDate(d, locale) {
   if (!d) return ''
-  return new Date(d + 'T00:00:00').toLocaleDateString(locale, { weekday: 'short', day: 'numeric', month: 'short' })
+  return new Date(d + 'T00:00:00Z').toLocaleDateString(locale, { weekday: 'short', day: 'numeric', month: 'short', timeZone: 'UTC' })
 }
 
 function longDateRange(days, locale) {
   const dd = [...days].filter(d => d.date).sort((a, b) => a.day_number - b.day_number)
   if (!dd.length) return null
-  const f = new Date(dd[0].date + 'T00:00:00')
-  const l = new Date(dd[dd.length - 1].date + 'T00:00:00')
-  return `${f.toLocaleDateString(locale, { day: 'numeric', month: 'long' })} – ${l.toLocaleDateString(locale, { day: 'numeric', month: 'long', year: 'numeric' })}`
+  const f = new Date(dd[0].date + 'T00:00:00Z')
+  const l = new Date(dd[dd.length - 1].date + 'T00:00:00Z')
+  return `${f.toLocaleDateString(locale, { day: 'numeric', month: 'long', timeZone: 'UTC' })} – ${l.toLocaleDateString(locale, { day: 'numeric', month: 'long', year: 'numeric', timeZone: 'UTC' })}`
 }
 
-function dayCost(assignments, dayId, locale) {
-  const total = (assignments[String(dayId)] || []).reduce((s, a) => s + (parseFloat(a.place?.price) || 0), 0)
-  return total > 0 ? `${total.toLocaleString(locale)} EUR` : null
-}
 
-// Pre-fetch Google Place photos for all assigned places
-async function fetchPlacePhotos(assignments) {
+// Pre-fetch place photos for all assigned places.
+// Assignment places are a server-side projection that drops osm_id, so we recover
+// the full place from the trip's places pool and key the photo off the same id the
+// app UI uses (google_place_id || osm_id || coords) — otherwise OSM/coords-only
+// places fell back to category icons in the PDF even though they show photos in-app.
+async function fetchPlacePhotos(assignments: AssignmentsMap, places: Place[]) {
   const photoMap = {} // placeId → photoUrl
+  // The assignment projection drops osm_id, so recover it from the full places pool.
+  const osmById = new Map((places || []).map(p => [p.id, p.osm_id]))
   const allPlaces = Object.values(assignments).flatMap(a => a.map(x => x.place)).filter(Boolean)
   const unique = [...new Map(allPlaces.map(p => [p.id, p])).values()]
 
-  const toFetch = unique.filter(p => !p.image_url && p.google_place_id)
+  const toFetch = unique
+    .map(p => ({ p, osm_id: osmById.get(p.id) }))
+    .filter(({ p, osm_id }) => !p.image_url && (p.google_place_id || osm_id || (p.lat != null && p.lng != null)))
 
   await Promise.allSettled(
-    toFetch.map(async (place) => {
+    toFetch.map(async ({ p, osm_id }) => {
+      // Same key the app UI uses: google_place_id || osm_id || coords.
+      const photoId = p.google_place_id || osm_id || `coords:${p.lat}:${p.lng}`
       try {
-        const data = await mapsApi.placePhoto(place.google_place_id)
-        if (data.photoUrl) photoMap[place.id] = data.photoUrl
+        const data = await mapsApi.placePhoto(photoId, p.lat, p.lng, p.name)
+        if (data.photoUrl) photoMap[p.id] = data.photoUrl
       } catch {}
     })
   )
@@ -95,49 +176,376 @@ interface downloadTripPDFProps {
   places: Place[]
   assignments: AssignmentsMap
   categories: Category[]
-  dayNotes: DayNotesMap
+  // Flattened across days: each note carries its own day_id (see downloadTripPDF callers).
+  dayNotes: DayNote[]
+  reservations?: any[]
   t: (key: string, params?: Record<string, string | number>) => string
   locale: string
+  /**
+   * '12h' | '24h'. The document is a plain HTML string assembled outside React,
+   * so the setting cannot be read with a hook in here — it comes over the same
+   * way `locale` does (#2066).
+   */
+  timeFormat?: string
+  /** 'metric' | 'imperial'. Same reasoning as `timeFormat` — read as a prop, not a hook. */
+  distanceUnit?: string
+  /**
+   * The road trip setting "Show in Days too" (`roadtrip_service_stops_in_days`), read as a
+   * prop for the same reason. Off, the day plan keeps petrol stations and rest areas to
+   * the road trip view, and so does the print.
+   */
+  showServiceStops?: boolean
+  /** The trip's expenses, which the cost figures add up with Costs on (#2551). Read from the trip store when left out. */
+  budgetItems?: BudgetItem[]
+  /** Whether the Costs addon is on. Read from the addon store when left out. */
+  costsEnabled?: boolean
+  /** Prints only this member's plan (#2168): the stops and bookings that name them, and the ones that name nobody. */
+  onlyUserId?: number
 }
 
-export async function downloadTripPDF({ trip, days, places, assignments, categories, dayNotes, t: _t, locale: _locale }: downloadTripPDFProps) {
-  await ensureRenderer()
-  const loc = _locale || 'de-DE'
+/**
+ * The stops the day plan lists, out of everything the store holds for the trip.
+ *
+ * The stop a booked night wrote onto its check-in day is out whatever the switch says:
+ * the day already shows that booking as its accommodation block, and the row would be
+ * the same hotel a second time. The service stops go with the setting. One predicate
+ * for the whole document, so the day lists, the route map, the cover's planned count
+ * and every cost total agree with the plan and with each other, whichever shell asked.
+ */
+function planAssignments(assignments: AssignmentsMap, showServiceStops: boolean): AssignmentsMap {
+  return Object.fromEntries(Object.entries(assignments).map(([dayId, list]) => [
+    dayId,
+    (list || []).filter(a => a.accommodation_id == null && (showServiceStops || !isServiceStopType(a.place?.stop_type))),
+  ]))
+}
+
+// `assignments` is normalised here once, to the plan's own list; every read below
+// (and fetchPlacePhotos) relies on it being an object.
+export async function downloadTripPDF({ trip, days, places, assignments: allStored = {}, categories, dayNotes, reservations: allReservations = [], t: _t, locale: _locale, timeFormat: _timeFormat, distanceUnit: _distanceUnit, showServiceStops = true, budgetItems, costsEnabled, onlyUserId }: downloadTripPDFProps) {
+  const { assignments: stored, reservations } = onlyUserId != null
+    ? onlyMyPlan(allStored, allReservations, onlyUserId)
+    : { assignments: allStored, reservations: allReservations }
+  const assignments = planAssignments(stored, showServiceStops)
+  const breaksPerDay = pdfSwitchOn(PAGE_BREAK_KEY)
+  const showTransportNotes = pdfSwitchOn(TRANSPORT_NOTES_KEY)
+  // Set while the days render: the switch only shows when there is a note to hide.
+  let hasTransportNotes = false
+  const loc = _locale || undefined
   const tr = _t || (k => k)
+  const markdown = createPdfMarkdown()
+  // The store read is the fallback, not the source: a caller that forgets the
+  // prop still prints the reader's own format instead of silently reverting.
+  const is12h = (_timeFormat || useSettingsStore.getState().settings.time_format || '24h') === '12h'
+  const fmtTime = (v?: string | null) => formatClockTime(v, is12h)
   const sorted = [...(days || [])].sort((a, b) => a.day_number - b.day_number)
   const range = longDateRange(sorted, loc)
   const coverImg = safeImg(trip?.cover_image)
+  //retrieve accommodations for the trip to display on the day sections and prefetch their photos if needed
+  const accommodations = await accommodationRepo.list(trip.id);
+  // The endpoint answers `{ accommodations: [...] }`, not a bare array. Unwrapped once
+  // here so every reader below gets the list itself — passing the envelope on is what
+  // cost the route map its hotel legs, and silently (#1736).
+  const accommodationList = Array.isArray(accommodations?.accommodations) ? accommodations.accommodations : []
 
-  // Pre-fetch place photos from Google
-  const photoMap = await fetchPlacePhotos(assignments)
+  // Sections contributed by pdfSectionProvider plugins — server-normalized plain
+  // text (counts + lengths capped), appended after the days. Fail-safe: an error
+  // just means no extra sections, the core export is untouched.
+  const pluginSections = await pluginsApi.pdfSections(trip.id).then(r => r.sections || []).catch(() => [])
+
+  // The trip's route as one map (#1736), drawn from the same builder the planner map
+  // uses so the document and the screen agree. Fail-safe and time-boxed: whatever the
+  // router answered inside the budget is drawn, the rest stay straight lines, and any
+  // failure at all simply means no map rather than no PDF.
+  const unit: DistanceUnit = (_distanceUnit || useSettingsStore.getState().settings.distance_unit) === 'imperial'
+    ? 'imperial' : 'metric'
+  let tripRoute: TripRouteSummary | null = null
+  const toursEnabled = useAddonStore.getState().isEnabled('tours')
+  const hasInvalidTour = toursEnabled && Object.values(assignments).some(list =>
+    projectDayItinerary(list || [], true, places).some(item => item.kind === 'tour' && !item.valid))
+  try {
+    tripRoute = await routeTrip(
+      {
+        days: sorted,
+        assignments,
+        reservations,
+        accommodations: accommodationList,
+        optimizeFromAccommodation: useSettingsStore.getState().settings.optimize_from_accommodation,
+        toursEnabled,
+        places,
+      },
+      { profile: 'driving', tripId: trip.id, timeoutMs: 8000 },
+    )
+  } catch (err) {
+    // Logged rather than swallowed: a map that is silently absent looks exactly like a
+    // trip that has no route, and the two need different answers from whoever is
+    // looking. The export itself carries on — the itinerary matters more than the map.
+    console.warn('[tripPdfMap] routing the trip failed; the export continues without a map', err)
+  }
+  // A real basemap first — at city scale the bundled outlines are a country-sized
+  // blank, and only streets carry context that small. The outline map is what is left
+  // when there is no WebGL, no network, or a style that will not load.
+  const mapFrame = { width: 720, height: 420, formatDistance: (km: number) => formatDistance(km, unit) }
+  const tripMapSvg = tripRoute
+    ? (await renderTripMapImage(tripRoute.days, {
+      ...mapFrame,
+      style: useSettingsStore.getState().settings.maplibre_style,
+    })) ?? buildTripMapSvg(tripRoute.days, mapFrame)
+    : null
+  // The other way to end up mapless, and the one that is not a failure: nothing in the
+  // trip routed. Only worth saying when there were stops to route — a trip nobody has
+  // planned yet is meant to print without a map.
+  if (tripRoute && !tripMapSvg && Object.values(assignments).some(list => list?.length)) {
+    console.warn(
+      `[tripPdfMap] no map drawn: ${tripRoute.days.length} of ${sorted.length} day(s) produced a route.`
+      + ' A day needs two located stops, or one located stop with an accommodation either side of it.',
+    )
+  }
+  const totalDistanceLabel = tripRoute && tripRoute.totalDistance > 0
+    ? formatDistance(tripRoute.totalDistance / 1000, unit)
+    : null
+  // Each day named and coloured exactly as the legend on the planner map, so the two
+  // read as the same picture. Days that routed to nothing are already out of `days`.
+  const tripMapHtml = tripMapSvg ? `
+<div class="trip-map">
+  <div class="trip-map-head">
+    <span class="trip-map-title">${escHtml(tr('pdf.mapTitle'))}</span>
+    ${totalDistanceLabel ? `<span class="trip-map-total">${escHtml(tr('pdf.distanceLabel'))}: ${escHtml(totalDistanceLabel)}</span>` : ''}
+  </div>
+  ${tripMapSvg}
+  <div class="trip-map-legend">
+    ${tripRoute.days.filter(d => d.lines.length).map(d => `<span class="trip-map-leg">
+      <span class="trip-map-dot" style="background:${hexColour(d.color.line)}"></span>
+      ${escHtml(d.title || tr('dayplan.dayN', { n: d.dayNumber }))}
+      <span class="trip-map-leg-dist">${escHtml(formatDistance(d.distance / 1000, unit))}</span>
+    </span>`).join('')}
+  </div>
+  <div class="trip-map-credit">${escHtml(tr('pdf.mapCredit'))}</div>
+</div>` : ''
+
+
+  // Pre-fetch place photos (Google, OSM and coords-only places)
+  const photoMap = await fetchPlacePhotos(assignments, places)
 
   const totalAssigned = new Set(
-    Object.values(assignments || {}).flatMap(a => a.map(x => x.place?.id)).filter(Boolean)
+    Object.values(assignments).flatMap(a => a.map(x => x.place?.id)).filter(Boolean)
   ).size
-  const totalCost = Object.values(assignments || {})
-    .flatMap(a => a).reduce((s, a) => s + (parseFloat(a.place?.price) || 0), 0)
+  // The PDF is a trip-scoped, shareable document, so totals stay in the trip's
+  // own currency. Rates are resolved ONCE before any HTML is built so the cover
+  // stat and every day header agree; all-same-currency trips skip the FX fetch
+  // entirely (offline export keeps working), and a failed fetch degrades to
+  // per-currency breakdowns instead of mislabeled sums (#1561).
+  const tripCur = (trip?.currency || 'EUR').toUpperCase()
+  // The same figures the plan shows (#2551): the expenses with Costs on, each once,
+  // else each planned place's own price once. An expense linked to a place finds its
+  // day through every stop, the booked night's included.
+  const withCosts = costsEnabled ?? useAddonStore.getState().isEnabled('budget')
+  const costs = planCosts({
+    days: sorted,
+    assignments: withCosts ? stored : assignments,
+    reservations,
+    budgetItems: budgetItems ?? useTripStore.getState().budgetItems,
+    costsEnabled: withCosts,
+    tripCurrency: tripCur,
+  })
+  const allCostEntries: MoneyEntry[] = costs.total
+  const needsFx = allCostEntries.some(e => e.amount !== 0 && e.currency.toUpperCase() !== tripCur)
+  const fxRates = needsFx ? await fetchExchangeRates(tripCur) : null
+  const totalCostLabel = formatMoneySum(allCostEntries, tripCur, loc || 'en', fxRates)
+  // Day totals render in the trip's currency; foreign amounts are converted via the
+  // pre-fetched rates, or listed per-currency when rates are unavailable (#1561).
+  const dayCost = (dayId: number) => formatMoneySum(costs.byDay.get(dayId) || [], tripCur, loc || 'en', fxRates)
 
+  /*
+   * The span label is the only PDF-specific piece left here. Everything else
+   * about how a day is ordered — which transports belong to it, what time each
+   * one shows, where it sits among the places — comes from utils/dayMerge, the
+   * same functions the day plan itself uses (#1978).
+   *
+   * There used to be a second implementation in this file. It ordered by
+   * `day_plan_position`, which is one global number per booking, seeded from
+   * whichever day happened to render first; on any other day of a span it
+   * pointed at the wrong slot, and when it was still null the export fell back
+   * to the order the API returned. That is why the PDF was right some of the
+   * time and swapped two bookings the rest of it.
+   */
+  const pdfGetSpanLabel = (r: any, phase: string): string | null => {
+    if (phase === 'single') return null
+    if (r.type === 'flight') return tr(`reservations.span.${phase === 'start' ? 'departure' : phase === 'end' ? 'arrival' : 'inTransit'}`)
+    if (r.type === 'car') return tr(`reservations.span.${phase === 'start' ? 'pickup' : phase === 'end' ? 'return' : 'active'}`)
+    // Parking reuses span.pickup for its end day: you drop the car off and collect it
+    // again later, so the rental car's wording carries over without a second key.
+    if (r.type === 'parking') return tr(`reservations.span.${phase === 'start' ? 'dropOff' : phase === 'end' ? 'pickup' : 'ongoing'}`)
+    return tr(`reservations.span.${phase === 'start' ? 'start' : phase === 'end' ? 'end' : 'ongoing'}`)
+  }
   // Build day HTML
   const daysHtml = sorted.map((day, di) => {
-    const assigned = assignments[String(day.id)] || []
-    const notes = (dayNotes || []).filter(n => n.day_id === day.id)
-    const cost = dayCost(assignments, day.id, loc)
+    // What the plan lists (planAssignments): the stop a booked night wrote sat at the
+    // head of its day, so the hotel printed above a morning flight (#2434).
+    const assigned = (assignments[String(day.id)] || [])
+      .slice()
+      .sort((a, b) => (a.order_index ?? 0) - (b.order_index ?? 0))
+    const notes = (dayNotes || []).filter(n => n.day_id === day.id).slice()
+      .sort((a: any, b: any) => (a.sort_order ?? 0) - (b.sort_order ?? 0))
+    const cost = dayCost(day.id)
 
-    const merged = []
-    assigned.forEach(a => merged.push({ type: 'place', k: a.order_index ?? a.sort_order ?? 0, data: a }))
-    notes.forEach(n    => merged.push({ type: 'note',  k: n.sort_order ?? 0, data: n }))
-    merged.sort((a, b) => a.k - b.k)
+    // Assembled exactly the way DayPlanSidebar assembles it, so the page and the
+    // print cannot disagree about what order a day is in.
+    const dayTransports = getTransportForDay({
+      reservations: reservations || [],
+      dayId: day.id,
+      dayAssignmentIds: assigned.map((a: any) => a.id),
+      days: sorted,
+    })
+
+    // Hotels come out in the accommodations block, a rental car's middle days
+    // appear only in the sidebar header, and a multi-day parking's middle days
+    // nowhere at all.
+    const merged = getMergedItems({
+      dayAssignments: assigned,
+      dayNotes: notes,
+      dayTransports,
+      dayId: day.id,
+    }).filter(item => {
+      if (item.type !== 'transport') return true
+      const r: any = item.data
+      if (r.type === 'car' && getSpanPhase(r, day.id) === 'middle') return false
+      return !hidesOnMiddleDay(r, day.id)
+    })
 
     let pi = 0
     const itemsHtml = merged.length === 0
       ? `<div class="empty-day">${escHtml(tr('dayplan.emptyDay'))}</div>`
       : merged.map(item => {
+          if (item.type === 'transport') {
+            const r = item.data
+            const meta = typeof r.metadata === 'string' ? JSON.parse(r.metadata || '{}') : (r.metadata || {})
+            const icon = reservationIconSvg(r.type)
+            const color = RESERVATION_COLOR_MAP[r.type] || '#3b82f6'
+            let subtitle = ''
+            // Flights render one subtitle line per leg (see below); everything else is a single line.
+            let subtitleLines: string[] = []
+            /*
+             * A multi-leg booking arrives as one item per leg now, the way the
+             * day plan shows it, because the shared merge expands legs so each
+             * one can sit at its own time among the day's places. Previously
+             * the export printed a single row with every leg as a subtitle
+             * line, which put the second leg's departure next to the first
+             * leg's clock.
+             */
+            if (r.__leg) {
+              const l = r.__leg
+              // The segment's own booking code, which the leg object does not
+              // carry — read back from the booking by index. At the gate that is
+              // the code the airline asks for (#1943), so losing it here would
+              // have been a real regression for a stopover flight.
+              const source = (usesStationRoute(r.type) ? getTrainLegs(r) : getFlightLegs(r))[l.index]
+              subtitleLines = [[
+                l.airline, l.flight_number, l.train_number,
+                l.platform ? `${tr('reservations.meta.platform')} ${l.platform}` : '',
+                l.seat ? `${tr('reservations.meta.seat')} ${l.seat}` : '',
+                (l.from || l.to) ? [l.from, l.to].filter(Boolean).join(' → ') : '',
+                source?.confirmation_number,
+              ].filter(Boolean).join(' · ')].filter(Boolean)
+            }
+            else if (r.type === 'flight') {
+              const legs = getFlightLegs(r)
+              if (legs.length > 1) {
+                // Multi-leg: one line per leg so every flight number + segment route is
+                // shown, with the segment's own booking code where it has one (#1943).
+                // At the gate that is the number the airline asks for.
+                subtitleLines = legs.map(l =>
+                  [l.airline, l.flight_number,
+                   (l.from || l.to) ? [l.from, l.to].filter(Boolean).join(' → ') : '',
+                   l.confirmation_number]
+                    .filter(Boolean).join(' · '))
+                  .filter(Boolean)
+              } else {
+                // Single-leg: full route over all waypoints (FRA → BER → HND), falling back to the
+                // flat metadata pair for legacy single-leg flights without endpoints.
+                const stops = (r.endpoints || []).slice().sort((a, b) => (a.sequence ?? 0) - (b.sequence ?? 0)).map(e => e.code || e.name)
+                const route = stops.length >= 2 ? stops.join(' → ') : (meta.departure_airport && meta.arrival_airport ? `${meta.departure_airport} → ${meta.arrival_airport}` : '')
+                subtitle = [meta.airline, meta.flight_number, route].filter(Boolean).join(' · ')
+              }
+            }
+            else if (r.type === 'train') {
+              const legs = getTrainLegs(r)
+              if (legs.length > 1) {
+                // Multi-leg: one line per leg so every train number + segment route shows,
+                // with the segment's own booking code where it has one (#1943).
+                subtitleLines = legs.map(l =>
+                  [l.train_number, l.platform ? `${tr('reservations.meta.platform')} ${l.platform}` : '',
+                   (l.from || l.to) ? [l.from, l.to].filter(Boolean).join(' → ') : '',
+                   l.confirmation_number]
+                    .filter(Boolean).join(' · '))
+                  .filter(Boolean)
+              } else {
+                const stops = (r.endpoints || []).slice().sort((a, b) => (a.sequence ?? 0) - (b.sequence ?? 0)).map(e => e.code || e.name)
+                const route = stops.length >= 2 ? stops.join(' → ') : ''
+                subtitle = [meta.train_number, meta.platform ? `${tr('reservations.meta.platform')} ${meta.platform}` : '', meta.seat ? `${tr('reservations.meta.seat')} ${meta.seat}` : '', route].filter(Boolean).join(' · ')
+              }
+            }
+            else if (r.type === 'car') {
+              // A rental with stops is a drive, and the printout is what people take
+              // into the car (#1797). Without this the route reads as pick-up and return
+              // with everything in between missing.
+              //
+              // Consecutive repeats collapse, and a chain that names one place only is
+              // dropped: the ordinary rental is picked up and returned at the same desk,
+              // which satisfies "two endpoints" and would otherwise print the counter's
+              // name twice with an arrow between. A genuine round trip keeps both ends,
+              // because Dresden sits between them.
+              const stops = (r.endpoints || []).slice()
+                .sort((a, b) => (a.sequence ?? 0) - (b.sequence ?? 0))
+                .map(e => e.name)
+                .filter((name, i, all) => name && name !== all[i - 1])
+              subtitle = new Set(stops).size >= 2 ? stops.join(' → ') : ''
+            }
+            else if (r.type === 'restaurant') subtitle = [meta.party_size ? `${meta.party_size} guests` : ''].filter(Boolean).join(' · ')
+            else if (r.type === 'event') subtitle = [meta.venue].filter(Boolean).join(' · ')
+            else if (r.type === 'tour') subtitle = [meta.operator].filter(Boolean).join(' · ')
+            if (subtitleLines.length === 0 && subtitle) subtitleLines = [subtitle]
+            const locationLine = r.location || meta.location || ''
+            const phase = getSpanPhase(r, day.id)
+            const spanLabel = pdfGetSpanLabel(r, phase)
+            const displayTime = getDisplayTimeForDay(r, day.id)
+            // Start and end, the way the day plan draws it (#1310). Without the
+            // landing time a flight reads as an open-ended block and the reader
+            // cannot tell how much of the day is left for anything else.
+            //
+            // Only on a transport that begins and ends on this day: across a
+            // span the arrival belongs to the arrival day, which already shows
+            // it as its own time, and repeating it here would put tomorrow's
+            // clock next to today's departure.
+            const startTime = fmtTime(splitReservationDateTime(displayTime).time)
+            const endTime = phase === 'single' ? fmtTime(splitReservationDateTime(r.reservation_end_time).time) : ''
+            const time = [startTime, endTime].filter(Boolean).join(' – ')
+            const titleHtml = `${spanLabel ? escHtml(spanLabel) + ': ' : ''}${escHtml(r.title)}`
+            const transportNote = typeof r.notes === 'string' ? r.notes.trim() : ''
+            if (transportNote) hasTransportNotes = true
+            return `
+              <div class="note-card" style="border-left: 3px solid ${color};">
+                <div class="note-line" style="background: ${color};"></div>
+                <span class="note-icon">${icon}</span>
+                <div class="note-body">
+                  <div class="note-text" style="font-weight: 600;">${titleHtml}${time ? ` <span style="color:#6b7280;font-weight:400;font-size:10px;">${time}</span>` : ''}</div>
+                  ${subtitleLines.filter(Boolean).map(s => `<div class="note-time">${escHtml(s)}</div>`).join('')}
+                  ${locationLine ? `<div class="note-time">${escHtml(locationLine)}</div>` : ''}
+                  ${r.confirmation_number ? `<div class="note-time" style="font-size:9px;">Code: ${escHtml(r.confirmation_number)}</div>` : ''}
+                  ${transportNote ? `<div class="note-time transport-note">${escHtml(transportNote)}</div>` : ''}
+                </div>
+              </div>`
+          }
+
           if (item.type === 'note') {
             const note = item.data
+            // A coloured note carries its colour into print the same way a
+            // reservation does (#1629) — the rule and the spine, not a fill,
+            // because a tint costs ink and reads as grey on a mono printer.
+            const noteColor = note.color || ''
             return `
-              <div class="note-card">
-                <div class="note-line"></div>
-                <span class="note-icon">${noteIconSvg(note.icon)}</span>
+              <div class="note-card"${noteColor ? ` style="border-left: 3px solid ${noteColor};"` : ''}>
+                <div class="note-line"${noteColor ? ` style="background: ${noteColor};"` : ''}></div>
+                <span class="note-icon"${noteColor ? ` style="color: ${noteColor};"` : ''}>${noteIconSvg(note.icon)}</span>
                 <div class="note-body">
                   <div class="note-text">${escHtml(note.text)}</div>
                   ${note.time ? `<div class="note-time">${escHtml(note.time)}</div>` : ''}
@@ -149,11 +557,12 @@ export async function downloadTripPDF({ trip, days, places, assignments, categor
           const place = item.data.place
           if (!place) return ''
           const cat = categories.find(c => c.id === place.category_id)
-          const color = cat?.color || '#6366f1'
+          const color = safeHexColor(cat?.color, '#6366f1')
 
-          // Image: direct > google photo > fallback icon
+          // Image: direct > google photo > fallback icon. Both go through safeImg
+          // so the proxy path is resolved to an absolute URL the PDF can load.
           const directImg = safeImg(place.image_url)
-          const googleImg = photoMap[place.id] || null
+          const googleImg = safeImg(photoMap[place.id])
           const img = directImg || googleImg
 
           const iconSvg = categoryIconSvg(cat?.icon, color, 24)
@@ -164,8 +573,8 @@ export async function downloadTripPDF({ trip, days, places, assignments, categor
                </div>`
 
           const chips = [
-            place.place_time ? `<span class="chip">${svgClock}${escHtml(place.place_time)}</span>` : '',
-            place.price && parseFloat(place.price) > 0 ? `<span class="chip chip-green">${svgEuro}${Number(place.price).toLocaleString('de-DE')} EUR</span>` : '',
+            place.place_time ? `<span class="chip">${svgClock}${escHtml(fmtTime(place.place_time))}</span>` : '',
+            place.price && Number.parseFloat(place.price) > 0 ? `<span class="chip chip-green">${svgMoney}${formatMoney(Number(place.price), place.currency || trip.currency, loc)}</span>` : '',
           ].filter(Boolean).join('')
 
           return `
@@ -179,27 +588,90 @@ export async function downloadTripPDF({ trip, days, places, assignments, categor
                   ${cat ? `<span class="cat-badge" style="background:${color}">${escHtml(cat.name)}</span>` : ''}
                 </div>
                 ${place.address ? `<div class="info-row">${svgPin}<span class="info-text">${escHtml(place.address)}</span></div>` : ''}
-                ${place.description ? `<div class="info-row"><span class="info-spacer"></span><span class="info-text muted italic">${escHtml(place.description)}</span></div>` : ''}
+                ${(place.lat != null && place.lng != null) ? `<div class="info-row"><span class="info-spacer"></span><span class="info-text muted">${Number(place.lat).toFixed(5)}, ${Number(place.lng).toFixed(5)}</span></div>` : ''}
+                ${place.description ? markdown.row(place.description) : ''}
                 ${chips ? `<div class="chips">${chips}</div>` : ''}
-                ${place.notes ? `<div class="info-row"><span class="info-spacer"></span><span class="info-text muted italic">${escHtml(place.notes)}</span></div>` : ''}
+                ${place.notes ? markdown.row(place.notes) : ''}
+                ${item.data.notes ? markdown.row(item.data.notes) : ''}
               </div>
             </div>`
-        }).join('')
+      }).join('')
 
+    const accommodationsForDay = accommodationList.filter(a =>
+      day ? isDayInAccommodationRange(day, a.start_day_id, a.end_day_id, days) : false
+    ).sort((a, b) => {
+      const startA = days.find(d => d.id === a.start_day_id)
+      const startB = days.find(d => d.id === b.start_day_id)
+      return (startA ? getDayOrder(startA, days) : 0) - (startB ? getDayOrder(startB, days) : 0)
+    })
+
+    const accommodationDetails = accommodationsForDay.map(item => {
+      const isCheckIn = day.id === item.start_day_id
+      const isCheckOut = day.id === item.end_day_id
+      const actionLabel = isCheckIn ? tr('reservations.meta.checkIn')
+        : isCheckOut ? tr('reservations.meta.checkOut')
+        : tr('reservations.meta.linkAccommodation')
+      const actionIcon = isCheckIn ? accommodationIconSvg('checkin')
+        : isCheckOut ? accommodationIconSvg('checkout')
+        : accommodationIconSvg('accommodation')
+      const timeStr = isCheckIn ? fmtTime(item.check_in)
+        : isCheckOut ? fmtTime(item.check_out)
+        : ''
+
+      return `
+        <div class="day-accommodation">
+          <div class="day-accommodation-title accommodation-center-icon">${actionIcon} ${escHtml(actionLabel)}</div>
+          ${timeStr ? `<div class="accommodation-center-icon">${accommodationIconSvg('checkin')} <b>${escHtml(timeStr)}</b></div>` : ''}
+          <div class="accommodation-center-icon">${accommodationIconSvg('accommodation')} ${escHtml(item.place_name)}</div>
+          ${item.place_address ? `<div class="accommodation-center-icon">${accommodationIconSvg('location')} ${escHtml(item.place_address)}</div>` : ''}
+          ${item.notes ? `<div class="accommodation-center-icon">${accommodationIconSvg('note')} ${escHtml(item.notes)}</div>` : ''}
+          ${isCheckIn && item.confirmation ? `<div class="accommodation-center-icon">${accommodationIconSvg('confirmation')} ${escHtml(item.confirmation)}</div>` : ''}
+        </div>`
+    }).join('')
+
+    const accommodationsHtml = accommodationsForDay.length > 0
+      ? `<div class="day-accommodations-overview">
+          <div class="day-accommodations ${accommodationsForDay.length === 1 ? 'single' : ''}">${accommodationDetails}</div>
+        </div>`
+      : ''
+
+    // A real <table> so the browser repeats the <thead> day header at the top of
+    // every page an overflowing day spills onto (#1471). CSS `table-header-group`
+    // on a <div> is NOT repeated by Chromium's print engine — only real thead is.
     return `
-      <div class="day-section${di > 0 ? ' page-break' : ''}">
-        <div class="day-header">
-          <span class="day-tag">${escHtml(tr('dayplan.dayN', { n: day.day_number })).toUpperCase()}</span>
-          <span class="day-title">${escHtml(day.title || `Tag ${day.day_number}`)}</span>
-          ${day.date ? `<span class="day-date">${shortDate(day.date, loc)}</span>` : ''}
-          ${cost ? `<span class="day-cost">${cost}</span>` : ''}
-        </div>
-        <div class="day-body">${itemsHtml}</div>
-      </div>`
+      <table class="day-section${di > 0 ? ' day-break' : ''}">
+        <thead class="day-header"><tr><td>
+          <div class="day-header-bar">
+            <span class="day-tag">${escHtml(tr('dayplan.dayN', { n: day.day_number })).toUpperCase()}</span>
+            <span class="day-title">${escHtml(day.title || tr('dayplan.dayN', { n: day.day_number }))}</span>
+            ${day.date ? `<span class="day-date">${shortDate(day.date, loc)}</span>` : ''}
+            ${cost ? `<span class="day-cost">${cost}</span>` : ''}
+          </div>
+        </td></tr></thead>
+        <tbody class="day-body-group"><tr><td>
+          <div class="day-body">${accommodationsHtml}${itemsHtml}</div>
+        </td></tr></tbody>
+      </table>`
   }).join('')
 
+  // Plugin sections after the days — every value is host-vetted plain text and
+  // still escHtml'd here (same treatment as the core content above).
+  const pluginSectionsHtml = pluginSections.length === 0 ? '' : `
+    <div class="plugin-sections page-break">
+      ${pluginSections.map(s => `
+      <div class="plugin-section">
+        <div class="plugin-section-title">${escHtml(s.title)}</div>
+        ${(s.paragraphs || []).map(p => `<p class="plugin-section-text">${escHtml(p)}</p>`).join('')}
+        ${s.table ? `
+        <table class="plugin-section-table">
+          <thead><tr>${s.table.headers.map(h => `<th>${escHtml(h)}</th>`).join('')}</tr></thead>
+          <tbody>${s.table.rows.map(row => `<tr>${row.map(cell => `<td>${escHtml(cell)}</td>`).join('')}</tr>`).join('')}</tbody>
+        </table>` : ''}
+      </div>`).join('')}
+    </div>`
+
   const html = `<!DOCTYPE html>
-<html lang="de">
+<html lang="${(loc || 'en').split('-')[0]}">
 <head>
 <meta charset="UTF-8">
 <base href="${window.location.origin}/">
@@ -266,9 +738,40 @@ export async function downloadTripPDF({ trip, days, places, assignments, categor
   .cover-stat-num { font-size: 28px; font-weight: 700; color: #fff; line-height: 1; }
   .cover-stat-lbl { font-size: 9px; font-weight: 500; color: rgba(255,255,255,0.4); letter-spacing: 1px; margin-top: 4px; text-transform: uppercase; }
 
+  /* ── Trip map ──────────────────────────────────── */
+  .trip-map { padding: 26px 30px 20px; page-break-after: always; page-break-inside: avoid; }
+  .pdf-flow .trip-map { page-break-after: auto; }
+  .trip-map-head { display: flex; align-items: baseline; justify-content: space-between; gap: 16px; margin-bottom: 12px; }
+  .trip-map-title { font-size: 11px; font-weight: 600; letter-spacing: 1.4px; text-transform: uppercase; color: #64748b; }
+  .trip-map-total { font-size: 12px; font-weight: 600; color: #334155; }
+  .trip-map-svg { width: 100%; height: auto; border-radius: 8px; border: 1px solid #e2e8f0; display: block; }
+  .trip-map-legend { display: flex; flex-wrap: wrap; gap: 6px 18px; margin-top: 12px; }
+  .trip-map-leg { display: flex; align-items: center; gap: 6px; font-size: 9px; color: #475569; }
+  .trip-map-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+  .trip-map-leg-dist { color: #94a3b8; }
+  .trip-map-credit { font-size: 7.5px; color: #94a3b8; margin-top: 10px; }
+
   /* ── Day ───────────────────────────────────────── */
+  /* .day-section is a real <table>; its <thead> day header repeats on overflow pages. */
   .page-break { page-break-before: always; }
-  .day-header {
+  /* Days break by default; .pdf-flow on <body> is the toggle in the preview (#1292).
+     Flowing days butt against each other without the page edge between them. */
+  .day-break { page-break-before: always; }
+  .pdf-flow .day-break { page-break-before: auto; }
+  .transport-note { font-style: italic; white-space: pre-line; }
+  .pdf-no-transport-notes .transport-note { display: none; }
+  .pdf-flow .day-section + .day-section { margin-top: 18px; }
+  /* Hold a flowing day together. Without this the header bar can be placed at the
+     foot of a sheet while its content moves to the next one, which then repeats
+     the header (#1471) and reads as the same day printed twice. A day too long
+     for one page still breaks and still repeats its header — the engine only
+     honours this where it can. Days that start a page of their own cannot strand
+     a header, so it is scoped to the flowing layout.
+     Measured, not assumed: break-after on the thead and break-before on the tbody
+     are both ignored by Chromium here. */
+  .pdf-flow .day-section { break-inside: avoid; page-break-inside: avoid; }
+  .day-section { width: 100%; border-collapse: collapse; table-layout: fixed; }
+  .day-header-bar {
     background: #0f172a; padding: 11px 28px;
     display: flex; align-items: center; gap: 8px;
   }
@@ -276,7 +779,31 @@ export async function downloadTripPDF({ trip, days, places, assignments, categor
   .day-title { font-size: 13px; font-weight: 600; color: #fff; flex: 1; }
   .day-date  { font-size: 9px; color: rgba(255,255,255,0.45); }
   .day-cost  { font-size: 9px; font-weight: 600; color: rgba(255,255,255,0.65); }
-  .day-body  { padding: 12px 28px 6px; }
+  /* The gap under the header bar must sit inside the repeated <thead> cell: a block-start
+     padding on .day-body is only painted on the box's first fragment, so overflow pages
+     would render their first card flush against the bar (#1531). */
+  .day-header > tr > td { padding-bottom: 12px; }
+  .day-body  { padding: 0 28px 6px; }
+
+  /* accommodation info */
+  .day-accommodations-overview { font-size: 12px; }
+  .day-accommodations { display: flex; flex-wrap: wrap; gap: 8px; justify-content: space-between; }
+  .day-accommodations.single { justify-content: center; }
+  .day-accommodation {
+    flex: 1 1 45%; min-width: 200px; margin: 4px 0; padding: 10px;
+    border: 2px solid #e2e8f0; border-radius: 12px;
+    display: flex; flex-direction: column;
+    /* Place and note cards have said this all along; without it a stay is torn
+       in half by a page edge, its check-in time on one sheet and the hotel name
+       on the next. Rare while every day started a page, common once they flow. */
+    break-inside: avoid; page-break-inside: avoid;
+  }
+  .day-accommodation-title {
+    font-size: 16px; font-weight: 600; text-align: center;
+    margin-bottom: 4px; align-self: center;
+  }
+  .accommodation-center-icon { display: flex; align-items: center; gap: 4px; }
+
 
   /* ── Place card ────────────────────────────────── */
   .place-card {
@@ -311,7 +838,7 @@ export async function downloadTripPDF({ trip, days, places, assignments, categor
   .info-spacer { width: 13px; flex-shrink: 0; }
   .info-text { font-size: 9px; color: #64748b; line-height: 1.5; }
   .info-text.muted { color: #94a3b8; }
-  .info-text.italic { font-style: italic; }
+  ${PDF_MARKDOWN_CSS}
 
   .chips { display: flex; flex-wrap: wrap; gap: 4px; padding-left: 21px; margin-top: 4px; }
   .chip { display: inline-flex; align-items: center; gap: 3px; font-size: 8px; font-weight: 600; background: #f1f5f9; color: #374151; border-radius: 99px; padding: 2px 7px; white-space: nowrap; }
@@ -333,6 +860,15 @@ export async function downloadTripPDF({ trip, days, places, assignments, categor
 
   .empty-day { font-size: 9.5px; color: #cbd5e1; font-style: italic; text-align: center; padding: 14px 0; }
 
+  /* ── Plugin sections ───────────────────────────── */
+  .plugin-sections { padding: 16px 28px 6px; }
+  .plugin-section { margin-bottom: 16px; page-break-inside: avoid; }
+  .plugin-section-title { font-size: 12px; font-weight: 600; color: #1e293b; margin-bottom: 6px; padding-bottom: 4px; border-bottom: 1px solid #e2e8f0; }
+  .plugin-section-text { font-size: 9.5px; color: #334155; line-height: 1.55; margin-bottom: 5px; }
+  .plugin-section-table { width: 100%; border-collapse: collapse; margin-top: 6px; }
+  .plugin-section-table th { font-size: 8px; font-weight: 600; color: #64748b; text-transform: uppercase; letter-spacing: 0.5px; text-align: left; padding: 4px 8px; border-bottom: 1px solid #e2e8f0; }
+  .plugin-section-table td { font-size: 9px; color: #334155; padding: 4px 8px; border-bottom: 1px solid #f1f5f9; }
+
   /* ── Print ─────────────────────────────────────── */
   @media print {
     body { margin: 0; }
@@ -341,7 +877,7 @@ export async function downloadTripPDF({ trip, days, places, assignments, categor
   }
 </style>
 </head>
-<body>
+<body${bodyClassAttr(breaksPerDay, showTransportNotes)}>
 
 <!-- Footer on every page -->
 <div class="pdf-footer">
@@ -351,7 +887,7 @@ export async function downloadTripPDF({ trip, days, places, assignments, categor
 
 <!-- Cover -->
 <div class="cover">
-  ${coverImg ? `<div class="cover-bg" style="background-image:url('${escHtml(coverImg)}')"></div>` : ''}
+  ${coverImg ? `<div class="cover-bg" style="background-image:url('${escHtml(cssUrl(coverImg))}')"></div>` : ''}
   <div class="cover-dim"></div>
   <div class="cover-brand"><img src="${absUrl('/logo-light.svg')}" style="height:28px;opacity:0.5;" /></div>
   <div class="cover-body">
@@ -366,28 +902,37 @@ export async function downloadTripPDF({ trip, days, places, assignments, categor
     <div class="cover-stats">
       <div>
         <div class="cover-stat-num">${sorted.length}</div>
-        <div class="cover-stat-lbl">${escHtml(tr('dashboard.days'))}</div>
+        <div class="cover-stat-lbl">${escHtml(tr('dashboard.days', { count: sorted.length }))}</div>
       </div>
       <div>
         <div class="cover-stat-num">${places?.length || 0}</div>
-        <div class="cover-stat-lbl">${escHtml(tr('dashboard.places'))}</div>
+        <div class="cover-stat-lbl">${escHtml(tr('dashboard.places', { count: places?.length || 0 }))}</div>
       </div>
       <div>
         <div class="cover-stat-num">${totalAssigned}</div>
         <div class="cover-stat-lbl">${escHtml(tr('pdf.planned'))}</div>
       </div>
-      ${totalCost > 0 ? `<div>
-        <div class="cover-stat-num">${totalCost.toLocaleString('de-DE')}</div>
+      ${totalDistanceLabel ? `<div>
+        <div class="cover-stat-num">${escHtml(totalDistanceLabel)}</div>
+        <div class="cover-stat-lbl">${escHtml(tr('pdf.distanceLabel'))}</div>
+      </div>` : ''}
+      ${totalCostLabel ? `<div>
+        <div class="cover-stat-num">${totalCostLabel}</div>
         <div class="cover-stat-lbl">${escHtml(tr('pdf.costLabel'))}</div>
       </div>` : ''}
     </div>
   </div>
 </div>
 
+<!-- Trip map -->
+${hasInvalidTour ? `<p role="status" style="color:#b45309">${escHtml(tr('tours.dayRoute.endpointUnknown'))}</p>` : ''}
+${tripMapHtml}
+
 <!-- Days -->
 ${daysHtml}
-
+${pluginSectionsHtml}
 </body></html>`
+  markdown.dispose()
 
   // Open in modal with srcdoc iframe (no URL loading = no X-Frame-Options issue)
   const overlay = document.createElement('div')
@@ -399,12 +944,14 @@ ${daysHtml}
   card.style.cssText = 'width:100%;max-width:1000px;height:95vh;background:var(--bg-card);border-radius:12px;overflow:hidden;display:flex;flex-direction:column;box-shadow:0 20px 60px rgba(0,0,0,0.3);'
 
   const header = document.createElement('div')
-  header.style.cssText = 'display:flex;align-items:center;justify-content:space-between;padding:10px 16px;border-bottom:1px solid var(--border-primary);flex-shrink:0;'
+  header.style.cssText = 'display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap;padding:10px 16px;border-bottom:1px solid var(--border-primary);flex-shrink:0;'
   header.innerHTML = `
-    <span style="font-size:13px;font-weight:600;color:var(--text-primary)">${escHtml(trip?.title || tr('pdf.travelPlan'))}</span>
+    <span style="font-size:13px;font-weight:600;color:var(--text-primary);min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escHtml(trip?.title || tr('pdf.travelPlan'))}</span>
     <div style="display:flex;align-items:center;gap:8px">
-      <button id="pdf-print-btn" style="display:flex;align-items:center;gap:5px;font-size:12px;font-weight:500;color:var(--text-muted);background:none;border:none;cursor:pointer;padding:4px 8px;border-radius:6px;font-family:inherit">${tr('pdf.saveAsPdf')}</button>
-      <button id="pdf-close-btn" style="background:none;border:none;cursor:pointer;color:var(--text-faint);display:flex;padding:4px;border-radius:6px">
+      ${hasTransportNotes ? previewSwitch('pdf-transport-notes-toggle', tr('pdf.transportNotes'), showTransportNotes) : ''}
+      ${previewSwitch('pdf-daybreak-toggle', tr('pdf.pageBreakPerDay'), breaksPerDay)}
+      <button type="button" id="pdf-print-btn" style="display:flex;align-items:center;gap:5px;font-size:12px;font-weight:500;color:var(--text-muted);background:none;border:none;cursor:pointer;padding:4px 8px;border-radius:6px;font-family:inherit">${tr('pdf.saveAsPdf')}</button>
+      <button type="button" id="pdf-close-btn" style="background:none;border:none;cursor:pointer;color:var(--text-faint);display:flex;padding:4px;border-radius:6px">
         <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
       </button>
     </div>
@@ -412,6 +959,8 @@ ${daysHtml}
 
   const iframe = document.createElement('iframe')
   iframe.style.cssText = 'flex:1;width:100%;border:none;'
+  // No script runs inside the document (print is parent-initiated), so withhold
+  // allow-scripts to keep the sandbox tight.
   iframe.sandbox = 'allow-same-origin allow-modals'
   iframe.srcdoc = html
 
@@ -420,6 +969,45 @@ ${daysHtml}
   overlay.appendChild(card)
   document.body.appendChild(overlay)
 
-  header.querySelector('#pdf-close-btn').onclick = () => overlay.remove()
-  header.querySelector('#pdf-print-btn').onclick = () => { iframe.contentWindow?.print() }
+  const closeBtn = header.querySelector<HTMLElement>('#pdf-close-btn')
+  if (closeBtn) closeBtn.onclick = () => overlay.remove()
+  const printBtn = header.querySelector<HTMLElement>('#pdf-print-btn')
+  if (printBtn) printBtn.onclick = () => { iframe.contentWindow?.print() }
+
+  // Both choices differ by one class on <body>, so switching is instant in the
+  // preview and there is no need to re-fetch photos or rebuild the document.
+  wirePreviewSwitch(header, 'pdf-daybreak-toggle', on => {
+    rememberPdfSwitch(PAGE_BREAK_KEY, on)
+    iframe.contentDocument?.body.classList.toggle('pdf-flow', !on)
+  })
+  wirePreviewSwitch(header, 'pdf-transport-notes-toggle', on => {
+    rememberPdfSwitch(TRANSPORT_NOTES_KEY, on)
+    iframe.contentDocument?.body.classList.toggle('pdf-no-transport-notes', !on)
+  })
+}
+
+function bodyClassAttr(breaksPerDay: boolean, showTransportNotes: boolean): string {
+  const classes = [!breaksPerDay && 'pdf-flow', !showTransportNotes && 'pdf-no-transport-notes'].filter(Boolean)
+  return classes.length ? ` class="${classes.join(' ')}"` : ''
+}
+
+/** A labelled switch for the preview header, as markup; wirePreviewSwitch gives it behaviour. */
+function previewSwitch(id: string, label: string, on: boolean): string {
+  return `<label for="${id}" style="font-size:12px;color:var(--text-muted);cursor:pointer;user-select:none">${escHtml(label)}</label>
+      <button id="${id}" type="button" role="switch" aria-checked="${on}" aria-label="${escHtml(label)}" style="${TOGGLE_TRACK} background:${trackColour(on)}">
+        <span style="${TOGGLE_KNOB} left:${knobOffset(on)}"></span>
+      </button>`
+}
+
+function wirePreviewSwitch(header: HTMLElement, id: string, onChange: (on: boolean) => void): void {
+  const button = header.querySelector<HTMLButtonElement>(`#${id}`)
+  if (!button) return
+  button.onclick = () => {
+    const on = button.getAttribute('aria-checked') !== 'true'
+    button.setAttribute('aria-checked', String(on))
+    button.style.background = trackColour(on)
+    const knob = button.firstElementChild as HTMLElement | null
+    if (knob) knob.style.left = knobOffset(on)
+    onChange(on)
+  }
 }

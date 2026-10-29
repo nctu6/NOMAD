@@ -1,0 +1,139 @@
+/**
+ * BOOTSTRAP / F6 — boots the unified production bootstrap (buildApp) and asserts
+ * the whole shell is intact on the single NestJS instance now that Express is gone:
+ * the global security pipeline (helmet/CSP), the /uploads platform routes, the
+ * migrated /api domains (with the JWT guard), the /api/health + /api/addons
+ * platform/inline endpoints, and (in production) HSTS. This is the test that proves
+ * server/src/bootstrap.ts + index.ts serve everything correctly without the legacy app.
+ */
+import { buildApp } from '../../src/bootstrap';
+import { db as testDb } from '../../src/db/database';
+import { UnitOfWork } from '../../src/nest/database/unit-of-work';
+import { authCookie } from '../helpers/auth';
+import { createUser } from '../helpers/factories';
+import { resetTestDb } from '../helpers/test-db';
+import type { INestApplication } from '@nestjs/common';
+
+import request from 'supertest';
+import { describe, it, expect, vi, beforeAll, afterAll } from 'vitest';
+
+vi.mock('../../src/db/database', async () => {
+  const { createSnapshotTestDb, buildDbMock } = await import('../helpers/db-mock');
+  return buildDbMock(createSnapshotTestDb());
+});
+// BOOT-007 boots with NODE_ENV=production, which opens the cron gate — keep the
+// registrar inert so a bootstrap test never schedules real jobs or runs boot
+// sweeps against the real uploads/data dirs. The gate itself is covered by
+// tests/integration/scheduler-gate.test.ts.
+//
+// runOnBoot (task-6-rereview.md M1): AirportsService's boot backfill has no
+// isEnabled() gate of its own (unlike the seven job providers above, which
+// all check isEnabled() before ever reaching runOnBoot, so they never call
+// this mock's method at all) — it calls runOnBoot() unconditionally, so this
+// double needs one too. A no-op, not a pass-through: "the registrar inert"
+// above means no boot sweep runs in this harness, full stop.
+vi.mock('../../src/nest/scheduling/cron-registrar.service', () => ({
+  CronRegistrarService: class {
+    isEnabled() {
+      return false;
+    }
+    register() {
+      return false;
+    }
+    async runOnBoot() {
+      /* inert — see comment above */
+    }
+    unregister() {}
+    get jobCount() {
+      return 0;
+    }
+    onApplicationShutdown() {}
+  },
+}));
+
+describe('BOOTSTRAP (F6) — unified NestJS app serves the whole surface', () => {
+  let app: INestApplication;
+  let instance: import('express').Application;
+
+  beforeAll(async () => {
+    resetTestDb(testDb);
+    app = await buildApp();
+    instance = app.getHttpAdapter().getInstance();
+  });
+
+  afterAll(async () => {
+    await app.close();
+    testDb.close();
+  });
+
+  it('BOOT-001 — GET /api/health returns 200 { status: ok } (platform transport on Nest)', async () => {
+    const res = await request(instance).get('/api/health');
+    expect(res.status).toBe(200);
+    expect(res.body.status).toBe('ok');
+    expect(res.headers['cache-control']).toContain('no-store');
+  });
+
+  it('BOOT-002 — the global security pipeline (helmet) is applied', async () => {
+    const res = await request(instance).get('/api/health');
+    // helmet defaults — proof applyGlobalMiddleware ran on the Nest instance.
+    expect(res.headers['x-content-type-options']).toBe('nosniff');
+    expect(res.headers['content-security-policy']).toBeDefined();
+  });
+
+  it('BOOT-003 — public /api/config is reachable without auth (migrated Nest domain)', async () => {
+    const res = await request(instance).get('/api/config');
+    expect(res.status).toBe(200);
+  });
+
+  it('BOOT-004 — a protected /api domain rejects an anonymous request (JWT guard wired)', async () => {
+    const res = await request(instance).get('/api/trips');
+    expect(res.status).toBe(401);
+  });
+
+  it('BOOT-005 — /uploads/files is blocked without auth (platform uploads on Nest)', async () => {
+    const res = await request(instance).get('/uploads/files/anything.bin');
+    expect(res.status).toBe(401);
+  });
+
+  it('BOOT-006 — GET /api/addons works end-to-end (guard → Nest AddonsController)', async () => {
+    const anon = await request(instance).get('/api/addons');
+    expect(anon.status).toBe(401);
+
+    const { user } = createUser(testDb);
+    const res = await request(instance).get('/api/addons').set('Cookie', authCookie(user.id));
+    expect(res.status).toBe(200);
+    expect(Array.isArray(res.body.addons)).toBe(true);
+  });
+
+  it('BOOT-007 — HSTS is advertised when NODE_ENV=production', async () => {
+    const prev = process.env.NODE_ENV;
+    process.env.NODE_ENV = 'production';
+    let prodApp: INestApplication | undefined;
+    try {
+      prodApp = await buildApp();
+      const res = await request(prodApp.getHttpAdapter().getInstance()).get('/api/health');
+      expect(res.headers['strict-transport-security']).toContain('max-age=');
+    } finally {
+      if (prodApp) await prodApp.close();
+      if (prev === undefined) delete process.env.NODE_ENV;
+      else process.env.NODE_ENV = prev;
+    }
+  });
+
+  it('BOOT-008 — large responses are gzip-compressed (Atlas country GeoJSON, #1254)', async () => {
+    // The admin-0 country GeoJSON is multi-MB; without compression it stalls
+    // behind reverse proxies / Cloudflare Tunnel. Proves applyGlobalMiddleware
+    // gzips it on the wire.
+    const { user } = createUser(testDb);
+    const res = await request(instance)
+      .get('/api/addons/atlas/countries/geo')
+      .set('Accept-Encoding', 'gzip')
+      .set('Cookie', authCookie(user.id));
+    expect(res.status).toBe(200);
+    expect(res.headers['content-encoding']).toBe('gzip');
+  });
+
+  it('BOOTSTRAP-ORM-001: the ORM unit of work resolves from the container', () => {
+    expect(app.get(UnitOfWork)).toBeInstanceOf(UnitOfWork);
+  });
+});

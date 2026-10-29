@@ -3,6 +3,11 @@ node_modules/
 
 # Build output
 client/dist/
+server/dist/
+server/VERSION
+shared/dist/
+server/public/*
+!server/public/.gitkeep
 
 # Generated PWA icons (built from SVG via prebuild)
 client/public/icons/*.png
@@ -11,9 +16,12 @@ client/public/icons/*.png
 *.db
 *.db-shm
 *.db-wal
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
 
 # User data
-server/data/
+server/data/*
 server/uploads/
 
 # Environment
@@ -28,6 +36,7 @@ Thumbs.db
 # IDE
 .vscode/
 .idea/
+.claude/
 
 # Logs
 logs
@@ -43,8 +52,11 @@ yarn-error.log*
 
 # Coverage
 coverage
+coverage-*/
 *.lcov
 .nyc_output
+# Blob reports of a sharded vitest run (test.yml)
+.vitest-reports
 
 # Cache
 .npm
@@ -52,3 +64,12 @@ coverage
 .cache
 *.tsbuildinfo
 *.tgz
+
+.scannerwork
+test-data
+
+# Live-MinIO/AIStor manual test license key — never commit, operators obtain their own free key
+minio-licence.key
+
+.run
+.full-review

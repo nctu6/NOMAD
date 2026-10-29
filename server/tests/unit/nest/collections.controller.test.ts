@@ -1,0 +1,448 @@
+import { RuntimeEnvService } from '../../../src/nest/app-config/runtime-env.service';
+import { CollectionsController } from '../../../src/nest/collections/collections.controller';
+import type { CollectionsService } from '../../../src/nest/collections/collections.service';
+import { DomainError } from '../../../src/nest/common/domain-error';
+import { CollectionGpxError } from '../../../src/nest/place-import/place-import.types';
+import type { StorageService } from '../../../src/nest/storage/storage.service';
+import type { User } from '../../../src/types';
+import { HttpException } from '@nestjs/common';
+import type { CollectionGpxProblem } from '@trek/shared';
+
+import { describe, it, expect, vi, afterEach } from 'vitest';
+
+const storageStub = { put: vi.fn().mockResolvedValue(undefined) } as unknown as StorageService;
+
+const user = { id: 1, username: 'owner', role: 'user', email: 'u@example.test' } as User;
+
+/** Service mock — access granted + owner by default; each method a spy. */
+function makeService(overrides: Partial<Record<keyof CollectionsService, unknown>> = {}): CollectionsService {
+  return {
+    listCollections: vi.fn().mockResolvedValue({ collections: [], incomingInvites: [] }),
+    getCollection: vi.fn().mockResolvedValue({ collection: { id: 3 }, places: [] }),
+    createCollection: vi.fn().mockResolvedValue({ id: 7 }),
+    updateCollection: vi.fn().mockResolvedValue({ id: 3 }),
+    setCollectionCover: vi.fn().mockResolvedValue({ id: 3 }),
+    deleteCollection: vi.fn(),
+    reorderCollections: vi.fn(),
+    savePlace: vi.fn().mockResolvedValue({ place: { id: 9 } }),
+    saveFromTripPlace: vi.fn().mockResolvedValue({ place: { id: 9 } }),
+    updatePlace: vi.fn().mockResolvedValue({ id: 9 }),
+    setStatus: vi.fn().mockResolvedValue({ id: 9 }),
+    deletePlace: vi.fn(),
+    deletePlacesMany: vi.fn().mockResolvedValue([1, 2]),
+    copyToTrip: vi.fn().mockResolvedValue({ copied: 1, skipped: [] }),
+    tripEvents: vi.fn((tripId: number, socketId: string | undefined) => ({ tripId, socketId })),
+    findMembership: vi.fn().mockResolvedValue({ inLists: [] }),
+    assertAccess: vi.fn(),
+    isOwner: vi.fn().mockResolvedValue(true),
+    sendInvite: vi.fn().mockResolvedValue({ success: true }),
+    acceptInvite: vi.fn().mockResolvedValue({ success: true }),
+    declineInvite: vi.fn(),
+    cancelInvite: vi.fn(),
+    leaveCollection: vi.fn(),
+    removeMember: vi.fn(),
+    availableUsers: vi.fn().mockResolvedValue([{ id: 2 }]),
+    createLabel: vi.fn().mockResolvedValue({ id: 5, collection_id: 3, name: 'Berlin' }),
+    updateLabel: vi.fn().mockResolvedValue({ id: 5, collection_id: 3, name: 'Hamburg' }),
+    deleteLabel: vi.fn(),
+    assignLabels: vi.fn().mockResolvedValue({ changed: 2 }),
+    ...overrides,
+  } as unknown as CollectionsService;
+}
+
+function thrown(fn: () => unknown): { status: number; body: unknown } {
+  try {
+    fn();
+  } catch (err) {
+    expect(err).toBeInstanceOf(HttpException);
+    const e = err as HttpException;
+    return { status: e.getStatus(), body: e.getResponse() };
+  }
+  throw new Error('expected the handler to throw');
+}
+
+async function thrownAsync(fn: () => Promise<unknown>): Promise<{ status: number; body: unknown }> {
+  try {
+    await fn();
+  } catch (err) {
+    expect(err).toBeInstanceOf(HttpException);
+    const e = err as HttpException;
+    return { status: e.getStatus(), body: e.getResponse() };
+  }
+  throw new Error('expected the handler to throw');
+}
+
+describe('CollectionsController', () => {
+  afterEach(() => {
+    delete process.env.DEMO_MODE;
+  });
+
+  it('lists / creates / reads / deletes lists (pass-throughs)', async () => {
+    const svc = makeService();
+    const c = new CollectionsController(svc, new RuntimeEnvService(), storageStub);
+    expect(await c.list(user)).toEqual({ collections: [], incomingInvites: [] });
+    expect(await c.create(user, { name: 'Italy' } as never, 'sock')).toEqual({ id: 7 });
+    expect(svc.createCollection).toHaveBeenCalledWith(1, { name: 'Italy' }, 'sock');
+    expect(await c.get(user, '3')).toEqual({ collection: { id: 3 }, places: [] });
+    expect(await c.update(user, '3', { name: 'x' } as never, 'sock')).toEqual({ id: 3 });
+    expect(svc.updateCollection).toHaveBeenCalledWith(1, 3, { name: 'x' }, 'sock');
+    expect(await c.remove(user, '3', 'sock')).toEqual({ success: true });
+    expect(svc.deleteCollection).toHaveBeenCalledWith(1, 3, 'sock');
+  });
+
+  describe('reorder', () => {
+    // The legacy 'orderedIds must be an array of numbers' 400 is gone:
+    // collectionReorderRequestSchema types the array, so the pipe rejects a
+    // bad payload before the handler runs.
+    it('reorders a valid array', async () => {
+      const svc = makeService();
+      expect(
+        await new CollectionsController(svc, new RuntimeEnvService(), storageStub).reorder(
+          user,
+          { orderedIds: [3, 1, 2] } as never,
+          'sock',
+        ),
+      ).toEqual({ success: true });
+      expect(svc.reorderCollections).toHaveBeenCalledWith(1, [3, 1, 2], 'sock');
+    });
+  });
+
+  describe('places', () => {
+    it('savePlace / updatePlace / setStatus / deletePlace forward the socket id', async () => {
+      const svc = makeService();
+      const c = new CollectionsController(svc, new RuntimeEnvService(), storageStub);
+      await c.savePlace(user, { collection_id: 3, name: 'A' } as never, 'sid');
+      expect(svc.savePlace).toHaveBeenCalledWith(1, { collection_id: 3, name: 'A' }, 'sid');
+      await c.updatePlace(user, '9', { name: 'B' } as never, 'sid');
+      expect(svc.updatePlace).toHaveBeenCalledWith(1, 9, { name: 'B' }, 'sid');
+      await c.setStatus(user, '9', { status: 'want' } as never, 'sid');
+      expect(svc.setStatus).toHaveBeenCalledWith(1, 9, 'want', 'sid');
+      expect(await c.deletePlace(user, '9', 'sid')).toEqual({ success: true });
+      expect(svc.deletePlace).toHaveBeenCalledWith(1, 9, 'sid');
+      await c.saveFromTrip(user, { collection_id: 3, source_trip_id: 5, source_place_id: 8 } as never, 'sid');
+      expect(svc.saveFromTripPlace).toHaveBeenCalledWith(1, 3, 5, 8, undefined, 'sid');
+      expect(await c.copyToTrip(user, { trip_id: 5, place_ids: [9] } as never, 'sid')).toEqual({
+        copied: 1,
+        skipped: [],
+      });
+      // The copies go to the target trip's room, past the tab that asked.
+      expect(svc.tripEvents).toHaveBeenCalledWith(5, 'sid');
+      expect(svc.copyToTrip).toHaveBeenCalledWith(1, { trip_id: 5, place_ids: [9] }, { tripId: 5, socketId: 'sid' });
+    });
+
+    // The legacy 'ids must be an array of numbers' 400 is gone:
+    // collectionDeleteManyRequestSchema types the array, so the pipe rejects a
+    // bad payload before the handler runs.
+    it('deleteMany deletes a valid list', async () => {
+      const svc = makeService();
+      expect(
+        await new CollectionsController(svc, new RuntimeEnvService(), storageStub).deleteMany(
+          user,
+          { ids: [1, 2] } as never,
+          'sid',
+        ),
+      ).toEqual({ deleted: [1, 2] });
+      expect(svc.deletePlacesMany).toHaveBeenCalledWith(1, [1, 2], 'sid');
+    });
+  });
+
+  describe('membership lookup', () => {
+    it('parses lat/lng when present', async () => {
+      const svc = makeService();
+      await new CollectionsController(svc, new RuntimeEnvService(), storageStub).membership(
+        user,
+        'gpid',
+        undefined,
+        'Rome',
+        '41.9',
+        '12.5',
+      );
+      expect(svc.findMembership).toHaveBeenCalledWith(1, {
+        google_place_id: 'gpid',
+        google_ftid: undefined,
+        name: 'Rome',
+        lat: 41.9,
+        lng: 12.5,
+      });
+    });
+    it('leaves lat/lng undefined when absent', async () => {
+      const svc = makeService();
+      await new CollectionsController(svc, new RuntimeEnvService(), storageStub).membership(user);
+      expect(svc.findMembership).toHaveBeenCalledWith(1, {
+        google_place_id: undefined,
+        google_ftid: undefined,
+        name: undefined,
+        lat: undefined,
+        lng: undefined,
+      });
+    });
+  });
+
+  describe('invites (owner-gated)', () => {
+    it('403 when a non-owner invites', async () => {
+      const svc = makeService({ isOwner: vi.fn().mockResolvedValue(false) });
+      expect(
+        await thrownAsync(() =>
+          new CollectionsController(svc, new RuntimeEnvService(), storageStub).invite(user, {
+            collection_id: 3,
+            user_id: 2,
+          } as never),
+        ),
+      ).toEqual({ status: 403, body: { error: 'Only the owner can invite' } });
+    });
+    it('surfaces a sendInvite error with its status', async () => {
+      const svc = makeService({ sendInvite: vi.fn().mockRejectedValue(new DomainError(409, 'Already a member')) });
+      expect(
+        await thrownAsync(() =>
+          new CollectionsController(svc, new RuntimeEnvService(), storageStub).invite(user, {
+            collection_id: 3,
+            user_id: 2,
+          } as never),
+        ),
+      ).toEqual({ status: 409, body: { error: 'Already a member' } });
+    });
+    it('invites successfully as owner, handing on the socket id', async () => {
+      const svc = makeService();
+      expect(
+        await new CollectionsController(svc, new RuntimeEnvService(), storageStub).invite(
+          user,
+          { collection_id: 3, user_id: 2 } as never,
+          'sid',
+        ),
+      ).toEqual({ success: true });
+      expect(svc.sendInvite).toHaveBeenCalledWith(3, 1, user.username, 2, undefined, 'sid');
+    });
+    it('accept surfaces an error, else succeeds', async () => {
+      const bad = makeService({ acceptInvite: vi.fn().mockRejectedValue(new DomainError(404, 'Gone')) });
+      expect(
+        await thrownAsync(() =>
+          new CollectionsController(bad, new RuntimeEnvService(), storageStub).acceptInvite(
+            user,
+            { collection_id: 3 } as never,
+            'sid',
+          ),
+        ),
+      ).toEqual({ status: 404, body: { error: 'Gone' } });
+      const svc = makeService();
+      expect(
+        await new CollectionsController(svc, new RuntimeEnvService(), storageStub).acceptInvite(
+          user,
+          { collection_id: 3 } as never,
+          'sid',
+        ),
+      ).toEqual({ success: true });
+      expect(svc.acceptInvite).toHaveBeenCalledWith(1, 3, 'sid');
+    });
+    it('decline + leave forward the socket id', async () => {
+      const svc = makeService();
+      const c = new CollectionsController(svc, new RuntimeEnvService(), storageStub);
+      expect(await c.declineInvite(user, { collection_id: 3 } as never, 'sid')).toEqual({ success: true });
+      expect(svc.declineInvite).toHaveBeenCalledWith(1, 3, 'sid');
+      expect(await c.leave(user, { collection_id: 3 } as never, 'sid')).toEqual({ success: true });
+      expect(svc.leaveCollection).toHaveBeenCalledWith(1, 3, 'sid');
+    });
+    it('cancel is owner-gated', async () => {
+      const notOwner = makeService({ isOwner: vi.fn().mockResolvedValue(false) });
+      expect(
+        await thrownAsync(() =>
+          new CollectionsController(notOwner, new RuntimeEnvService(), storageStub).cancelInvite(user, {
+            collection_id: 3,
+            user_id: 2,
+          } as never),
+        ),
+      ).toEqual({ status: 403, body: { error: 'Only the owner can cancel invites' } });
+      const svc = makeService();
+      expect(
+        await new CollectionsController(svc, new RuntimeEnvService(), storageStub).cancelInvite(
+          user,
+          { collection_id: 3, user_id: 2 } as never,
+          'sid',
+        ),
+      ).toEqual({ success: true });
+      expect(svc.cancelInvite).toHaveBeenCalledWith(3, 1, 2, 'sid');
+    });
+  });
+
+  describe('members', () => {
+    it('removeMember is owner-gated', async () => {
+      const notOwner = makeService({ isOwner: vi.fn().mockResolvedValue(false) });
+      expect(
+        await thrownAsync(() =>
+          new CollectionsController(notOwner, new RuntimeEnvService(), storageStub).removeMember(user, {
+            collection_id: 3,
+            user_id: 2,
+          } as never),
+        ),
+      ).toEqual({ status: 403, body: { error: 'Only the owner can remove members' } });
+      const svc = makeService();
+      expect(
+        await new CollectionsController(svc, new RuntimeEnvService(), storageStub).removeMember(user, {
+          collection_id: 3,
+          user_id: 2,
+        } as never),
+      ).toEqual({ success: true });
+      expect(svc.removeMember).toHaveBeenCalledWith(1, 3, 2);
+    });
+    it('availableUsers is owner-gated', async () => {
+      const notOwner = makeService({ isOwner: vi.fn().mockResolvedValue(false) });
+      expect(
+        await thrownAsync(() =>
+          new CollectionsController(notOwner, new RuntimeEnvService(), storageStub).availableUsers(user, '3'),
+        ),
+      ).toEqual({ status: 403, body: { error: 'Only the owner can manage members' } });
+      expect(
+        await new CollectionsController(makeService(), new RuntimeEnvService(), storageStub).availableUsers(user, '3'),
+      ).toEqual({ users: [{ id: 2 }] });
+    });
+  });
+
+  describe('uploadCover', () => {
+    const file = { filename: 'x.jpg' } as Express.Multer.File;
+    it('403 in demo mode for a demo user', async () => {
+      process.env.DEMO_MODE = 'true';
+      const demo = { ...user, email: 'demo@trek.app' } as User;
+      expect(
+        await thrownAsync(() =>
+          new CollectionsController(makeService(), new RuntimeEnvService(), storageStub).uploadCover(demo, '3', file),
+        ),
+      ).toEqual({
+        status: 403,
+        body: { error: 'Uploads are disabled in demo mode. Self-host TREK for full functionality.' },
+      });
+    });
+    it('400 when no file was uploaded', async () => {
+      expect(
+        await thrownAsync(() =>
+          new CollectionsController(makeService(), new RuntimeEnvService(), storageStub).uploadCover(
+            user,
+            '3',
+            undefined,
+          ),
+        ),
+      ).toEqual({ status: 400, body: { error: 'No image uploaded' } });
+    });
+    it('commits + stores the cover and forwards the socket id', async () => {
+      const svc = makeService();
+      expect(
+        await new CollectionsController(svc, new RuntimeEnvService(), storageStub).uploadCover(user, '3', file, 'sid'),
+      ).toEqual({ id: 3 });
+      expect(storageStub.put).toHaveBeenCalledWith('covers', 'x.jpg', { tmpPath: undefined });
+      expect(svc.setCollectionCover).toHaveBeenCalledWith(1, 3, '/uploads/covers/x.jpg', 'sid');
+    });
+  });
+
+  describe('uploadPlaceImage', () => {
+    const file = { filename: 'x.jpg' } as Express.Multer.File;
+    it('403 in demo mode for a demo user', async () => {
+      process.env.DEMO_MODE = 'true';
+      const demo = { ...user, email: 'demo@trek.app' } as User;
+      expect(
+        await thrownAsync(() =>
+          new CollectionsController(makeService(), new RuntimeEnvService(), storageStub).uploadPlaceImage(
+            demo,
+            '9',
+            file,
+          ),
+        ),
+      ).toEqual({
+        status: 403,
+        body: { error: 'Uploads are disabled in demo mode. Self-host TREK for full functionality.' },
+      });
+    });
+    it('400 when no file was uploaded', async () => {
+      expect(
+        await thrownAsync(() =>
+          new CollectionsController(makeService(), new RuntimeEnvService(), storageStub).uploadPlaceImage(
+            user,
+            '9',
+            undefined,
+          ),
+        ),
+      ).toEqual({ status: 400, body: { error: 'No image uploaded' } });
+    });
+    it('commits + stores the place image via /uploads/places and forwards the socket id', async () => {
+      const svc = makeService({ setPlaceImage: vi.fn().mockResolvedValue({ id: 9 }) });
+      expect(
+        await new CollectionsController(svc, new RuntimeEnvService(), storageStub).uploadPlaceImage(
+          user,
+          '9',
+          file,
+          'sid',
+        ),
+      ).toEqual({ id: 9 });
+      expect(storageStub.put).toHaveBeenCalledWith('places', 'x.jpg', { tmpPath: undefined });
+      expect(svc.setPlaceImage).toHaveBeenCalledWith(1, 9, '/uploads/places/x.jpg', 'sid');
+    });
+  });
+
+  describe('labels', () => {
+    it('create / update / delete / assign / unassign forward user + socket id', async () => {
+      const svc = makeService();
+      const c = new CollectionsController(svc, new RuntimeEnvService(), storageStub);
+
+      await c.createLabel(user, { collection_id: 3, name: 'Berlin', color: '#ff0000' } as never, 'sock');
+      expect(svc.createLabel).toHaveBeenCalledWith(1, 3, 'Berlin', '#ff0000', 'sock');
+
+      await c.updateLabel(user, '5', { name: 'Hamburg' } as never, 'sock');
+      expect(svc.updateLabel).toHaveBeenCalledWith(1, 5, { name: 'Hamburg' }, 'sock');
+
+      expect(await c.deleteLabel(user, '5', 'sock')).toEqual({ success: true });
+      expect(svc.deleteLabel).toHaveBeenCalledWith(1, 5, 'sock');
+
+      await c.assignLabels(user, { label_ids: [5], place_ids: [9, 10] } as never, 'sock');
+      expect(svc.assignLabels).toHaveBeenCalledWith(1, [5], [9, 10], false, 'sock');
+
+      await c.unassignLabels(user, { label_ids: [5], place_ids: [9] } as never, 'sock');
+      expect(svc.assignLabels).toHaveBeenCalledWith(1, [5], [9], true, 'sock');
+    });
+  });
+
+  describe('GPX (#2301)', () => {
+    it('exports the list as GPX for the caller, with the id as a number', async () => {
+      const exported = { name: 'Lisbon', gpx: '<gpx/>', waypoints: 0, omitted: 0 };
+      const svc = makeService({ exportCollectionGpx: vi.fn().mockResolvedValue(exported) });
+      const c = new CollectionsController(svc, new RuntimeEnvService(), storageStub);
+
+      expect(await c.exportCollectionGpx(user, '3')).toBe(exported);
+      expect(svc.exportCollectionGpx).toHaveBeenCalledWith(1, 3);
+    });
+
+    it('hands back the file a GPX was read into', () => {
+      const read = { file: { name: 'Lisbon' }, skipped: 1, track_points: 4 };
+      const svc = makeService({ readCollectionGpx: vi.fn().mockReturnValue(read) });
+      const c = new CollectionsController(svc, new RuntimeEnvService(), storageStub);
+
+      expect(c.readGpx({ gpx: '<gpx/>', file_name: 'lisbon.gpx' })).toBe(read);
+      expect(svc.readCollectionGpx).toHaveBeenCalledWith({ gpx: '<gpx/>', file_name: 'lisbon.gpx' });
+    });
+
+    it('turns a refusal into a 400 with a code the client can translate, 413 for size', () => {
+      const refuse = (code: CollectionGpxProblem) =>
+        makeService({
+          readCollectionGpx: vi.fn(() => {
+            throw new CollectionGpxError(code, 'refused');
+          }),
+        });
+
+      for (const code of ['unreadable', 'not-gpx', 'too-many-places'] as const) {
+        const c = new CollectionsController(refuse(code), new RuntimeEnvService(), storageStub);
+        expect(thrown(() => c.readGpx({ gpx: 'x' }))).toEqual({ status: 400, body: { error: 'refused', code } });
+      }
+      const big = new CollectionsController(refuse('too-large'), new RuntimeEnvService(), storageStub);
+      expect(thrown(() => big.readGpx({ gpx: 'x' }))).toEqual({
+        status: 413,
+        body: { error: 'refused', code: 'too-large' },
+      });
+    });
+
+    it('lets any other failure through untouched', () => {
+      const svc = makeService({
+        readCollectionGpx: vi.fn(() => {
+          throw new Error('disk on fire');
+        }),
+      });
+      const c = new CollectionsController(svc, new RuntimeEnvService(), storageStub);
+      expect(() => c.readGpx({ gpx: 'x' })).toThrow('disk on fire');
+    });
+  });
+});

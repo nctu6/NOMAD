@@ -1,0 +1,48 @@
+import type { TranslationStrings } from '../types';
+
+const map: TranslationStrings = {
+  'map.connections': 'Συνδέσεις',
+  'map.showConnections': 'Εμφάνιση διαδρομών κρατήσεων',
+  'map.hideConnections': 'Απόκρυψη διαδρομών κρατήσεων',
+  'poi.searchThisArea': 'Αναζήτηση σε αυτήν την περιοχή',
+  'poi.cat.restaurants': 'Εστιατόρια',
+  'poi.cat.cafes': 'Καφέ',
+  'poi.cat.bars': 'Μπαρ & νυχτερινή ζωή',
+  'poi.cat.hotels': 'Διαμονή',
+  'poi.cat.sights': 'Αξιοθέατα',
+  'poi.cat.museums': 'Μουσεία & πολιτισμός',
+  'poi.cat.nature': 'Φύση & πάρκα',
+  'poi.cat.activities': 'Δραστηριότητες',
+  'poi.pluginCategories': 'Κατηγορίες από πρόσθετα',
+  'map.showAllConnections': 'Εμφάνιση όλων των διαδρομών κρατήσεων',
+  'map.hideAllConnections': 'Απόκρυψη όλων των διαδρομών κρατήσεων',
+  'map.baseLayer.default': 'Χάρτης',
+  'map.baseLayer.satellite': 'Δορυφόρος',
+  'map.baseLayer.hiking': 'Πεζοπορία',
+  'map.baseLayer.hikingDown':
+    'Το OpenHikingMap δεν απαντά αυτή τη στιγμή. Άλλαξε σε άλλο χάρτη· η διαδρομή σου μένει ως έχει.',
+  'map.baseLayer.cycle': 'Ποδήλατο',
+  'map.baseLayer.cycleDown': 'Το CyclOSM δεν απαντά αυτή τη στιγμή. Άλλαξε σε άλλον χάρτη· η διαδρομή σου μένει ίδια.',
+  'map.baseLayer.switchToSatellite': 'Εναλλαγή σε δορυφορική προβολή',
+  'map.baseLayer.switchToDefault': 'Εναλλαγή σε προβολή χάρτη',
+  'map.location.denied':
+    'Η πρόσβαση στην τοποθεσία είναι αποκλεισμένη. Ελέγξτε τις ρυθμίσεις της συσκευής. Μια εγκατεστημένη εφαρμογή έχει δική της άδεια τοποθεσίας, ξεχωριστή από το πρόγραμμα περιήγησης.',
+  'map.location.unavailable': 'Δεν ήταν δυνατός ο προσδιορισμός της τοποθεσίας σας.',
+  'map.location.timeout': 'Ο εντοπισμός της θέσης σας άργησε πολύ. Δοκιμάστε ξανά με καθαρή θέα στον ουρανό.',
+  'map.overview.show': 'Εμφάνιση όλου του ταξιδιού',
+  'map.lock.lock': 'Κλείδωμα προβολής χάρτη',
+  'map.lock.unlock': 'Ο χάρτης να ακολουθεί την επιλογή',
+  'map.overview.hide': 'Απόκρυψη όλου του ταξιδιού',
+  'map.overview.total': 'Συνολική απόσταση',
+  'map.attribution': 'Πηγές χάρτη',
+  'map.overview.unrouted': '{count} σκέλη δεν μπόρεσαν να υπολογιστούν, οπότε οι αποστάσεις είναι ελλιπείς.',
+  'map.overview.unrouted.one': '{count} σκέλος δεν μπόρεσε να υπολογιστεί, οπότε οι αποστάσεις είναι ελλιπείς.',
+  'map.overview.dayUnrouted': '{count} σκέλη αυτής της ημέρας δεν μπόρεσαν να υπολογιστούν',
+  'map.overview.dayUnrouted.one': '{count} σκέλος αυτής της ημέρας δεν μπόρεσε να υπολογιστεί',
+  'map.baseLayer.topo': 'Τοπογραφικός',
+  'map.webgl2.fallback':
+    'Αυτό το πρόγραμμα περιήγησης δεν προσφέρει WebGL2, που χρειάζονται οι χάρτες GL, οπότε οι χάρτες εμφανίζονται με το Leaflet.',
+  'map.webgl2.terrain':
+    'Το 3D χρειάζεται WebGL2, που αυτό το πρόγραμμα περιήγησης δεν προσφέρει. Ο χάρτης μένει σε 2D.',
+};
+export default map;

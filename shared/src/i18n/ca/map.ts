@@ -1,0 +1,47 @@
+import type { TranslationStrings } from '../types';
+
+const map: TranslationStrings = {
+  'map.connections': 'Connexions',
+  'map.showConnections': 'Mostra les rutes de reserves',
+  'map.hideConnections': 'Amaga les rutes de reserves',
+  'poi.searchThisArea': 'Cerca en aquesta zona',
+  'poi.cat.restaurants': 'Restaurants', // same-as-en
+  'poi.cat.cafes': 'Cafeteries',
+  'poi.cat.bars': 'Bars i oci nocturn',
+  'poi.cat.hotels': 'Allotjament',
+  'poi.cat.sights': "Llocs d'interès",
+  'poi.cat.museums': 'Museus i cultura',
+  'poi.cat.nature': 'Natura i parcs',
+  'poi.cat.activities': 'Activitats',
+  'poi.pluginCategories': 'Categories dels connectors',
+  'map.showAllConnections': 'Mostra totes les rutes de reserva',
+  'map.hideAllConnections': 'Amaga totes les rutes de reserva',
+  'map.baseLayer.default': 'Mapa',
+  'map.baseLayer.satellite': 'Satèl·lit',
+  'map.baseLayer.hiking': 'Excursionisme',
+  'map.baseLayer.hikingDown':
+    'OpenHikingMap no respon ara mateix. Canvia a un altre mapa; la teva ruta es queda tal com és.',
+  'map.baseLayer.cycle': 'Bicicleta',
+  'map.baseLayer.cycleDown': 'CyclOSM no respon ara mateix. Canvia a un altre mapa; la teva ruta es queda igual.',
+  'map.baseLayer.switchToSatellite': 'Canvia a vista de satèl·lit',
+  'map.baseLayer.switchToDefault': 'Canvia a vista de mapa',
+  'map.location.denied':
+    'L’accés a la ubicació està bloquejat. Revisa la configuració del dispositiu; una app instal·lada té el seu propi permís d’ubicació, separat del navegador.',
+  'map.location.unavailable': 'No s’ha pogut determinar la teva ubicació.',
+  'map.location.timeout': 'La localització ha trigat massa. Torna-ho a provar amb una vista més clara del cel.',
+  'map.overview.show': 'Mostra tot el viatge',
+  'map.lock.lock': 'Bloqueja la vista del mapa',
+  'map.lock.unlock': 'Deixa que el mapa segueixi la selecció',
+  'map.overview.hide': 'Amaga tot el viatge',
+  'map.overview.total': 'Distància total',
+  'map.attribution': 'Crèdits del mapa',
+  'map.overview.unrouted': 'No s’han pogut calcular {count} trams, per això les distàncies són incompletes.',
+  'map.overview.unrouted.one': 'No s’ha pogut calcular {count} tram, per això les distàncies són incompletes.',
+  'map.overview.dayUnrouted': 'No s’han pogut calcular {count} trams d’aquest dia',
+  'map.overview.dayUnrouted.one': 'No s’ha pogut calcular {count} tram d’aquest dia',
+  'map.baseLayer.topo': 'Topogràfic',
+  'map.webgl2.fallback':
+    'Aquest navegador no ofereix WebGL2, que necessiten els mapes GL, així que els mapes es mostren amb Leaflet.',
+  'map.webgl2.terrain': 'El 3D necessita WebGL2, que aquest navegador no ofereix. El mapa es queda en 2D.',
+};
+export default map;

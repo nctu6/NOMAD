@@ -1,0 +1,566 @@
+import {
+  McpController, Tool, ResourceTemplate, type McpContext,
+  TOOL_ANNOTATIONS_READONLY, TOOL_ANNOTATIONS_WRITE,
+  TOOL_ANNOTATIONS_DELETE, TOOL_ANNOTATIONS_NON_IDEMPOTENT,
+  errorResult, ok,
+} from '../../nest-mcp';
+import { McpToolGuardsService } from '../mcp-shared/mcp-tool-guards.service';
+import {
+  mapsSearchRequestSchema,
+  placeImageUrlSchema,
+  placeImportListRequestSchema,
+  placeEmailField,
+  placeOpeningHoursSchema,
+  placeWebsiteSchema,
+  roadtripStopTypeSchema,
+  type PlaceOpeningHours,
+  roadtripGpxImportSchema,
+  type RoadtripGpxImport,
+  type RoadtripStopType,
+  idSchema,
+} from '@trek/shared';
+import { z } from 'zod';
+import { AssignmentsService } from '../assignments/assignments.service';
+import { JourneyDomainService } from '../journey/journey-domain.service';
+import { noAccess, permissionDenied } from '../../mcp/tools/_shared';
+import { UnitOfWork } from '../database/unit-of-work';
+import { MapsService } from '../maps/maps.service';
+import { PlacesService } from './places.service';
+import { isUpdateConflict } from '../common/conflictResult';
+import { isDirectionsUrl } from '../place-import/place-import.service';
+import { TripAccessService } from '../trip-membership/trip-access.service';
+
+function parseId(value: string | string[]): number | null {
+  const n = Number(Array.isArray(value) ? value[0] : value);
+  return Number.isInteger(n) && n > 0 ? n : null;
+}
+
+/** Hours as the column keeps them: JSON text, or null to clear (#2472). */
+const hoursText = (hours: PlaceOpeningHours | null | undefined): string | null => (hours ? JSON.stringify(hours) : null);
+
+/**
+ * Places MCP surface — ported 1:1 from the legacy registrar
+ * src/mcp/tools/places.ts (ten tools) plus the trek://trips/{tripId}/places
+ * resource from src/mcp/resources.ts: identical names, descriptions, input
+ * schemas, annotations, error/payload shapes and safeBroadcast events. The
+ * registration-time `canWrite/canRead(scopes, 'places')` gates became the
+ * declarative access markers, resolved by trekMcpAccessPolicy.
+ *
+ * `search_place` stays in this controller even though it calls MapsService:
+ * its legacy gate is `places:read`, not the geo group that maps.mcp.ts carries.
+ *
+ * AssignmentsService is injected from AssignmentsDomainModule — the split that
+ * retired assignments.bridge. The full AssignmentsModule sits on the
+ * DaysModule → PlacesModule → AssignmentsModule loop (its MCP class injects
+ * DaysService), but the service itself never did, so its own module stays off
+ * the loop and PlacesModule can import it.
+ */
+@McpController()
+export class PlacesMcp {
+  constructor(
+    private readonly places: PlacesService,
+    private readonly maps: MapsService,
+    private readonly tripsRepo: TripAccessService,
+    private readonly journey: JourneyDomainService,
+    private readonly assignments: AssignmentsService,
+    private readonly guards: McpToolGuardsService,
+    private readonly uow: UnitOfWork,
+  ) {}
+
+  @Tool({
+    name: 'create_place',
+    description: 'Add a new place/POI to a trip. Set google_place_id, google_ftid, osm_id or amap_poi_id (from search_place) so the app can show opening hours, ratings, and direct Google Maps links. Set price + currency to record the cost so it shows on the item.',
+    inputSchema: {
+      tripId: idSchema,
+      name: z.string().min(1).max(200),
+      description: z.string().max(2000).optional(),
+      lat: z.number().optional(),
+      lng: z.number().optional(),
+      address: z.string().max(500).optional(),
+      category_id: idSchema.optional().describe('Category ID — use list_categories to see available options'),
+      google_place_id: z.string().optional().describe('Google Place ID from search_place — enables opening hours display'),
+      google_ftid: z.string().optional().describe('Google Maps feature ID from search_place — enables direct Google Maps links'),
+      osm_id: z.string().optional().describe('OpenStreetMap ID from search_place (e.g. "way:12345") — enables opening hours if no Google ID'),
+      amap_poi_id: z.string().optional().describe('Amap (高德地图) POI ID from search_place, amap:-prefixed, enables opening hours on an install using Amap'),
+      notes: z.string().max(2000).optional(),
+      website: placeWebsiteSchema.optional(),
+      phone: z.string().max(50).optional(),
+      email: placeEmailField.describe('E-mail address of the place, or an empty string to clear it'),
+      opening_hours: placeOpeningHoursSchema.nullable().optional().describe('Opening hours of the place, seven days Monday first: { closed, open?: "HH:MM", close?: "HH:MM" } each. Shown instead of looked-up hours. null clears them'),
+      image_url: placeImageUrlSchema.optional().describe('Thumbnail for the place: an /uploads/ path, an /api/maps/place-photo/ path, an inline data: image, or an https URL'),
+      price: z.number().nonnegative().optional().describe('Cost of this place/activity (e.g. ticket price, entry fee)'),
+      currency: z.string().length(3).optional().describe('ISO 4217 currency code (e.g. "EUR", "USD")'),
+      stop_type: roadtripStopTypeSchema.optional().describe('Marks the place as a stop on a drive rather than a destination: fuel, charging, rest_area, campsite, restaurant, sights or hotel. A service stop is left out of the stop count for the day, so a day with a charger between four places still reads as four stops. Leave unset for an ordinary place. calculate_roadtrip reports the same value on a stop as stopType; this field is stop_type.'),
+    },
+    annotations: TOOL_ANNOTATIONS_NON_IDEMPOTENT,
+    access: { group: 'places', mode: 'write' },
+  })
+  async createPlace(
+    { tripId, name, description, lat, lng, address, category_id, google_place_id, google_ftid, osm_id, amap_poi_id, notes, website, phone, email, opening_hours, image_url, price, currency, stop_type }: {
+      tripId: number; name: string; description?: string; lat?: number; lng?: number; address?: string;
+      category_id?: number; google_place_id?: string; google_ftid?: string; osm_id?: string; amap_poi_id?: string;
+      notes?: string; website?: string; phone?: string; email?: string | null; opening_hours?: PlaceOpeningHours | null;
+      image_url?: string; price?: number; currency?: string;
+      stop_type?: RoadtripStopType;
+    },
+    ctx: McpContext,
+  ) {
+    if (!(await this.tripsRepo.findAccessible(tripId, ctx.userId))) return noAccess();
+    if (!(await this.guards.hasTripPermission('place_edit', tripId, ctx.userId))) return permissionDenied();
+    const place = await this.places.create(String(tripId), { name, description, lat, lng, address, category_id, google_place_id, google_ftid, osm_id, amap_poi_id, notes, website, phone, email, opening_hours: hoursText(opening_hours), image_url, price, currency, stop_type });
+    this.guards.safeBroadcast(tripId, 'place:created', { place });
+    // The journey hook the REST route and the plugin RPC run after the same write.
+    await this.places.onCreated(String(tripId), place.id);
+    return ok({ place });
+  }
+
+  @Tool({
+    name: 'create_and_assign_place',
+    description: 'Create a new place and immediately assign it to a day in one atomic operation. Use place details from search_place results. Only use when the place does not yet exist — if it already exists, use assign_place_to_day directly. Set price + currency to record the cost so it shows on the item.',
+    inputSchema: {
+      tripId: idSchema,
+      dayId: idSchema.describe('Day to assign the place to'),
+      name: z.string().min(1).max(200),
+      description: z.string().max(2000).optional(),
+      lat: z.number().optional(),
+      lng: z.number().optional(),
+      address: z.string().max(500).optional(),
+      category_id: idSchema.optional().describe('Category ID — use list_categories to see available options'),
+      google_place_id: z.string().optional().describe('Google Place ID from search_place — enables opening hours display'),
+      google_ftid: z.string().optional().describe('Google Maps feature ID from search_place — enables direct Google Maps links'),
+      osm_id: z.string().optional().describe('OpenStreetMap ID from search_place (e.g. "way:12345")'),
+      amap_poi_id: z.string().optional().describe('Amap (高德地图) POI ID from search_place, amap:-prefixed'),
+      place_notes: z.string().max(2000).optional().describe('Notes for the place'),
+      website: placeWebsiteSchema.optional(),
+      phone: z.string().max(50).optional(),
+      email: placeEmailField.describe('E-mail address of the place, or an empty string to clear it'),
+      opening_hours: placeOpeningHoursSchema.nullable().optional().describe('Opening hours of the place, seven days Monday first: { closed, open?: "HH:MM", close?: "HH:MM" } each. Shown instead of looked-up hours. null clears them'),
+      image_url: placeImageUrlSchema.optional().describe('Thumbnail for the place: an /uploads/ path, an /api/maps/place-photo/ path, an inline data: image, or an https URL'),
+      assignment_notes: z.string().max(500).optional().describe('Notes for this day assignment'),
+      price: z.number().nonnegative().optional().describe('Cost of this place/activity (e.g. ticket price, entry fee)'),
+      currency: z.string().length(3).optional().describe('ISO 4217 currency code (e.g. "EUR", "USD")'),
+      stop_type: roadtripStopTypeSchema.optional().describe('Marks the place as a stop on a drive rather than a destination: fuel, charging, rest_area, campsite, restaurant, sights or hotel. A service stop is left out of the stop count for the day, so a day with a charger between four places still reads as four stops. Leave unset for an ordinary place. calculate_roadtrip reports the same value on a stop as stopType; this field is stop_type.'),
+    },
+    annotations: TOOL_ANNOTATIONS_NON_IDEMPOTENT,
+    access: { group: 'places', mode: 'write' },
+  })
+  async createAndAssignPlace(
+    { tripId, dayId, name, description, lat, lng, address, category_id, google_place_id, google_ftid, osm_id, amap_poi_id, place_notes, website, phone, email, opening_hours, image_url, assignment_notes, price, currency, stop_type }: {
+      tripId: number; dayId: number; name: string; description?: string; lat?: number; lng?: number; address?: string;
+      category_id?: number; google_place_id?: string; google_ftid?: string; osm_id?: string; amap_poi_id?: string;
+      place_notes?: string; website?: string; phone?: string; email?: string | null; opening_hours?: PlaceOpeningHours | null;
+      image_url?: string; assignment_notes?: string;
+      price?: number; currency?: string; stop_type?: RoadtripStopType;
+    },
+    ctx: McpContext,
+  ) {
+    if (!(await this.tripsRepo.findAccessible(tripId, ctx.userId))) return noAccess();
+    if (!(await this.guards.hasTripPermission('place_edit', tripId, ctx.userId))) return permissionDenied();
+    if (!(await this.assignments.dayExists(dayId, tripId))) return { content: [{ type: 'text' as const, text: 'Day not found.' }], isError: true };
+    try {
+      const result = await this.uow.transactional(async () => {
+        const place = await this.places.create(String(tripId), { name, description, lat, lng, address, category_id, google_place_id, google_ftid, osm_id, amap_poi_id, notes: place_notes, website, phone, email, opening_hours: hoursText(opening_hours), image_url, price, currency, stop_type });
+        const assignment = await this.assignments.createAssignment(dayId, place.id, assignment_notes ?? null);
+        return { place, assignment };
+      });
+      this.guards.safeBroadcast(tripId, 'place:created', { place: result.place });
+      this.guards.safeBroadcast(tripId, 'assignment:created', { assignment: result.assignment });
+      try { await this.journey.reconcileTripSkeletons(tripId); } catch { /* non-fatal */ }
+      return ok(result);
+    } catch {
+      return { content: [{ type: 'text' as const, text: 'Failed to create place and assignment.' }], isError: true };
+    }
+  }
+
+  @Tool({
+    name: 'update_place',
+    description: 'Update an existing place in a trip.',
+    inputSchema: {
+      tripId: idSchema,
+      placeId: idSchema,
+      name: z.string().min(1).max(200).optional(),
+      description: z.string().max(2000).optional(),
+      lat: z.number().optional(),
+      lng: z.number().optional(),
+      address: z.string().max(500).optional(),
+      category_id: idSchema.optional().describe('Category ID — use list_categories'),
+      price: z.number().optional(),
+      currency: z.string().length(3).optional(),
+      place_time: z.string().max(50).nullable().optional().describe('Scheduled time (e.g. "09:00"); null clears it'),
+      end_time: z.string().max(50).nullable().optional().describe('End time (e.g. "11:00"); null clears it'),
+      duration_minutes: z.number().int().nonnegative().nullable().optional().describe('Stay duration in minutes; null clears it'),
+      notes: z.string().max(2000).optional(),
+      website: placeWebsiteSchema.optional(),
+      phone: z.string().max(50).optional(),
+      email: placeEmailField.describe('E-mail address of the place, or an empty string to clear it'),
+      opening_hours: placeOpeningHoursSchema.nullable().optional().describe('Opening hours of the place, seven days Monday first: { closed, open?: "HH:MM", close?: "HH:MM" } each. Shown instead of looked-up hours. null clears them'),
+      image_url: placeImageUrlSchema.nullable().optional().describe('Thumbnail for the place: an /uploads/ path, an /api/maps/place-photo/ path, an inline data: image, or an https URL. Pass null to remove the current picture'),
+      transport_mode: z.enum(['walking', 'driving', 'cycling', 'transit', 'flight']).optional(),
+      osm_id: z.string().optional().describe('OpenStreetMap ID (e.g. "way:12345")'),
+      google_place_id: z.string().optional().describe('Google Place ID (e.g. "ChIJd8BlQ2BZwokRAFUEcm_qrcA")'),
+      google_ftid: z.string().optional().describe('Google Maps feature ID (e.g. "0x89c259b7abdd4769:0x103aaf1c8bf8a050")'),
+      amap_poi_id: z.string().optional().describe('Amap (高德地图) POI ID, amap:-prefixed (e.g. "amap:B000A83M61")'),
+      stop_type: roadtripStopTypeSchema.nullable().optional().describe('What kind of stop on a drive this is: fuel, charging, rest_area, campsite, restaurant, sights or hotel. Pass null to turn a service stop back into an ordinary place. calculate_roadtrip reports the same value on a stop as stopType; this field is stop_type.'),
+      fill_percent: z.number().int().min(1).max(100).nullable().optional().describe('How full THIS stop fills the tank, 1-100. A motorway rapid charger is worth about 80 %, the one at the hotel 100 %. Pass null to follow whatever the traveller set as their default fill.'),
+    },
+    annotations: TOOL_ANNOTATIONS_WRITE,
+    access: { group: 'places', mode: 'write' },
+  })
+  async updatePlace(
+    { tripId, placeId, name, description, lat, lng, address, category_id, price, currency, place_time, end_time, duration_minutes, notes, website, phone, email, opening_hours, image_url, transport_mode, osm_id, google_place_id, google_ftid, amap_poi_id, stop_type, fill_percent }: {
+      tripId: number; placeId: number; name?: string; description?: string; lat?: number; lng?: number;
+      address?: string; category_id?: number; price?: number; currency?: string; place_time?: string | null;
+      end_time?: string | null; duration_minutes?: number | null; notes?: string; website?: string; phone?: string;
+      email?: string | null; opening_hours?: PlaceOpeningHours | null;
+      image_url?: string | null;
+      transport_mode?: 'walking' | 'driving' | 'cycling' | 'transit' | 'flight'; osm_id?: string;
+      google_place_id?: string; google_ftid?: string; amap_poi_id?: string; stop_type?: RoadtripStopType | null;
+      fill_percent?: number | null;
+    },
+    ctx: McpContext,
+  ) {
+    if (!(await this.tripsRepo.findAccessible(tripId, ctx.userId))) return noAccess();
+    if (!(await this.guards.hasTripPermission('place_edit', tripId, ctx.userId))) return permissionDenied();
+    const place = await this.places.update(String(tripId), String(placeId), { name, description, lat, lng, address, category_id, price, currency, place_time, end_time, duration_minutes, notes, website, phone, email, opening_hours: opening_hours === undefined ? undefined : hoursText(opening_hours), image_url, transport_mode, osm_id, google_place_id, google_ftid, amap_poi_id, stop_type, fill_percent });
+    // No base version is sent, so the update never answers a conflict; the guard only narrows the type.
+    if (!place || isUpdateConflict(place)) return { content: [{ type: 'text' as const, text: 'Place not found.' }], isError: true };
+    this.guards.safeBroadcast(tripId, 'place:updated', { place });
+    // As on REST: the journey entries made from this place follow its new name, address and time.
+    await this.places.onUpdated(place.id);
+    return ok({ place });
+  }
+
+  @Tool({
+    name: 'set_place_image_from_file',
+    description: 'Use a picture already attached in the trip (a jpg, png, gif or webp from list_files) as the image of the place. The file is copied, so deleting the attachment later keeps the image.',
+    inputSchema: {
+      tripId: idSchema,
+      placeId: idSchema,
+      fileId: idSchema.describe('Id of a trip file that is an image'),
+    },
+    annotations: TOOL_ANNOTATIONS_WRITE,
+    access: { group: 'places', mode: 'write' },
+  })
+  async setPlaceImageFromFile(
+    { tripId, placeId, fileId }: { tripId: number; placeId: number; fileId: number },
+    ctx: McpContext,
+  ) {
+    if (!(await this.tripsRepo.findAccessible(tripId, ctx.userId))) return noAccess();
+    if (!(await this.guards.hasTripPermission('place_edit', tripId, ctx.userId))) return permissionDenied();
+    const result = await this.places.setImageFromFile(String(tripId), String(placeId), fileId);
+    if (result === 'not_found') return errorResult('File not found.');
+    if (result === 'not_image') return errorResult('That file is not a jpg, png, gif or webp image.');
+    if (result === 'too_large') return errorResult('That image is too large.');
+    if (!result || isUpdateConflict(result)) return errorResult('Place not found.');
+    this.guards.safeBroadcast(tripId, 'place:updated', { place: result });
+    await this.places.onUpdated(result.id);
+    return ok({ place: result });
+  }
+
+  @Tool({
+    name: 'rate_place',
+    description: "Set or clear the current user's 1-5 star rating on a trip place (#1435). Every trip member rates independently; the place shows the average. Omit rating (or pass null) to remove the user's vote. Use the ratings to capture the user's preferences and shape the itinerary around highly-rated places.",
+    inputSchema: {
+      tripId: idSchema,
+      placeId: idSchema,
+      rating: z.number().int().min(1).max(5).nullable().optional().describe('1-5 stars; null/omitted clears the vote'),
+    },
+    annotations: TOOL_ANNOTATIONS_WRITE,
+    access: { group: 'places', mode: 'write' },
+  })
+  async ratePlace(
+    { tripId, placeId, rating }: { tripId: number; placeId: number; rating?: number | null },
+    ctx: McpContext,
+  ) {
+    // Rating is a personal vote — any trip member may cast one, place_edit not required.
+    if (!(await this.tripsRepo.findAccessible(tripId, ctx.userId))) return noAccess();
+    const place = await this.places.rate(String(tripId), String(placeId), ctx.userId, rating ?? null);
+    if (!place) return { content: [{ type: 'text' as const, text: 'Place not found.' }], isError: true };
+    this.guards.safeBroadcast(tripId, 'place:updated', { place });
+    return ok({ place });
+  }
+
+  @Tool({
+    name: 'delete_place',
+    description: 'Permanently delete a place from a trip. Removes its day assignments, its linked expenses and any nights booked at it, including each night\'s reservation and that reservation\'s expense. If the place is a Tour, its route and editable waypoints are also permanently deleted. A city walk takes all its stations with it, protected ones included: name those to the traveller and ask first. Warn the user before calling: this cannot be undone.',
+    inputSchema: {
+      tripId: idSchema,
+      placeId: idSchema,
+    },
+    annotations: TOOL_ANNOTATIONS_DELETE,
+    access: { group: 'places', mode: 'write' },
+  })
+  async deletePlace({ tripId, placeId }: { tripId: number; placeId: number }, ctx: McpContext) {
+    if (!(await this.tripsRepo.findAccessible(tripId, ctx.userId))) return noAccess();
+    if (!(await this.guards.hasTripPermission('place_edit', tripId, ctx.userId))) return permissionDenied();
+    // Scope the id to the trip before the hook: onPlaceDeleted keys on the place
+    // id alone, so a foreign id would detach that trip's journey entries even
+    // though the delete below refuses it.
+    if (!(await this.places.get(String(tripId), String(placeId)))) {
+      return { content: [{ type: 'text' as const, text: 'Place not found.' }], isError: true };
+    }
+    try { await this.journey.onPlaceDeleted(placeId); } catch { /* non-fatal */ } // sync journeys before the row is gone
+    // The link is gone once the place is, so read it first (#1298).
+    const expenseIds = await this.places.linkedExpenseIds(tripId, [placeId]);
+    const { deleted, cancelled } = await this.places.remove(String(tripId), String(placeId));
+    if (!deleted) return { content: [{ type: 'text' as const, text: 'Place not found.' }], isError: true };
+    this.guards.safeBroadcast(tripId, 'place:deleted', { placeId });
+    // A night booked at this place went with it, and took its partner booking and
+    // that booking's expense along. Neither is covered by place:deleted, and an
+    // expense linked by reservation_id is not one linkedExpenseIds finds.
+    for (const reservationId of cancelled.reservationIds) this.guards.safeBroadcast(tripId, 'reservation:deleted', { reservationId });
+    for (const itemId of [...expenseIds, ...cancelled.budgetItemIds]) this.guards.safeBroadcast(tripId, 'budget:deleted', { itemId });
+    return ok({ success: true });
+  }
+
+  @Tool({
+    name: 'list_places',
+    description: 'List all places/POIs in a trip, optionally filtered by assignment status. Use assignment=unassigned to find orphan activities not yet scheduled on any day.',
+    inputSchema: {
+      tripId: idSchema,
+      search: z.string().optional(),
+      category: z.string().optional(),
+      tag: z.string().optional(),
+      assignment: z.enum(['all', 'unassigned', 'assigned']).optional().default('all').describe('Filter by assignment status: "all" (default), "unassigned" (not on any day), or "assigned" (scheduled on a day)'),
+    },
+    annotations: TOOL_ANNOTATIONS_READONLY,
+    access: { group: 'places', mode: 'read' },
+  })
+  async listPlaces(
+    { tripId, search, category, tag, assignment }: {
+      tripId: number; search?: string; category?: string; tag?: string;
+      assignment?: 'all' | 'unassigned' | 'assigned';
+    },
+    ctx: McpContext,
+  ) {
+    if (!(await this.tripsRepo.findAccessible(tripId, ctx.userId))) return noAccess();
+    const places = await this.places.list(String(tripId), { search, category, tag, assignment });
+    return ok({ places });
+  }
+
+  // The list_categories tool moved to the DI-discovered
+  // src/nest/categories/categories.mcp.ts (@McpController).
+
+  // --- SEARCH ---
+
+  @Tool({
+    name: 'search_place',
+    description: 'Search for a real-world place by name or address. Returns results with osm_id (and google_place_id/google_ftid if configured). Use these IDs when calling create_place so the app can display opening hours, ratings, and map links. Pass locationBias whenever the trip has a destination: a bare name like "Central Station" or "Museum of Modern Art" otherwise resolves wherever the provider guesses, which is regularly the wrong continent. Searches the TREK index and OpenStreetMap, or Google Places alone with provider "google" and whenever the admin switch "Search with Google only" is on: if the instance has a plugin providing its own search index, call search_places_via_plugins as well, and note that ratings can only come from there.',
+    inputSchema: {
+      query: z.string().min(1).max(500).describe('One place name or address. Several places in one query match none of them well; search each on its own, the calls can run side by side'),
+      locationBias: mapsSearchRequestSchema.shape.locationBias.describe('Centre the search on a coordinate: { lat, lng, radius? } with radius in metres (default 50000). Use where the place should be, such as a stop already planned in that neighbourhood, not the middle of the city: the TREK index ranks by distance from it, OpenStreetMap orders its results by it and Google searches a circle around it'),
+      lang: z.string().max(35).optional().describe('BCP 47 language for the result names, e.g. "de" or "ja". Defaults to English'),
+      provider: mapsSearchRequestSchema.shape.provider.describe('"google" sends this one search to Google Places alone instead of the TREK index and OpenStreetMap, the same as the "search Google instead" link under the results in the app. Ignored unless Google holds the keyed slot: an instance without a Google key, or one whose admin picked Amap or OpenStreetMap as the places provider, answers from the TREK index and OpenStreetMap as usual'),
+    },
+    annotations: TOOL_ANNOTATIONS_READONLY,
+    access: { group: 'places', mode: 'read' },
+  })
+  async searchPlace(
+    { query, locationBias, lang, provider }: {
+      query: string; locationBias?: { lat: number; lng: number; radius?: number }; lang?: string; provider?: 'google';
+    },
+    ctx: McpContext,
+  ) {
+    try {
+      const result = await this.maps.searchPlaces(ctx.userId, query, lang, locationBias, { googleOnly: provider === 'google' });
+      return ok(result);
+    } catch {
+      return errorResult('Place search failed.');
+    }
+  }
+
+  @Tool({
+    name: 'import_places_from_url',
+    description: 'Import places from a shared Google Maps or Naver Maps list URL. Returns the imported places and count. The list must be shared publicly.',
+    inputSchema: {
+      tripId: idSchema,
+      url: z.string().url().describe('Publicly shared Google Maps list URL, a Google Maps directions link (/maps/dir/...), or a Naver Maps list URL. A directions link is read straight out of the URL: its stops become places in driving order, and the ones written as names are geocoded.'),
+      source: z.enum(['google-list', 'naver-list']).describe('List source: "google-list" for Google Maps saved places, "naver-list" for Naver Maps'),
+      enrich: placeImportListRequestSchema.shape.enrich.describe('Re-resolve every imported place through the Places API afterwards to fill in photo, address, website and phone (#886). Needs a Google Maps key on the instance, costs a lookup per place, and runs in the background: the tool returns the bare import and the places fill in over the websocket. Off by default'),
+    },
+    annotations: TOOL_ANNOTATIONS_NON_IDEMPOTENT,
+    access: { group: 'places', mode: 'write' },
+  })
+  async importPlacesFromUrl(
+    { tripId, url, source, enrich }: { tripId: number; url: string; source: 'google-list' | 'naver-list'; enrich?: boolean },
+    ctx: McpContext,
+  ) {
+    if (!(await this.tripsRepo.findAccessible(tripId, ctx.userId))) return noAccess();
+    if (!(await this.guards.hasTripPermission('place_edit', tripId, ctx.userId))) return permissionDenied();
+
+    // Same opts the REST route builds: the enrichment pass is keyed on the calling
+    // user because it spends that user's Places credential.
+    const opts = { enrich: enrich ?? false, userId: ctx.userId };
+    const result = source === 'google-list'
+      ? (isDirectionsUrl(url)
+        ? await this.places.importGoogleDirections(String(tripId), url, opts)
+        : await this.places.importGoogleList(String(tripId), url, opts))
+      : await this.places.importNaverList(String(tripId), url, opts);
+
+    for (const place of result.places) {
+      this.guards.safeBroadcast(tripId, 'place:created', { place });
+    }
+    return ok({ places: result.places, count: result.places.length, listName: result.listName, skipped: result.skipped });
+  }
+
+  @Tool({
+    name: 'import_trip_gpx',
+    description: 'Import GPX waypoints, routes and tracks as places in a trip. Uses the same importer as the file upload. Imported tracks retain their geometry and can be followed with add_route_vias. Does not assign places to days. Use list_places for their ids and geometry, then assign_place_to_day and the Roadtrip tools to plan visits. Existing importer deduplication also applies.',
+    inputSchema: roadtripGpxImportSchema.shape,
+    annotations: TOOL_ANNOTATIONS_NON_IDEMPOTENT,
+    access: { group: 'places', mode: 'write' },
+  })
+  async importGpx(input: RoadtripGpxImport, ctx: McpContext) {
+    if (!(await this.tripsRepo.findAccessible(input.tripId, ctx.userId))) return noAccess();
+    if (!(await this.guards.hasTripPermission('place_edit', input.tripId, ctx.userId))) return permissionDenied();
+    if (!input.importWaypoints && !input.importRoutes && !input.importTracks) return errorResult('No import types selected.');
+    try {
+      const imported = await this.places.importGpx(String(input.tripId), Buffer.from(input.gpx, 'utf8'), { importWaypoints: input.importWaypoints, importRoutes: input.importRoutes, importTracks: input.importTracks, defaultName: input.name });
+      if (!imported) return errorResult('No matching places found in GPX.');
+      for (const place of imported.places) this.guards.safeBroadcast(input.tripId, 'place:created', { place });
+      if (input.enrich) this.places.enrichImportedFilePlaces(String(input.tripId), ctx.userId, imported.places);
+      return ok(imported);
+    } catch {
+      return errorResult('Could not import GPX. Check the XML and coordinates.');
+    }
+  }
+
+  @Tool({
+    name: 'export_trip_gpx',
+    description: 'Export a trip as GPX text: its places as waypoints, any imported routes as tracks, and each planned day as a route in visiting order. This is the format handhelds and offline map apps (Organic Maps, OsmAnd, Garmin) read. Prefer export_trip_ics when the user wants the itinerary in a calendar instead.',
+    inputSchema: {
+      tripId: idSchema,
+      waypoints: z.boolean().optional().default(true).describe('Write every place with coordinates as a <wpt>'),
+      tracks: z.boolean().optional().default(true).describe('Write places that carry an imported route geometry as a <trk>'),
+      dayRoutes: z.boolean().optional().default(true).describe('Write each planned day as a <rte> through its stops in order'),
+    },
+    annotations: TOOL_ANNOTATIONS_READONLY,
+    access: { group: 'places', mode: 'read' },
+  })
+  async exportTripGpx(
+    { tripId, waypoints, tracks, dayRoutes }: {
+      tripId: number; waypoints?: boolean; tracks?: boolean; dayRoutes?: boolean;
+    },
+    ctx: McpContext,
+  ) {
+    // A read, like the REST route: seeing the trip is enough, no place_edit.
+    if (!(await this.tripsRepo.findAccessible(tripId, ctx.userId))) return noAccess();
+    if (!waypoints && !tracks && !dayRoutes) return errorResult('No export types selected.');
+    const result = await this.places.exportGpx(String(tripId), { waypoints, tracks, dayRoutes });
+    if (!result) return errorResult('Nothing to export.');
+    return ok({ gpx: result.gpx, filename: result.filename });
+  }
+
+  @Tool({
+    name: 'bulk_delete_places',
+    description: 'Permanently delete multiple places from a trip at once. Removes all day assignments for each place as well, plus each place\'s linked expenses and any nights booked at it, with their reservations and expenses. Any Tours in the selection also lose their routes and editable waypoints. A city walk in the selection takes all its stations with it, protected ones included: name those to the traveller and ask first. Warn the user before calling: this cannot be undone.',
+    inputSchema: {
+      tripId: idSchema,
+      placeIds: z.array(idSchema).min(1).max(200),
+    },
+    annotations: TOOL_ANNOTATIONS_DELETE,
+    access: { group: 'places', mode: 'write' },
+  })
+  async bulkDeletePlaces({ tripId, placeIds }: { tripId: number; placeIds: number[] }, ctx: McpContext) {
+    if (!(await this.tripsRepo.findAccessible(tripId, ctx.userId))) return noAccess();
+    if (!(await this.guards.hasTripPermission('place_edit', tripId, ctx.userId))) return permissionDenied();
+
+    // Trip-scoped, and ahead of the DELETE: journey_entries.source_place_id is
+    // ON DELETE SET NULL, so a hook that ran afterwards found nothing left to
+    // detach and left the entries as orphans.
+    const scoped = await this.places.scopedIds(String(tripId), placeIds);
+    for (const id of scoped) {
+      try { await this.journey.onPlaceDeleted(id); } catch { /* non-fatal */ }
+    }
+    // The link is gone once the places are, so read it first (#1298).
+    const expenseIds = await this.places.linkedExpenseIds(tripId, scoped);
+    const { deleted, cancelled } = await this.places.removeMany(String(tripId), placeIds);
+    for (const id of deleted) this.guards.safeBroadcast(tripId, 'place:deleted', { placeId: id });
+    // A night booked at this place went with it, and took its partner booking and
+    // that booking's expense along. Neither is covered by place:deleted, and an
+    // expense linked by reservation_id is not one linkedExpenseIds finds.
+    for (const reservationId of cancelled.reservationIds) this.guards.safeBroadcast(tripId, 'reservation:deleted', { reservationId });
+    for (const itemId of [...expenseIds, ...cancelled.budgetItemIds]) this.guards.safeBroadcast(tripId, 'budget:deleted', { itemId });
+    return ok({ deleted, count: deleted.length });
+  }
+
+  @Tool({
+    name: 'bulk_update_places',
+    description: 'Update many places in a trip at once, applying the SAME field values to every listed place. Use this for sweeping edits — e.g. re-categorising a batch of POIs (set category_id for 80 places) — in a single call instead of one update_place per place. Only the fields you set are changed; everything else on each place is preserved. Use list_categories for category_id.',
+    inputSchema: {
+      tripId: idSchema,
+      placeIds: z.array(idSchema).min(1).max(500).describe('IDs of the places to update (from list_places)'),
+      category_id: idSchema.optional().describe('Category ID — use list_categories'),
+      price: z.number().optional(),
+      currency: z.string().length(3).optional(),
+      transport_mode: z.enum(['walking', 'driving', 'cycling', 'transit', 'flight']).optional(),
+      place_time: z.string().max(50).optional().describe('Scheduled time (e.g. "09:00")'),
+      end_time: z.string().max(50).optional().describe('End time (e.g. "11:00")'),
+      duration_minutes: idSchema.optional(),
+      notes: z.string().max(2000).optional(),
+      website: placeWebsiteSchema.optional(),
+      phone: z.string().max(50).optional(),
+      image_url: placeImageUrlSchema.nullable().optional().describe('Thumbnail for every listed place: an /uploads/ path, an /api/maps/place-photo/ path, an inline data: image, or an https URL. Pass null to strip the pictures off a batch at once'),
+      description: z.string().max(2000).optional(),
+      stop_type: roadtripStopTypeSchema.nullable().optional().describe('What kind of stop on a drive this is: fuel, charging, rest_area, campsite, restaurant, sights or hotel. Pass null to turn a service stop back into an ordinary place. calculate_roadtrip reports the same value on a stop as stopType; this field is stop_type.'),
+      fill_percent: z.number().int().min(1).max(100).nullable().optional().describe('How full THIS stop fills the tank, 1-100. A motorway rapid charger is worth about 80 %, the one at the hotel 100 %. Pass null to follow whatever the traveller set as their default fill.'),
+    },
+    annotations: TOOL_ANNOTATIONS_WRITE,
+    access: { group: 'places', mode: 'write' },
+  })
+  async bulkUpdatePlaces(
+    { tripId, placeIds, category_id, price, currency, transport_mode, place_time, end_time, duration_minutes, notes, website, phone, image_url, description, stop_type, fill_percent }: {
+      tripId: number; placeIds: number[]; category_id?: number; price?: number; currency?: string;
+      transport_mode?: 'walking' | 'driving' | 'cycling' | 'transit' | 'flight'; place_time?: string;
+      end_time?: string; duration_minutes?: number; notes?: string; website?: string; phone?: string;
+      image_url?: string | null; description?: string; stop_type?: RoadtripStopType | null;
+      fill_percent?: number | null;
+    },
+    ctx: McpContext,
+  ) {
+    if (!(await this.tripsRepo.findAccessible(tripId, ctx.userId))) return noAccess();
+    if (!(await this.guards.hasTripPermission('place_edit', tripId, ctx.userId))) return permissionDenied();
+
+    const fields = { category_id, price, currency, transport_mode, place_time, end_time, duration_minutes, notes, website, phone, image_url, description, stop_type, fill_percent };
+    if (Object.values(fields).every(v => v === undefined)) {
+      return { content: [{ type: 'text' as const, text: 'Provide at least one field to update.' }], isError: true };
+    }
+
+    const updated = await this.places.updateMany(String(tripId), placeIds, fields);
+    // Per place, the event and then the journey hook, in the order POST /places/bulk-update keeps.
+    for (const place of updated) {
+      this.guards.safeBroadcast(tripId, 'place:updated', { place });
+      await this.places.onUpdated(place.id);
+    }
+    return ok({ count: updated.length, updatedIds: updated.map(p => p.id), skipped: placeIds.length - updated.length });
+  }
+
+  @ResourceTemplate({
+    name: 'trip-places',
+    uriTemplate: 'trek://trips/{tripId}/places',
+    description: 'All places/POIs in a trip, optionally filtered by assignment status (e.g. ?assignment=unassigned)',
+    mimeType: 'application/json',
+    access: { group: 'places', mode: 'read' },
+  })
+  async tripPlacesResource(uri: URL, { tripId }: { tripId: string | string[] }, ctx: McpContext) {
+    const id = parseId(tripId);
+    if (id === null || !(await this.tripsRepo.findAccessible(id, ctx.userId))) {
+      return {
+        contents: [{
+          uri: uri.href,
+          mimeType: 'application/json',
+          text: JSON.stringify({ error: 'Trip not found or access denied' }),
+        }],
+      };
+    }
+    const assignment = uri.searchParams.get('assignment') as 'all' | 'unassigned' | 'assigned' | null;
+    const places = await this.places.list(String(id), { assignment: assignment ?? undefined });
+    return {
+      contents: [{
+        uri: uri.href,
+        mimeType: 'application/json',
+        text: JSON.stringify(places, null, 2),
+      }],
+    };
+  }
+}

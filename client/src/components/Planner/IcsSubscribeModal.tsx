@@ -1,0 +1,283 @@
+import { useState, useEffect, useCallback, useId, type ReactNode } from 'react'
+import { createPortal } from 'react-dom'
+import { X, RefreshCw, Calendar, Power } from 'lucide-react'
+import { SubscribeLinks } from './SubscribeLinks'
+import { useIsPhone } from '../../mobile/useIsPhone'
+import { useTranslation } from '../../i18n'
+import { DialogButton, DialogFooter, DialogHeader, DialogShell, DialogTile, FooterSpacer, NEUTRAL_TINT, fs } from '../shared/DialogShell'
+
+interface IcsSubscribeModalProps {
+  /** Token endpoint base, e.g. `/api/trips/123/feed` or `/api/feed/user`. */
+  endpoint: string
+  title: string
+  description: string
+  onClose: () => void
+}
+
+// A server that has no APP_URL configured hands back a host-relative path; the
+// webcal:// handoff and Google deep link need an absolute URL, so resolve it
+// against the current origin as a fallback.
+function absolutize(url: string): string {
+  if (!url) return ''
+  if (/^https?:\/\//i.test(url)) return url
+  if (url.startsWith('/')) return window.location.origin + url
+  return url
+}
+
+/**
+ * Shared subscribe dialog for the per-trip and all-trips ICS feeds. Opening it
+ * only *reads* the current token — it never mints one silently. The user
+ * explicitly enables the public link, and can rotate or fully turn it off.
+ *
+ * The phone keeps its own markup; the desktop draws the same steps in the
+ * planner's dialog frame, with the link's controls in the bar at the foot.
+ */
+export function IcsSubscribeModal({ endpoint, title, description, onClose }: IcsSubscribeModalProps) {
+  const tokenUrl = `${endpoint}/token`
+  const [feedUrl, setFeedUrl] = useState<string | null>(null)
+  const [loading, setLoading] = useState(true)
+  const [busy, setBusy] = useState(false)
+  const isPhone = useIsPhone()
+  const { t } = useTranslation()
+  const titleId = useId()
+
+  const httpsUrl = feedUrl ? absolutize(feedUrl) : ''
+  const webcalUrl = httpsUrl ? httpsUrl.replace(/^https?:\/\//, 'webcal://') : ''
+
+  const load = useCallback(async () => {
+    setLoading(true)
+    try {
+      const res = await fetch(tokenUrl, { credentials: 'include' })
+      if (res.ok) {
+        const data = await res.json() as { feed_url: string | null }
+        setFeedUrl(data.feed_url)
+      }
+    } catch { /* ignore */ }
+    setLoading(false)
+  }, [tokenUrl])
+
+  useEffect(() => { load() }, [load])
+
+  const mutate = async (method: 'POST' | 'PUT' | 'DELETE') => {
+    setBusy(true)
+    try {
+      const res = await fetch(tokenUrl, { method, credentials: 'include' })
+      if (res.ok) {
+        const data = await res.json() as { feed_url: string | null }
+        setFeedUrl(data.feed_url)
+      }
+    } catch { /* ignore */ }
+    setBusy(false)
+  }
+
+  if (!isPhone) {
+    return (
+      <DesktopSubscribeDialog
+        titleId={titleId}
+        title={title}
+        description={description}
+        onClose={onClose}
+        loading={loading}
+        busy={busy}
+        feedUrl={feedUrl}
+        httpsUrl={httpsUrl}
+        webcalUrl={webcalUrl}
+        mutate={mutate}
+      />
+    )
+  }
+
+  return createPortal(
+    <div
+      role="presentation"
+      style={{
+        position: 'fixed', inset: 0, zIndex: 9999,
+        background: 'rgba(0,0,0,0.5)',
+        display: 'flex', alignItems: 'center', justifyContent: 'center',
+        padding: '16px',
+      }}
+      onClick={e => { if (e.target === e.currentTarget) onClose() }}
+    >
+      <div style={{
+        background: 'var(--bg-card, white)',
+        borderRadius: 14,
+        padding: '22px 24px',
+        width: '100%',
+        maxWidth: 420,
+        boxShadow: '0 16px 48px rgba(0,0,0,0.22)',
+        border: '1px solid var(--border-faint)',
+        color: 'var(--text-primary)',
+        fontFamily: 'inherit',
+        position: 'relative',
+      }}>
+        {/* Header */}
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 14 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            <Calendar size={16} strokeWidth={2} style={{ color: 'var(--accent, #6366f1)' }} />
+            <span style={{ fontWeight: 600, fontSize: 14 }}>{title}</span>
+          </div>
+          <button type="button"
+            onClick={onClose}
+            aria-label={t('common.close')}
+            style={{
+              background: 'none', border: 'none', cursor: 'pointer', padding: 4,
+              color: 'var(--text-muted)', borderRadius: 6, display: 'flex',
+            }}
+          >
+            <X size={15} strokeWidth={2} />
+          </button>
+        </div>
+
+        <p style={{ fontSize: 12, color: 'var(--text-muted)', marginBottom: 16, lineHeight: 1.5 }}>
+          {description}
+        </p>
+
+        {loading ? (
+          <div style={{ textAlign: 'center', padding: '16px 0', color: 'var(--text-muted)', fontSize: 12 }}>
+            {t('common.loading')}
+          </div>
+        ) : !feedUrl ? (
+          <>
+            <button type="button"
+              onClick={() => mutate('POST')}
+              disabled={busy}
+              style={{
+                display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8,
+                width: '100%', padding: '9px 14px', borderRadius: 9, border: 'none',
+                background: 'var(--accent, #6366f1)', color: 'var(--accent-text, #fff)',
+                fontSize: 12, fontWeight: 600, fontFamily: 'inherit',
+                cursor: busy ? 'default' : 'pointer', opacity: busy ? 0.6 : 1,
+              }}
+            >
+              <Calendar size={14} strokeWidth={2} />
+              {t('dashboard.ics.enable')}
+            </button>
+            <p style={{ fontSize: 10, color: 'var(--text-muted)', marginTop: 8, lineHeight: 1.4 }}>
+              {t('dashboard.ics.enableHint')}
+            </p>
+          </>
+        ) : (
+          <>
+            <SubscribeLinks httpsUrl={httpsUrl} webcalUrl={webcalUrl} />
+
+            <div style={{ marginTop: 16, paddingTop: 12, borderTop: '1px solid var(--border-faint)', display: 'flex', gap: 8 }}>
+              <button type="button"
+                onClick={() => mutate('PUT')}
+                disabled={busy}
+                style={{
+                  display: 'flex', alignItems: 'center', gap: 6,
+                  background: 'none', border: '1px solid var(--border-primary)',
+                  borderRadius: 7, padding: '5px 10px',
+                  fontSize: 11, color: 'var(--text-muted)',
+                  cursor: busy ? 'default' : 'pointer',
+                  fontFamily: 'inherit', opacity: busy ? 0.6 : 1,
+                }}
+              >
+                <RefreshCw size={11} strokeWidth={2} style={{ animation: busy ? 'spin 0.8s linear infinite' : 'none' }} />
+                {t('dashboard.ics.regenerate')}
+              </button>
+              <button type="button"
+                onClick={() => mutate('DELETE')}
+                disabled={busy}
+                style={{
+                  display: 'flex', alignItems: 'center', gap: 6,
+                  background: 'none', border: '1px solid var(--border-primary)',
+                  borderRadius: 7, padding: '5px 10px',
+                  fontSize: 11, color: 'var(--danger, #dc2626)',
+                  cursor: busy ? 'default' : 'pointer',
+                  fontFamily: 'inherit', opacity: busy ? 0.6 : 1,
+                }}
+              >
+                <Power size={11} strokeWidth={2} />
+                {t('dashboard.ics.turnOff')}
+              </button>
+            </div>
+            <p style={{ fontSize: 10, color: 'var(--text-muted)', marginTop: 6, lineHeight: 1.4 }}>
+              {t('dashboard.ics.manageHint')}
+            </p>
+          </>
+        )}
+      </div>
+
+      <style>{`@keyframes spin { to { transform: rotate(360deg); } }`}</style>
+    </div>,
+  document.body
+  )
+}
+
+// A secondary footer button in the danger colour, for the switch that takes the link away.
+const TURN_OFF_BTN = 'inline-flex items-center gap-1.5 rounded-[10px] bg-surface-tertiary px-3.5 py-2 font-medium text-danger hover:bg-danger-soft disabled:cursor-default disabled:opacity-50'
+
+function DesktopSubscribeDialog({ titleId, title, description, onClose, loading, busy, feedUrl, httpsUrl, webcalUrl, mutate }: {
+  titleId: string
+  title: string
+  description: string
+  onClose: () => void
+  loading: boolean
+  busy: boolean
+  feedUrl: string | null
+  httpsUrl: string
+  webcalUrl: string
+  mutate: (method: 'POST' | 'PUT' | 'DELETE') => Promise<void>
+}) {
+  const { t } = useTranslation()
+  const header = (
+    <DialogHeader
+      tile={<DialogTile><Calendar size={20} strokeWidth={1.9} className="text-content-muted" /></DialogTile>}
+      tint={NEUTRAL_TINT}
+      labelId={titleId}
+      onClose={onClose}
+      title={title}
+      sub={description}
+      subWraps
+    />
+  )
+
+  const hint = 'm-0 leading-normal text-content-muted'
+  let body: ReactNode
+  let footer: ReactNode = null
+  if (loading) {
+    body = <div className="py-4 text-center text-content-muted" style={fs(12.5, 'body')}>{t('common.loading')}</div>
+  } else if (!feedUrl) {
+    body = (
+      <p className={hint} style={fs(12.5, 'body')}>
+        {t('dashboard.ics.enableHint')}
+      </p>
+    )
+    footer = (
+      <DialogFooter>
+        <FooterSpacer />
+        <DialogButton variant="primary" onClick={() => mutate('POST')} disabled={busy} icon={<Calendar size={14} strokeWidth={2} />}>
+          {t('dashboard.ics.enable')}
+        </DialogButton>
+      </DialogFooter>
+    )
+  } else {
+    body = (
+      <>
+        <SubscribeLinks httpsUrl={httpsUrl} webcalUrl={webcalUrl} />
+        <p className={hint} style={fs(11.5)}>
+          {t('dashboard.ics.manageHint')}
+        </p>
+      </>
+    )
+    footer = (
+      <DialogFooter>
+        <DialogButton onClick={() => mutate('PUT')} disabled={busy} icon={<RefreshCw size={14} strokeWidth={2} className={busy ? 'animate-spin' : ''} />}>
+          {t('dashboard.ics.regenerate')}
+        </DialogButton>
+        <FooterSpacer />
+        <button type="button" onClick={() => mutate('DELETE')} disabled={busy} className={TURN_OFF_BTN} style={fs(13, 'body')}>
+          <Power size={14} strokeWidth={2} />
+          {t('dashboard.ics.turnOff')}
+        </button>
+      </DialogFooter>
+    )
+  }
+
+  return (
+    <DialogShell onClose={onClose} labelledBy={titleId} width="narrow" header={header} footer={footer}>
+      {body}
+    </DialogShell>
+  )
+}

@@ -1,0 +1,40 @@
+import type { TranslationStrings } from '../types';
+
+const members: TranslationStrings = {
+  'members.inviteUser': 'Pozvat uživatele',
+  'members.selectUser': 'Vyberte uživatele…',
+  'members.invite': 'Pozvat',
+  'members.allHaveAccess': 'Všichni uživatelé již mají přístup.',
+  'members.access': 'Přístup',
+  'members.persons': 'osob',
+  'members.persons.one': 'osoba',
+  'members.persons.few': 'osoby',
+  'members.you': 'vy',
+  'members.owner': 'Vlastník',
+  'members.leaveTrip': 'Opustit cestu',
+  'members.removeAccess': 'Odebrat přístup',
+  'members.confirmLeave': 'Opustit cestu? Ztratíte přístup.',
+  'members.confirmRemove': 'Odebrat přístup tomuto uživateli?',
+  'members.loadError': 'Nepodařilo se načíst členy',
+  'members.added': 'přidán/a',
+  'members.addError': 'Nepodařilo se přidat',
+  'members.removed': 'Člen odebrán',
+  'members.removeError': 'Nepodařilo se odebrat',
+  'members.makeOwner': 'Nastavit jako vlastníka',
+  'members.confirmTransfer': 'Převést vlastnictví na {name}? Stanete se běžným členem.',
+  'members.transferError': 'Převod vlastnictví se nezdařil',
+  'members.guests': 'Hosté',
+  'members.guest': 'Host',
+  'members.guestsHint': 'Lidé bez účtu. Lze jim přiřadit náklady, balení a úkoly, ale nemohou se přihlásit.',
+  'members.addGuest': 'Přidat hosta',
+  'members.guestNamePlaceholder': 'Jméno hosta',
+  'members.guestAdded': 'Host přidán',
+  'members.guestAddError': 'Nepodařilo se přidat hosta',
+  'members.guestRenameError': 'Nepodařilo se přejmenovat hosta',
+  'members.guestRemoved': 'Host odebrán',
+  'members.confirmRemoveGuest':
+    'Odebrat tohoto hosta? Jeho přiřazení budou odebrána a jeho podíl na každém výdaji se rozdělí mezi ostatní účastníky.',
+  'members.guestHasPayments':
+    'Tento host zaplatil výdaj nebo je součástí zaznamenané platby. Nejprve změňte plátce nebo platbu smažte.',
+};
+export default members;

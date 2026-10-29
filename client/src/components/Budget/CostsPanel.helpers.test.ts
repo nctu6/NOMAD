@@ -1,0 +1,435 @@
+import { describe, it, expect } from 'vitest'
+import { amountInCurrency, amountPattern, calculateTicketShares, clampAmountDecimals, expenseEditorFor, newExpenseSeed, receiptToPrefill, finalBudgetFor, finalBudgetSources, formerParticipantRows, hasTicketSplit, knownPersonNames, paidByUser, payerSum, payersBalanced, readTicketItems, readUserNote, rebalancePayers, settlementDate, splitCents, splitEqualShares, writeTicketItems, type TicketItem } from './CostsPanel.helpers'
+
+describe('splitCents', () => {
+  it('splits evenly when it divides cleanly', () => {
+    expect(splitCents(90, 3)).toEqual([30, 30, 30])
+  })
+
+  it('distributes the remainder cents so the parts sum back exactly', () => {
+    const parts = splitCents(100.01, 3)
+    expect(parts).toEqual([33.34, 33.34, 33.33])
+    expect(parts.reduce((a, b) => a + b, 0)).toBeCloseTo(100.01, 2)
+  })
+
+  it('returns an empty list for a non-positive count', () => {
+    expect(splitCents(50, 0)).toEqual([])
+  })
+
+  it('splits a negative amount exactly instead of clamping it to zero (#2176)', () => {
+    // A refund spread across payers has to sum back too — the old Math.max(0, …)
+    // clamp silently swallowed the sign and broke rebalancePayers for refunds.
+    expect(splitCents(-10, 2)).toEqual([-5, -5])
+    const parts = splitCents(-100.01, 3)
+    expect(parts.reduce((a, b) => a + Math.round(b * 100), 0)).toBe(-10001)
+  })
+})
+
+describe('payerSum', () => {
+  it('sums only the selected payers', () => {
+    const amounts = { 1: '45', 2: '45', 3: '99' }
+    expect(payerSum(amounts, new Set([1, 2]))).toBeCloseTo(90, 2)
+  })
+
+  it('treats blank and unparseable amounts as zero', () => {
+    expect(payerSum({ 1: '', 2: 'abc' }, new Set([1, 2]))).toBe(0)
+  })
+})
+
+describe('payersBalanced', () => {
+  it('is true when the payer amounts add up to the total', () => {
+    expect(payersBalanced({ 1: '45', 2: '45' }, new Set([1, 2]), 90)).toBe(true)
+  })
+
+  it('is false when they do not', () => {
+    expect(payersBalanced({ 1: '45', 2: '40' }, new Set([1, 2]), 90)).toBe(false)
+  })
+
+  it('compares to the cent, tolerating float dust', () => {
+    expect(payersBalanced({ 1: '33.34', 2: '33.34', 3: '33.33' }, new Set([1, 2, 3]), 100.01)).toBe(true)
+  })
+})
+
+describe('rebalancePayers', () => {
+  it('spreads the total across payers when none are pinned', () => {
+    const next = rebalancePayers({}, new Set(), new Set([1, 2]), 90)
+    expect(next).toEqual({ 1: '45.00', 2: '45.00' })
+  })
+
+  it('leaves pinned payers alone and lets the rest absorb the remainder', () => {
+    // Alice pinned at 70 of a 100 bill → Bob must absorb 30.
+    const next = rebalancePayers({ 1: '70' }, new Set([1]), new Set([1, 2]), 100)
+    expect(next[1]).toBe('70')
+    expect(next[2]).toBe('30.00')
+  })
+
+  it('returns the amounts untouched when every payer is pinned', () => {
+    const amounts = { 1: '70', 2: '20' }
+    const next = rebalancePayers(amounts, new Set([1, 2]), new Set([1, 2]), 100)
+    expect(next).toEqual(amounts)
+  })
+
+  it('blanks a free payer whose share works out to zero', () => {
+    // Alice pinned at the full total → Bob is a payer with nothing left to pay.
+    const next = rebalancePayers({ 1: '100' }, new Set([1]), new Set([1, 2]), 100)
+    expect(next[2]).toBe('')
+  })
+
+  it('keeps the result balanced after rebalancing', () => {
+    const next = rebalancePayers({ 1: '33.33' }, new Set([1]), new Set([1, 2, 3]), 100)
+    expect(payersBalanced(next, new Set([1, 2, 3]), 100)).toBe(true)
+  })
+
+  // ── Refunds: negative totals rebalance like any other (#2176) ──────────────
+
+  it('spreads a negative total across payers so the parts stay typeable', () => {
+    const next = rebalancePayers({}, new Set(), new Set([1, 2]), -90)
+    expect(next).toEqual({ 1: '-45.00', 2: '-45.00' })
+    expect(payersBalanced(next, new Set([1, 2]), -90)).toBe(true)
+  })
+
+  it('lets a free payer absorb the rest of a negative total past a pinned amount', () => {
+    const next = rebalancePayers({ 1: '-70' }, new Set([1]), new Set([1, 2]), -100)
+    expect(next[1]).toBe('-70')
+    expect(next[2]).toBe('-30.00')
+  })
+
+  it('handles a pinned positive payer against a negative total', () => {
+    // Alice fronted 50 but the entry nets to -100 — the free payer carries -150.
+    const next = rebalancePayers({ 1: '50' }, new Set([1]), new Set([1, 2]), -100)
+    expect(next[2]).toBe('-150.00')
+    expect(payersBalanced(next, new Set([1, 2]), -100)).toBe(true)
+  })
+})
+
+// ── Client/server share parity (#2176) ───────────────────────────────────────
+//
+// The preview's splitEqualShares returns euros on top of the shared cent split
+// the server settles with (shared/src/money/money.ts, whose money.spec.ts holds
+// the same table). This copy checks that the euro conversion keeps every cent.
+const SHARE_PARITY_FIXTURE: { totalCents: number; users: number[]; itemId: number; expected: Record<number, number> }[] = [
+  { totalCents: 10000, users: [1, 2, 3], itemId: 0, expected: { 1: 3334, 2: 3333, 3: 3333 } },
+  { totalCents: 10000, users: [1, 2, 3], itemId: 1, expected: { 1: 3333, 2: 3334, 3: 3333 } },
+  { totalCents: -10000, users: [1, 2, 3], itemId: 0, expected: { 1: -3333, 2: -3333, 3: -3334 } },
+  { totalCents: -10000, users: [1, 2, 3], itemId: 1, expected: { 1: -3334, 2: -3333, 3: -3333 } },
+  { totalCents: -101, users: [1, 2], itemId: 0, expected: { 1: -50, 2: -51 } },
+  { totalCents: -101, users: [1, 2], itemId: 1, expected: { 1: -51, 2: -50 } },
+  { totalCents: -1, users: [1, 2, 3], itemId: 0, expected: { 1: 0, 2: 0, 3: -1 } },
+]
+
+describe('splitEqualShares — server parity (#2176)', () => {
+  it.each(SHARE_PARITY_FIXTURE)(
+    'splits $totalCents cents across $users.length members (item $itemId) exactly like the server',
+    ({ totalCents, users, itemId, expected }) => {
+      const shares = splitEqualShares(totalCents / 100, users.map(user_id => ({ user_id })), itemId)
+      const inCents = Object.fromEntries(Object.entries(shares).map(([id, v]) => [id, Math.round(v * 100)]))
+      expect(inCents).toEqual(expected)
+      // The invariant behind the fixture: the shares always sum back to the total.
+      expect(Object.values(inCents).reduce((a, b) => a + b, 0)).toBe(totalCents)
+    },
+  )
+})
+
+// ── Notes vs. itemized receipts (#1658) ──────────────────────────────────────
+
+describe('readTicketItems', () => {
+  const receipt = '{"items":[{"name":"Bread","price":"3.50","parts":[1,2]},{"name":"Wine","price":"12","parts":[2]}]}'
+
+  it('reads the receipt out of its own column', () => {
+    const items = readTicketItems({ ticket_json: receipt })
+    expect(items.map(i => i.name)).toEqual(['Bread', 'Wine'])
+    expect(items[0].participants).toEqual(new Set([1, 2]))
+    expect(items[1].price).toBe('12')
+  })
+
+  it('still reads a response cached before the column existed', () => {
+    const items = readTicketItems({ note: 'TICKETJSON:' + receipt })
+    expect(items).toHaveLength(2)
+    expect(items[1].participants).toEqual(new Set([2]))
+  })
+
+  it('prefers the column over the legacy note when both are present', () => {
+    const items = readTicketItems({ ticket_json: '{"items":[{"name":"Only","price":"1","parts":[]}]}', note: 'TICKETJSON:' + receipt })
+    expect(items.map(i => i.name)).toEqual(['Only'])
+  })
+
+  it('is empty for an expense with neither, and for malformed JSON', () => {
+    expect(readTicketItems({ note: 'just a note' })).toEqual([])
+    expect(readTicketItems(null)).toEqual([])
+    expect(readTicketItems({ ticket_json: '{oops' })).toEqual([])
+  })
+
+  it('round-trips through writeTicketItems', () => {
+    const items = readTicketItems({ ticket_json: receipt })
+    expect(readTicketItems({ ticket_json: writeTicketItems(items) })).toEqual(items)
+  })
+})
+
+describe('hasTicketSplit', () => {
+  it('recognises both storage shapes and nothing else', () => {
+    expect(hasTicketSplit({ ticket_json: '{"items":[]}' })).toBe(true)
+    expect(hasTicketSplit({ note: 'TICKETJSON:{"items":[]}' })).toBe(true)
+    expect(hasTicketSplit({ note: 'dinner with Ben' })).toBe(false)
+    expect(hasTicketSplit(undefined)).toBe(false)
+  })
+})
+
+describe('readUserNote', () => {
+  it('returns what the user typed', () => {
+    expect(readUserNote({ note: 'Lisa pays half back' })).toBe('Lisa pays half back')
+  })
+
+  it('never returns a receipt blob as if it were a note', () => {
+    expect(readUserNote({ note: 'TICKETJSON:{"items":[]}' })).toBe('')
+    expect(readUserNote({ note: null })).toBe('')
+    expect(readUserNote(null)).toBe('')
+  })
+})
+
+describe('settlementDate', () => {
+  it('prefers settled_at over created_at', () => {
+    expect(settlementDate({ settled_at: '2026-07-05', created_at: '2026-07-01T09:00:00Z' })).toBe('2026-07-05')
+  })
+
+  it('falls back to the day it was recorded when settled_at is unset', () => {
+    expect(settlementDate({ created_at: '2026-07-01T09:00:00Z' })).toBe('2026-07-01')
+    expect(settlementDate({ settled_at: null, created_at: '2026-07-01T09:00:00Z' })).toBe('2026-07-01')
+  })
+
+  it('is empty when neither is set', () => {
+    expect(settlementDate({})).toBe('')
+  })
+
+  it("reads the recorded UTC time on the viewer's own calendar day (#2604)", () => {
+    const runnerTimeZone = process.env.TZ
+    process.env.TZ = 'Asia/Seoul'
+    try {
+      // 23:30 UTC is 08:30 the next morning in Seoul.
+      expect(settlementDate({ created_at: '2026-10-11 23:30:00' })).toBe('2026-10-12')
+      expect(settlementDate({ created_at: '2026-10-11T23:30:00Z' })).toBe('2026-10-12')
+      // A day the user picked is a calendar day already and stays as it is.
+      expect(settlementDate({ settled_at: '2026-10-11', created_at: '2026-10-11 23:30:00' })).toBe('2026-10-11')
+    } finally {
+      if (runnerTimeZone === undefined) delete process.env.TZ
+      else process.env.TZ = runnerTimeZone
+    }
+  })
+})
+
+describe('amount decimals per currency (#2604)', () => {
+  it('cuts a typed amount to the decimals the currency has', () => {
+    expect(clampAmountDecimals('1000.555', 'KRW')).toBe('1000.')
+    expect(clampAmountDecimals('1000.', 'JPY')).toBe('1000.')
+    expect(amountInCurrency('12.34', 'KRW')).toBe('12')
+    expect(amountInCurrency('12.34', 'EUR')).toBe('12.34')
+    expect(clampAmountDecimals('10.555', 'EUR')).toBe('10.55')
+    expect(clampAmountDecimals('1.5555', 'KWD')).toBe('1.555')
+    expect(clampAmountDecimals('-12.5', 'EUR')).toBe('-12.5')
+    expect(clampAmountDecimals('', 'KRW')).toBe('')
+  })
+
+  it('takes no decimals for a currency without minor units, three for a three-decimal one', () => {
+    expect(amountPattern('KRW', false).test('1000')).toBe(true)
+    expect(amountPattern('KRW', false).test('1000.')).toBe(true)
+    expect(amountPattern('KRW', false).test('1000.5')).toBe(false)
+    expect(amountPattern('EUR', true).test('-10.55')).toBe(true)
+    expect(amountPattern('EUR', false).test('10.555')).toBe(false)
+    expect(amountPattern('KWD', false).test('1.555')).toBe(true)
+  })
+})
+
+// ── Receipt splits have to reconcile (#1382) ─────────────────────────────────
+
+describe('calculateTicketShares', () => {
+  const line = (price: string, parts: number[]): TicketItem =>
+    ({ id: price + parts.join(), name: 'Line', price, participants: new Set(parts) })
+  const shareSum = (shares: Record<number, number>) =>
+    Object.values(shares).reduce((a, v) => a + Math.round(v * 100), 0)
+
+  it('splits each line among the people on it', () => {
+    const { shares, total } = calculateTicketShares([line('10', [1, 2]), line('6', [2])])
+    expect(shares).toEqual({ 1: 5, 2: 11 })
+    expect(total).toBe(16)
+  })
+
+  it('spreads a line nobody was ticked for across everyone on the receipt', () => {
+    // The service charge used to count toward the total and toward nobody's share,
+    // so the expense carried a permanent difference no settle-up could clear.
+    const { shares, total } = calculateTicketShares([
+      line('10', [1, 2]),
+      line('5', []),
+      line('x', [2]),
+    ])
+    expect(shares).toEqual({ 1: 7.5, 2: 7.5 })
+    expect(total).toBe(15)
+    expect(shareSum(shares)).toBe(Math.round(total * 100))
+  })
+
+  it('hands out the remainder cents so the shares add back up to the total', () => {
+    const { shares, total } = calculateTicketShares([line('10', [1, 2, 3]), line('0.01', [])])
+    expect(shareSum(shares)).toBe(Math.round(total * 100))
+    expect(total).toBe(10.01)
+  })
+
+  it('splits nothing when the receipt has no participants anywhere', () => {
+    const { shares, total } = calculateTicketShares([line('10', []), line('5', [])])
+    expect(shares).toEqual({})
+    expect(total).toBe(15)
+  })
+
+  it('is empty for an empty receipt', () => {
+    expect(calculateTicketShares([])).toEqual({ shares: {}, total: 0 })
+  })
+})
+
+describe('paidByUser', () => {
+  it('adds up what one participant fronted and ignores the other payers', () => {
+    const item = { payers: [{ user_id: 1, amount: 30 }, { user_id: 2, amount: 70 }, { user_id: 1, amount: 5 }] }
+    expect(paidByUser(item, 1)).toBe(35)
+    expect(paidByUser(item, 2)).toBe(70)
+    expect(paidByUser(item, 3)).toBe(0)
+  })
+
+  it('is zero for an expense with no payer list', () => {
+    expect(paidByUser({ payers: null }, 1)).toBe(0)
+    expect(paidByUser({}, 1)).toBe(0)
+  })
+})
+
+describe('finalBudgetFor', () => {
+  const finals = [{
+    user_id: 1, username: 'alice', avatar_url: null, expenses: 100, reimbursed: 50, pending: 0, final: 50,
+    sources: { fronted: [{ item_id: 1, cents: 10000 }], moved: [], outstanding: [] },
+  }]
+
+  it("returns the server's row for a participant in the ledger", () => {
+    expect(finalBudgetFor(finals, { id: 1, username: 'alice' })).toBe(finals[0])
+  })
+
+  it('reads a participant the ledger left out as costing nothing, with nothing behind it', () => {
+    expect(finalBudgetFor(finals, { id: 2, username: 'bob' })).toEqual({
+      user_id: 2, username: 'bob', avatar_url: null, expenses: 0, reimbursed: 0, pending: 0, final: 0,
+      sources: { fronted: [], moved: [], outstanding: [] },
+    })
+  })
+})
+
+describe('finalBudgetSources', () => {
+  const items = [{ id: 1, name: 'Dinner' }, { id: 2, name: 'Taxi' }]
+  const sources = {
+    fronted: [{ item_id: 1, cents: 6000 }, { item_id: 3, cents: -1000 }],
+    moved: [
+      { settlement_id: 1, from_user_id: 2, to_user_id: 1, cents: 1500 },
+      { settlement_id: 2, from_user_id: 1, to_user_id: 3, cents: -500 },
+    ],
+    outstanding: [{ from_user_id: 3, to_user_id: 1, cents: 501 }],
+  }
+
+  it("names the expenses and prints the server's cents as amounts, a refund's negative row included", () => {
+    const { fronted } = finalBudgetSources({ sources }, items)
+    // An expense the list does not know yet keeps its row; only the name is missing.
+    expect(fronted).toEqual([{ item_id: 1, name: 'Dinner', amount: 60 }, { item_id: 3, name: '?', amount: -10 }])
+  })
+
+  it('keeps the transfers and open flows signed as the server sent them', () => {
+    const { moved, outstanding } = finalBudgetSources({ sources }, items)
+    expect(moved).toEqual([
+      { settlement_id: 1, from_user_id: 2, to_user_id: 1, amount: 15 },
+      { settlement_id: 2, from_user_id: 1, to_user_id: 3, amount: -5 },
+    ])
+    expect(outstanding).toEqual([{ from_user_id: 3, to_user_id: 1, amount: 5.01 }])
+  })
+
+  it('is empty for a participant with no activity', () => {
+    expect(finalBudgetSources({ sources: { fronted: [], moved: [], outstanding: [] } }, items))
+      .toEqual({ fronted: [], moved: [], outstanding: [] })
+  })
+})
+
+describe('newExpenseSeed', () => {
+  it('starts a plain new expense on the base currency, today, with nothing to attach', () => {
+    expect(newExpenseSeed(undefined, 'eur', [1, 2], '2026-09-24')).toEqual({
+      currency: 'EUR', day: '2026-09-24', total: '', ticketItems: [], receiptFiles: [],
+    })
+  })
+
+  it('reads a booking price in the base currency, padded to its decimals', () => {
+    expect(newExpenseSeed({ amount: 4.9 }, 'EUR', [], '2026-09-24').total).toBe('4.90')
+  })
+
+  it('seeds a scanned receipt: its currency, day, lines shared by everyone, and the photo', () => {
+    const photo = new File(['x'], 'bill.jpg')
+    const seed = newExpenseSeed(
+      { amount: 1500, currency: 'jpy', date: '2026-09-20', lines: [{ name: 'Ramen', price: 1200 }, { name: 'Tea', price: 300 }], receiptFiles: [photo] },
+      'EUR', [1, 2], '2026-09-24',
+    )
+    expect(seed).toMatchObject({ currency: 'JPY', day: '2026-09-20', total: '1500', receiptFiles: [photo] })
+    expect(seed.ticketItems.map(i => [i.name, i.price, [...i.participants]])).toEqual([['Ramen', '1200', [1, 2]], ['Tea', '300', [1, 2]]])
+  })
+})
+
+describe('receiptToPrefill', () => {
+  it('turns a read receipt into an expense prefill, leaving out what was not read', () => {
+    const photo = new File(['x'], 'bill.jpg')
+    expect(receiptToPrefill({ merchant: 'Café', date: null, total: 12.5, currency: 'EUR', items: [] }, [photo])).toEqual({
+      name: 'Café', amount: 12.5, currency: 'EUR', date: undefined, lines: [], receiptFiles: [photo],
+    })
+    expect(receiptToPrefill({ merchant: null, date: '2026-09-01', total: null, currency: null, items: [] }, [])).toMatchObject({
+      name: undefined, amount: undefined, currency: undefined, date: '2026-09-01',
+    })
+  })
+})
+
+describe('expenseEditorFor', () => {
+  const closeBooking = () => {}
+  const closeReceipt = () => {}
+
+  it('is nothing when neither opener asks', () => {
+    expect(expenseEditorFor(null, closeBooking, null, closeReceipt)).toBeNull()
+  })
+
+  it('opens a scanned receipt as a new expense', () => {
+    expect(expenseEditorFor(null, closeBooking, { name: 'Café' }, closeReceipt)).toEqual({ key: 'receipt', editing: null, prefill: { name: 'Café' }, close: closeReceipt })
+  })
+
+  it('lets the booking win, since it is what was just clicked', () => {
+    expect(expenseEditorFor({ editing: null, prefill: { amount: 3 } }, closeBooking, { name: 'Café' }, closeReceipt))
+      .toEqual({ key: 'booking', editing: null, prefill: { amount: 3 }, close: closeBooking })
+  })
+})
+
+// #2604: someone removed from the trip keeps their rows on the expenses, so the
+// views name them from what the server sent and keep their money in the lists.
+describe('knownPersonNames', () => {
+  it('names a former member from the expenses and the settlement', () => {
+    const names = knownPersonNames(
+      [{ payers: [{ user_id: 4, username: 'Lena' }], members: [{ user_id: 1, username: 'Jonas' }, { user_id: 4, username: 'Lena' }] }],
+      { balances: [{ user_id: 5, username: 'Tom' }], finalBudgets: [], flows: [{ from: { user_id: 5, username: 'Tom' }, to: { user_id: 6, username: 'Mia' } }] },
+    )
+    expect(Object.fromEntries(names)).toEqual({ 1: 'Jonas', 4: 'Lena', 5: 'Tom', 6: 'Mia' })
+  })
+
+  it('copes with no settlement and rows without a name', () => {
+    expect(knownPersonNames([{ payers: [{ user_id: 2 }], members: null }], null).size).toBe(0)
+  })
+})
+
+describe('formerParticipantRows', () => {
+  const balances = [
+    { user_id: 1, balance: 30 },
+    { user_id: 4, balance: 60 },
+    { user_id: 5, balance: -90 },
+    { user_id: 7, balance: 0 },
+  ]
+
+  it('lists the people off the trip that still carry money, so the balances add up to zero', () => {
+    const extra = formerParticipantRows([1, 5], balances, b => Math.abs(b.balance) >= 0.005)
+    expect(extra).toEqual([{ user_id: 4, balance: 60 }])
+    const listed = [...balances.filter(b => [1, 5].includes(b.user_id)), ...extra]
+    expect(listed.reduce((a, b) => a + b.balance, 0)).toBe(0)
+  })
+
+  it('adds nobody when everyone is on the trip', () => {
+    expect(formerParticipantRows([1, 4, 5, 7], balances, () => true)).toEqual([])
+  })
+})

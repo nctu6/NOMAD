@@ -1,0 +1,207 @@
+/**
+ * Day Notes integration tests.
+ * Covers NOTE-001 to NOTE-006.
+ */
+import { buildApp } from '../../src/bootstrap';
+import { db as testDb } from '../../src/db/database';
+import { authCookie } from '../helpers/auth';
+import { createUser, createTrip, createDay, addTripMember } from '../helpers/factories';
+import { resetTestDb, resetRateLimits } from '../helpers/test-db';
+import type { INestApplication } from '@nestjs/common';
+
+import type { Application } from 'express';
+import request from 'supertest';
+import { describe, it, expect, vi, beforeAll, beforeEach, afterAll } from 'vitest';
+
+vi.mock('../../src/db/database', async () => {
+  const { createSnapshotTestDb, buildDbMock } = await import('../helpers/db-mock');
+  return buildDbMock(createSnapshotTestDb());
+});
+
+let nestApp: INestApplication;
+let app: Application;
+
+beforeAll(async () => {
+  nestApp = await buildApp();
+  app = nestApp.getHttpAdapter().getInstance();
+});
+
+beforeEach(async () => {
+  resetTestDb(testDb);
+  await resetRateLimits(nestApp);
+});
+
+afterAll(async () => {
+  await nestApp.close();
+  testDb.close();
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Create day note
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('Create day note', () => {
+  it('NOTE-001 — POST creates a day note', async () => {
+    const { user } = createUser(testDb);
+    const trip = createTrip(testDb, user.id);
+    const day = createDay(testDb, trip.id, { date: '2025-06-01' });
+
+    const res = await request(app)
+      .post(`/api/trips/${trip.id}/days/${day.id}/notes`)
+      .set('Cookie', authCookie(user.id))
+      .send({ text: 'Remember to book tickets', time: '09:00' });
+    expect(res.status).toBe(201);
+    expect(res.body.note.text).toBe('Remember to book tickets');
+    expect(res.body.note.time).toBe('09:00');
+  });
+
+  it('NOTE-001 — POST without text returns 400', async () => {
+    const { user } = createUser(testDb);
+    const trip = createTrip(testDb, user.id);
+    const day = createDay(testDb, trip.id);
+
+    const res = await request(app)
+      .post(`/api/trips/${trip.id}/days/${day.id}/notes`)
+      .set('Cookie', authCookie(user.id))
+      .send({ time: '10:00' });
+    expect(res.status).toBe(400);
+  });
+
+  it('NOTE-002 — text exceeding 500 characters is rejected', async () => {
+    const { user } = createUser(testDb);
+    const trip = createTrip(testDb, user.id);
+    const day = createDay(testDb, trip.id);
+
+    const res = await request(app)
+      .post(`/api/trips/${trip.id}/days/${day.id}/notes`)
+      .set('Cookie', authCookie(user.id))
+      .send({ text: 'A'.repeat(501) });
+    expect(res.status).toBe(400);
+  });
+
+  it('NOTE-001 — POST on non-existent day returns 404', async () => {
+    const { user } = createUser(testDb);
+    const trip = createTrip(testDb, user.id);
+
+    const res = await request(app)
+      .post(`/api/trips/${trip.id}/days/99999/notes`)
+      .set('Cookie', authCookie(user.id))
+      .send({ text: 'This should fail' });
+    expect(res.status).toBe(404);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// List day notes
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('List day notes', () => {
+  it('NOTE-003 — GET returns notes for a day', async () => {
+    const { user } = createUser(testDb);
+    const trip = createTrip(testDb, user.id);
+    const day = createDay(testDb, trip.id);
+
+    await request(app)
+      .post(`/api/trips/${trip.id}/days/${day.id}/notes`)
+      .set('Cookie', authCookie(user.id))
+      .send({ text: 'Note A' });
+    await request(app)
+      .post(`/api/trips/${trip.id}/days/${day.id}/notes`)
+      .set('Cookie', authCookie(user.id))
+      .send({ text: 'Note B' });
+
+    const res = await request(app).get(`/api/trips/${trip.id}/days/${day.id}/notes`).set('Cookie', authCookie(user.id));
+    expect(res.status).toBe(200);
+    expect(res.body.notes).toHaveLength(2);
+  });
+
+  it('NOTE-006 — non-member cannot list notes', async () => {
+    const { user: owner } = createUser(testDb);
+    const { user: other } = createUser(testDb);
+    const trip = createTrip(testDb, owner.id);
+    const day = createDay(testDb, trip.id);
+
+    const res = await request(app)
+      .get(`/api/trips/${trip.id}/days/${day.id}/notes`)
+      .set('Cookie', authCookie(other.id));
+    expect(res.status).toBe(404);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Update day note
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('Update day note', () => {
+  it('NOTE-004 — PUT updates a note', async () => {
+    const { user } = createUser(testDb);
+    const trip = createTrip(testDb, user.id);
+    const day = createDay(testDb, trip.id);
+
+    const create = await request(app)
+      .post(`/api/trips/${trip.id}/days/${day.id}/notes`)
+      .set('Cookie', authCookie(user.id))
+      .send({ text: 'Old text' });
+    const noteId = create.body.note.id;
+
+    const res = await request(app)
+      .put(`/api/trips/${trip.id}/days/${day.id}/notes/${noteId}`)
+      .set('Cookie', authCookie(user.id))
+      .send({ text: 'New text', icon: '🎯' });
+    expect(res.status).toBe(200);
+    expect(res.body.note.text).toBe('New text');
+    expect(res.body.note.icon).toBe('🎯');
+  });
+
+  it('NOTE-004 — PUT on non-existent note returns 404', async () => {
+    const { user } = createUser(testDb);
+    const trip = createTrip(testDb, user.id);
+    const day = createDay(testDb, trip.id);
+
+    const res = await request(app)
+      .put(`/api/trips/${trip.id}/days/${day.id}/notes/99999`)
+      .set('Cookie', authCookie(user.id))
+      .send({ text: 'Updated' });
+    expect(res.status).toBe(404);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Delete day note
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('Delete day note', () => {
+  it('NOTE-005 — DELETE removes note', async () => {
+    const { user } = createUser(testDb);
+    const trip = createTrip(testDb, user.id);
+    const day = createDay(testDb, trip.id);
+
+    const create = await request(app)
+      .post(`/api/trips/${trip.id}/days/${day.id}/notes`)
+      .set('Cookie', authCookie(user.id))
+      .send({ text: 'To delete' });
+    const noteId = create.body.note.id;
+
+    const del = await request(app)
+      .delete(`/api/trips/${trip.id}/days/${day.id}/notes/${noteId}`)
+      .set('Cookie', authCookie(user.id));
+    expect(del.status).toBe(200);
+    expect(del.body.success).toBe(true);
+
+    const list = await request(app)
+      .get(`/api/trips/${trip.id}/days/${day.id}/notes`)
+      .set('Cookie', authCookie(user.id));
+    expect(list.body.notes).toHaveLength(0);
+  });
+
+  it('NOTE-005 — DELETE non-existent note returns 404', async () => {
+    const { user } = createUser(testDb);
+    const trip = createTrip(testDb, user.id);
+    const day = createDay(testDb, trip.id);
+
+    const res = await request(app)
+      .delete(`/api/trips/${trip.id}/days/${day.id}/notes/99999`)
+      .set('Cookie', authCookie(user.id));
+    expect(res.status).toBe(404);
+  });
+});

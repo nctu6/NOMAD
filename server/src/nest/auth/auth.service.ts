@@ -1,0 +1,1119 @@
+import { DomainError } from '../common/domain-error';
+import { Injectable, OnModuleInit, OnModuleDestroy } from '@nestjs/common';
+import bcrypt from 'bcryptjs';
+import jwt from 'jsonwebtoken';
+import path from 'path';
+import fs from 'fs';
+import { authenticator } from 'otplib';
+import QRCode from 'qrcode';
+import { randomBytes, createHash } from 'crypto';
+import type { Request, Response } from 'express';
+import { WEB_PUSH_CHANNEL_ID } from '@trek/shared';
+import { getAppUrl, readEnv } from '../../app-config';
+import { JWT_SECRET } from '../../config';
+import { UnitOfWork } from '../database/unit-of-work';
+import { PermissionsService } from '../permissions/permissions.service';
+import { validatePassword } from '../common/passwordPolicy';
+import { encryptMfaSecret, decryptMfaSecret } from '../common/crypto/mfaCrypto';
+import { decrypt_api_key, maybe_encrypt_api_key, encrypt_api_key } from '../common/crypto/apiKeyCrypto';
+import { resolveApiKey } from '../settings/instance-api-keys';
+import { InjectRepository } from '@mikro-orm/nestjs';
+import { AppSettings } from '../../db/entities/AppSettings.entity';
+import type { AppSettingsRepository } from '../../db/repositories/AppSettings.repository';
+import { Users } from '../../db/entities/Users.entity';
+import type { UsersRepository } from '../../db/repositories/Users.repository';
+import { InviteTokens } from '../../db/entities/InviteTokens.entity';
+import type { InviteTokensRepository } from '../../db/repositories/InviteTokens.repository';
+import { McpTokens } from '../../db/entities/McpTokens.entity';
+import type { McpTokensRepository } from '../../db/repositories/McpTokens.repository';
+import { OauthTokens } from '../../db/entities/OauthTokens.entity';
+import type { OauthTokensRepository } from '../../db/repositories/OauthTokens.repository';
+import { WebauthnCredentials } from '../../db/entities/WebauthnCredentials.entity';
+import type { WebauthnCredentialsRepository } from '../../db/repositories/WebauthnCredentials.repository';
+import { PasswordResetTokens } from '../../db/entities/PasswordResetTokens.entity';
+import type { PasswordResetTokensRepository } from '../../db/repositories/PasswordResetTokens.repository';
+import { PushSubscriptions } from '../../db/entities/PushSubscriptions.entity';
+import type { PushSubscriptionsRepository } from '../../db/repositories/PushSubscriptions.repository';
+import { SessionsService, type SessionClient } from '../sessions/sessions.service';
+// Type-and-guard only: the app-config read reports the provider choice, it does
+// not construct one, so this does not pull the maps domain into auth.
+import { isPlacesProviderChoice } from '../maps/providers/places-provider';
+import { EphemeralTokenService } from '../auth-core/ephemeral-token.service';
+// Import from sessionManager directly, NOT the ../../mcp barrel: the barrel pulls
+// the whole tools fan-out (and via the domain bridges, the Nest services) into
+// every consumer of this module — a nest→mcp→nest module cycle.
+import { revokeUserSessions } from '../../mcp/sessionManager';
+import { UserCleanupService } from './user-cleanup.service';
+import { splitManagedKeys } from '../common/managed';
+import { emitUserDeleted } from '../../plugin-user-lifecycle';
+import { verifyJwtAndLoadUser } from '../auth-core/jwt-verify';
+import { User } from '../../types';
+import { UserIdentityTakenError, type UserRow } from '../../db/repositories/Users.repository';
+import { DEMO_EMAIL_PRIMARY, DEMO_PASS, isDemoEmail } from '../common/demo';
+import { avatarUrl } from '../common/avatarUrl';
+import { TripMembershipService } from '../trip-membership/trip-membership.service';
+import { WebauthnConfigService } from './webauthn-config.service';
+import { setAuthCookie, clearAuthCookie } from '../common/cookie';
+import { MailerService } from '../notifications/mailer/mailer.service';
+import { AllowedFileTypesService } from '../files/allowed-file-types.service';
+import { dbNow, parseDbTimestamp } from '../../db/types';
+import {
+  BCRYPT_COST,
+  DUMMY_PASSWORD_HASH,
+  EMAIL_REGEX,
+  generateBackupCodes,
+  hashBackupCodeBcrypt,
+  mask_stored_api_key,
+  backupCodeIndex,
+  matchBackupCode,
+  parseBackupCodeHashes,
+  stripUserForClient,
+} from './auth.helpers';
+import {
+  ADMIN_FORM_SETTING_KEYS,
+  APP_SETTINGS,
+  MASKED_ADMIN_SETTING_KEYS,
+  PUBLIC_CONFIG_SETTING_KEYS,
+  isOidcConfigured,
+  isOidcConfiguredIn,
+  readAppSetting,
+  type AppSettingDef,
+  type AppSettingKey,
+} from '../common/app-settings.registry';
+
+// Mutates otplib module state; must run before any TOTP verify in either the
+// container singleton or the bridge instance (legacy parity — same line sat at
+// the top of services/authService.ts).
+authenticator.options = { window: 1 };
+
+const MFA_SETUP_TTL_MS = 15 * 60 * 1000;
+// Module-scoped on purpose: the bridge instance and the container singleton
+// must see the same pending-MFA state (permissions-cache precedent).
+const mfaSetupPending = new Map<number, { secret: string; exp: number }>();
+
+// 60 min; long enough to read the email in a second tab, short enough
+// that a leaked link is unlikely to still be valid when someone tries it.
+const PASSWORD_RESET_TTL_MS = 60 * 60 * 1000;
+const PASSWORD_RESET_TOKEN_BYTES = 32; // 256-bit entropy
+
+/**
+ * Returns the SHA-256 hex hash of a reset token. Raw tokens are never
+ * persisted — we only store and compare their hashes.
+ */
+function hashResetToken(raw: string): string {
+  return createHash('sha256').update(raw).digest('hex');
+}
+
+/**
+ * Shape returned by requestPasswordReset. For enumeration-safety the
+ * route ALWAYS returns the same response to the client regardless of
+ * whether a user existed — this struct is only consumed internally by
+ * the route handler to decide whether to send an email / log a link.
+ */
+export interface PasswordResetRequestOutcome {
+  tokenForDelivery: string | null;   // raw token — send via email or log, never return to client
+  userId: number | null;
+  userEmail: string | null;
+  reason: 'issued' | 'no_user' | 'oidc_only' | 'throttled_per_email' | 'password_login_disabled';
+}
+
+// Per-email throttle (defence-in-depth on top of the per-IP limiter).
+// Module-scoped + import-time interval on purpose (legacy parity, shared
+// between bridge and container instances — atlas-geo interval precedent).
+const perEmailResetAttempts = new Map<string, { count: number; first: number }>();
+const PASSWORD_RESET_PER_EMAIL_WINDOW_MS = 15 * 60 * 1000;
+const PASSWORD_RESET_PER_EMAIL_MAX = 3;
+setInterval(() => {
+  const now = Date.now();
+  for (const [key, record] of perEmailResetAttempts) {
+    if (now - record.first >= PASSWORD_RESET_PER_EMAIL_WINDOW_MS) perEmailResetAttempts.delete(key);
+  }
+}, 5 * 60 * 1000).unref?.();
+
+export interface ResetPasswordOutcome {
+  status?: number;
+  success?: boolean;
+  /** When true the client must collect a TOTP/backup code and call again. */
+  mfa_required?: boolean;
+  userId?: number;
+}
+
+/**
+ * `UsersRepository.findByEmailExact`/`findByEmailCI`/`findById` return the
+ * repository's full-row shape (`UserRow` — every `users` column, `role:
+ * string`, several `T | null` columns); the client-payload helper
+ * `stripUserForClient` takes the narrower `User` contract type (`role:
+ * 'admin' | 'user'`, those same columns `T | undefined`). Same mapping as
+ * `passkey.service.ts`'s own `toClientUser` (Plan 3b Task 3 review, F5) —
+ * kept as a second, file-local copy rather than exported/shared, matching
+ * that precedent's own reasoning (one small mapping, cheaper to duplicate
+ * than to add a cross-file dependency for).
+ */
+function toClientUser(row: UserRow): User {
+  return {
+    ...row,
+    role: row.role === 'admin' ? 'admin' : 'user',
+    mfa_enabled: row.mfa_enabled ?? undefined,
+    must_change_password: row.must_change_password ?? undefined,
+    created_at: row.created_at ?? undefined,
+    updated_at: row.updated_at ?? undefined,
+  };
+}
+
+/**
+ * DI-native auth domain service. The SQL moved 1:1 from the legacy
+ * src/services/authService.ts (same statements, same `||` falsy-coercion
+ * defaults, same post-write re-selects, same error strings) onto the
+ * repositories built across Plan 3a/3b — every statement below is now a
+ * repository method call instead of a `this.db.*` invocation, same shape,
+ * same order, same transaction scope (`.superpowers/sdd/2026-09-22-orm-phase3b/
+ * task-5-report.md`); the pure password/backup-code crypto stays in
+ * auth.helpers.ts. PermissionsService is injected (it replaced the
+ * permissions.bridge import); the JWT cookie set/clear, the reset-email
+ * delivery and the remaining legacy helpers keep their plain imports.
+ * Non-Nest consumers (legacy MCP registrars, legacy
+ * adminService/oidcService/passkeyService) go through auth.bridge.ts.
+ *
+ * AtlasService is deliberately NOT injected any more: getTravelStats, its only
+ * reader, now lives on AtlasService itself. Dropping that edge is what lets
+ * AtlasModule import AuthModule instead of going the other way around.
+ */
+@Injectable()
+export class AuthService {
+  constructor(
+    private readonly permissions: PermissionsService,
+    private readonly membership: TripMembershipService,
+    private readonly webauthn: WebauthnConfigService,
+    private readonly userCleanup: UserCleanupService,
+    private readonly mailer: MailerService,
+    private readonly tokens: EphemeralTokenService,
+    private readonly allowedFileTypes: AllowedFileTypesService,
+    private readonly uow: UnitOfWork,
+    @InjectRepository(AppSettings) private readonly appSettings: AppSettingsRepository,
+    @InjectRepository(Users) private readonly usersRepo: UsersRepository,
+    @InjectRepository(InviteTokens) private readonly inviteTokens: InviteTokensRepository,
+    @InjectRepository(McpTokens) private readonly mcpTokens: McpTokensRepository,
+    @InjectRepository(OauthTokens) private readonly oauthTokens: OauthTokensRepository,
+    @InjectRepository(WebauthnCredentials) private readonly webauthnCredentials: WebauthnCredentialsRepository,
+    @InjectRepository(PasswordResetTokens) private readonly passwordResetTokens: PasswordResetTokensRepository,
+    @InjectRepository(PushSubscriptions) private readonly pushSubscriptions: PushSubscriptionsRepository,
+    private readonly sessions: SessionsService,
+  ) {}
+
+  // Cookie
+  setAuthCookie(res: Response, token: string, req: Request, remember?: boolean) { setAuthCookie(res, token, req, remember); }
+  clearAuthCookie(res: Response, req: Request) { clearAuthCookie(res, req); }
+
+  // Reset-email delivery (canonical app URL, never request headers)
+  getAppUrl() { return getAppUrl(); }
+  sendPasswordResetEmail(email: string, url: string, userId: number | null) { return this.mailer.sendPasswordResetEmail(email, url, userId); }
+
+  // -------------------------------------------------------------------------
+  // Toggles + tokens
+  // -------------------------------------------------------------------------
+
+  async resolveAuthToggles(): Promise<{
+    password_login: boolean;
+    password_registration: boolean;
+    oidc_login: boolean;
+    oidc_registration: boolean;
+    passkey_login: boolean;
+  }> {
+    const get = (key: AppSettingKey) => readAppSetting(this.appSettings, key);
+
+    // Passkey login is independent of the password/OIDC "new keys" probe, so it
+    // must be resolved OUTSIDE the branch below — otherwise on a fresh install
+    // that never touched the password/OIDC toggles it would silently read false
+    // even after an admin enabled it. Default OFF (opt-in).
+    const passkey_login = (await get('passkey_login')) === 'true';
+
+    const hasNewKeys = (
+      await Promise.all((['password_login', 'password_registration', 'oidc_login', 'oidc_registration'] as const).map((k) => get(k)))
+    ).some((v) => v !== null);
+
+    if (hasNewKeys) {
+      const result = {
+        password_login: (await get('password_login')) !== 'false',
+        password_registration: (await get('password_registration')) !== 'false',
+        oidc_login: (await get('oidc_login')) !== 'false',
+        oidc_registration: (await get('oidc_registration')) !== 'false',
+        passkey_login,
+      };
+      if (readEnv().oidc.only) {
+        result.password_login = false;
+        result.password_registration = false;
+      }
+      return result;
+    }
+
+    // Legacy fallback
+    const oidcOnlyEnabled = readEnv().oidc.only || (await get('oidc_only')) === 'true';
+    const oidcOnly = oidcOnlyEnabled && (await isOidcConfigured(this.appSettings));
+    const allowReg = ((await get('allow_registration')) ?? 'true') === 'true';
+
+    return {
+      password_login: !oidcOnly,
+      password_registration: !oidcOnly && allowReg,
+      oidc_login: true,
+      oidc_registration: allowReg,
+      passkey_login,
+    };
+  }
+
+  async isOidcOnlyMode(): Promise<boolean> {
+    return !(await this.resolveAuthToggles()).password_login;
+  }
+
+  async generateToken(user: { id: number | bigint; password_version?: number }, remember?: boolean, client?: SessionClient) {
+    const pv = typeof user.password_version === 'number'
+      ? user.password_version
+      : ((await this.usersRepo.getPasswordVersion(Number(user.id))) ?? 0);
+    return this.sessions.issue({ id: Number(user.id), pv }, remember, client);
+  }
+
+  getPendingMfaSecret(userId: number): string | null {
+    const row = mfaSetupPending.get(userId);
+    if (!row || Date.now() > row.exp) {
+      mfaSetupPending.delete(userId);
+      return null;
+    }
+    return row.secret;
+  }
+
+  // -------------------------------------------------------------------------
+  // App config (public)
+  // -------------------------------------------------------------------------
+
+  /**
+   * Whether a passkey ceremony can actually complete on this deployment. With
+   * nothing configured at all, getAppUrl() invents `http://localhost:{PORT}` and
+   * the resolver returns a localhost RP for it: a phantom config that every real
+   * browser is turned away from at the options step (#2147), so advertising it
+   * as configured only produces a button whose every click 400s. A localhost RP
+   * the operator pointed here themselves (APP_URL, ALLOWED_ORIGINS or the
+   * webauthn settings) is a real single-machine install and still counts.
+   */
+  private async passkeyConfigured(): Promise<boolean> {
+    const cfg = await this.webauthn.resolve();
+    if (!cfg) return false;
+    if (cfg.rpID !== 'localhost' || cfg.explicitOrigins) return true;
+    const env = readEnv();
+    const declaredRpId = (
+      env.webauthn.rpId || (await readAppSetting(this.appSettings, 'webauthn_rp_id'))
+    )?.trim();
+    return !!(declaredRpId || env.app.appUrl || env.http.allowedOriginsRaw);
+  }
+
+  async getAppConfig(authenticatedUser: User | undefined | null) {
+    const userCount = await this.usersRepo.countNonGuest();
+    const isDemo = readEnv().demo.enabled;
+    const toggles = await this.resolveAuthToggles();
+    // One directory deeper than the legacy src/services location — the extra
+    // '../' keeps resolving to the workspace package.json.
+    const version: string = readEnv().app.appVersion ?? require('../../../package.json').version;
+    // Asked through the same resolver the search itself uses, so the client can
+    // never show Google features that rest on a key this caller does not get —
+    // nor hide them from a member who does have one (#1939). Unauthenticated the
+    // question is only about the instance, which is the first two steps of the
+    // chain; id 0 matches no row.
+    const hasGoogleKey = !!(await resolveApiKey(this.appSettings, this.usersRepo, 'maps_api_key', authenticatedUser?.id ?? 0, readEnv().maps.placesApiKey)).key;
+    // The same question for Amap, asked the same way. The client needs both to
+    // tell "search is unavailable" from "search runs on OpenStreetMap", and to
+    // know whether the provider the admin selected actually has a credential.
+    const hasAmapKey = !!(await resolveApiKey(this.appSettings, this.usersRepo, 'amap_api_key', authenticatedUser?.id ?? 0, readEnv().maps.amapApiKey)).key;
+
+    // AU5's 14 literal `app_settings` reads collapse into one `getValues` call
+    // (Task 5 brief ruling — the repository already has it, and the map is read
+    // the same way a missing/NULL-valued row was before: absent from the map).
+    const settings = await this.appSettings.getValues([...PUBLIC_CONFIG_SETTING_KEYS]);
+
+    const placesProviderRow = settings.get('places_provider');
+    const placesProvider = isPlacesProviderChoice(placesProviderRow) ? placesProviderRow : 'auto';
+    const oidcDisplayName = readEnv().oidc.displayName || settings.get('oidc_display_name') || null;
+    const oidcConfigured = isOidcConfiguredIn(settings);
+    const requireMfaValue = settings.get('require_mfa');
+    const notifChannel = settings.get('notification_channel') || 'none';
+    const tripReminderSetting = settings.get('notify_trip_reminder');
+    const hasSmtpHost = !!(readEnv().smtp.host || settings.get('smtp_host'));
+    const notifChannelsRaw = settings.get('notification_channels') || notifChannel;
+    const activeChannels = notifChannelsRaw === 'none' ? [] : notifChannelsRaw.split(',').map((c: string) => c.trim()).filter(Boolean);
+    const hasWebhookEnabled = activeChannels.includes('webhook');
+    const hasPushEnabled = activeChannels.includes(WEB_PUSH_CHANNEL_ID);
+    const tripRemindersEnabled = tripReminderSetting !== 'false';
+    const placesPhotosEnabled = settings.get('places_photos_enabled') !== 'false';
+    const placesAutocompleteEnabled = settings.get('places_autocomplete_enabled') !== 'false';
+    const placesDetailsEnabled = settings.get('places_details_enabled') !== 'false';
+    const placesEnrichEnabled = settings.get('places_enrich_enabled') !== 'false';
+    // Fail-closed, and deliberately on this unauthenticated endpoint: whether an
+    // instance records what its users search for is something a visitor is
+    // entitled to know before logging in, not a detail to keep behind the door.
+    const placeShadowEnabled = settings.get('place_shadow_enabled') === 'true';
+    const setupComplete = userCount > 0 && (await this.usersRepo.findAdminNeedingPasswordChange()) === null;
+
+    return {
+      // Legacy fields (backward compat)
+      allow_registration: isDemo ? false : (toggles.password_registration || toggles.oidc_registration),
+      oidc_only_mode: !toggles.password_login && !toggles.password_registration,
+      // Granular toggles
+      password_login: toggles.password_login,
+      password_registration: isDemo ? false : toggles.password_registration,
+      oidc_login: toggles.oidc_login,
+      oidc_registration: isDemo ? false : toggles.oidc_registration,
+      // Passkey login: the instance toggle + whether a usable RP ID resolves for
+      // this deployment. The login page shows the passkey button only when both
+      // are true. `passkey_configured` stays a pure boolean — it never leaks the
+      // resolved RP ID / origin / APP_URL on this unauthenticated endpoint.
+      passkey_login: toggles.passkey_login,
+      passkey_configured: await this.passkeyConfigured(),
+      env_override_oidc_only: readEnv().oidc.only,
+      has_users: userCount > 0,
+      setup_complete: setupComplete,
+      version,
+      is_prerelease: version.includes('-pre.'),
+      has_maps_key: hasGoogleKey,
+      has_amap_key: hasAmapKey,
+      places_provider: placesProvider,
+      oidc_configured: oidcConfigured,
+      oidc_display_name: oidcConfigured ? (oidcDisplayName || 'SSO') : undefined,
+      require_mfa: requireMfaValue === 'true',
+      // The canonical live-read: same query + DEFAULT_ALLOWED_EXTENSIONS
+      // fallback the upload filters use, so the client's picker and the
+      // server's acceptance can never drift (the historical inline copy here
+      // dropped pkpass, pkpasses, md and markdown).
+      allowed_file_types: await this.allowedFileTypes.get(),
+      // FILE_UPLOAD_LIMIT_MB, so the pickers refuse a file before the upload starts (#1364).
+      max_upload_mb: readEnv().files.uploadLimitMb,
+      // Whether the configuration belongs to whoever operates this install
+      // rather than to its admin. The client uses it to stop offering settings
+      // the server would refuse anyway — it is an honesty flag for the UI, never
+      // the boundary itself, which is the guard and the operator's network.
+      managed: readEnv().managed.enabled,
+      demo_mode: isDemo,
+      demo_email: isDemo ? DEMO_EMAIL_PRIMARY : undefined,
+      demo_password: isDemo ? DEMO_PASS : undefined,
+      timezone: readEnv().app.tz || Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC',
+      notification_channel: notifChannel,
+      notification_channels: activeChannels,
+      available_channels: { email: hasSmtpHost, webhook: hasWebhookEnabled, push: hasPushEnabled, inapp: true },
+      trip_reminders_enabled: tripRemindersEnabled,
+      places_photos_enabled: placesPhotosEnabled,
+      places_autocomplete_enabled: placesAutocompleteEnabled,
+      places_details_enabled: placesDetailsEnabled,
+      places_enrich_enabled: placesEnrichEnabled,
+      place_shadow_enabled: placeShadowEnabled,
+      permissions: authenticatedUser ? (await this.permissions.getAllPermissions()) : undefined,
+      // Case-sensitive on purpose (legacy parity).
+      dev_mode: readEnv().app.nodeEnv === 'development',
+    };
+  }
+
+  // -------------------------------------------------------------------------
+  // Auth: register, login, demo
+  // -------------------------------------------------------------------------
+
+  async demoLogin(client?: SessionClient): Promise<{ token?: string; user?: Record<string, unknown> }> {
+    if (!readEnv().demo.enabled) {
+      throw new DomainError(404, 'Not found');
+    }
+    const user = await this.usersRepo.findByEmailExact(DEMO_EMAIL_PRIMARY);
+    if (!user) throw new DomainError(500, 'Demo user not found');
+    const token = await this.generateToken(user, undefined, client);
+    const safe = stripUserForClient(toClientUser(user)) as Record<string, unknown>;
+    return { token, user: { ...safe, avatar_url: avatarUrl(user) } };
+  }
+
+  async validateInviteToken(token: string): Promise<{ valid?: boolean; max_uses?: number; used_count?: number; expires_at?: string | null }> {
+    const invite = await this.inviteTokens.findByToken(token);
+    if (!invite) throw new DomainError(404, 'Invalid invite link');
+    if (invite.max_uses > 0 && invite.used_count >= invite.max_uses) throw new DomainError(410, 'Invite link has been fully used');
+    if (invite.expires_at && new Date(invite.expires_at) < new Date()) throw new DomainError(410, 'Invite link has expired');
+    // A nullable column stays null on the wire: `?? undefined` would make
+    // JSON.stringify drop the key for a never-expiring invite.
+    return { valid: true, max_uses: invite.max_uses, used_count: invite.used_count, expires_at: invite.expires_at };
+  }
+
+  async registerUser(rawBody: unknown, client?: SessionClient): Promise<{ token?: string; user?: Record<string, unknown>; auditUserId?: number; auditDetails?: Record<string, unknown> }> {
+    const body = rawBody as { username?: string; email?: string; password?: string; invite_token?: string };
+    const username = typeof body.username === 'string' ? body.username.trim() : '';
+    const email = typeof body.email === 'string' ? body.email.trim() : '';
+    const { password, invite_token } = body;
+
+    const userCount = await this.usersRepo.countNonGuest();
+
+    let validInvite: Awaited<ReturnType<InviteTokensRepository['findByToken']>> = null;
+    if (invite_token) {
+      validInvite = await this.inviteTokens.findByToken(invite_token);
+      if (!validInvite) throw new DomainError(400, 'Invalid invite link');
+      if (validInvite.max_uses > 0 && validInvite.used_count >= validInvite.max_uses) throw new DomainError(410, 'Invite link has been fully used');
+      if (validInvite.expires_at && new Date(validInvite.expires_at) < new Date()) throw new DomainError(410, 'Invite link has expired');
+    }
+
+    if (userCount > 0 && !validInvite) {
+      const toggles = await this.resolveAuthToggles();
+      if (!toggles.password_registration) {
+        throw new DomainError(403, 'Password registration is disabled. Contact your administrator.');
+      }
+    }
+
+    if (!username || !email || !password) {
+      throw new DomainError(400, 'Username, email and password are required');
+    }
+
+    const pwCheck = validatePassword(password);
+    if (!pwCheck.ok) throw new DomainError(400, pwCheck.reason ?? '');
+
+    if (!EMAIL_REGEX.test(email)) {
+      throw new DomainError(400, 'Invalid email format');
+    }
+
+    const password_hash = bcrypt.hashSync(password, BCRYPT_COST);
+
+    try {
+      // One transaction for the whole signup: a mid-sequence throw (invite bookkeeping, trip auto-join)
+      // must not leave a half-registered user. The collision check and the first-user count run inside
+      // it too, so two signups at once cannot both pass the check or both become admin.
+      return await this.uow.transactional(async () => {
+        // Ignore guests (#1362): their synthetic username/email must never block a real signup.
+        const existingUserId = await this.usersRepo.findIdByEmailOrUsernameCI(email, username);
+        if (existingUserId !== null) {
+          throw new DomainError(409, 'Registration failed. Please try different credentials.');
+        }
+        const isFirstUser = (await this.usersRepo.countNonGuest()) === 0;
+        const role = isFirstUser ? 'admin' : 'user';
+        const inserted = await this.usersRepo.insertUser({
+          username, email, password_hash, role, first_seen_version: readEnv().app.appVersion || '0.0.0',
+          email_self_asserted: isFirstUser ? 0 : 1,
+        });
+
+        const user = { id: inserted.id, username, email, role, avatar: null, mfa_enabled: false };
+        const token = await this.generateToken(user, undefined, client);
+
+        if (validInvite) {
+          const updated = await this.inviteTokens.incrementUsedCount(validInvite.token);
+          if (!updated) {
+            console.warn(`[Auth] Invite token ${validInvite.token.slice(0, 8)}... exceeded max_uses due to race condition`);
+          }
+          // Trip-bound invite (#1402): auto-add the freshly registered user to the
+          // trip. Idempotent + owner-safe; no-ops if the bound trip was since deleted.
+          if (validInvite.trip_id) {
+            await this.membership.joinTripAsMember(Number(validInvite.trip_id), Number(inserted.id), validInvite.created_by ?? null);
+          }
+        }
+
+        return {
+          token,
+          user: { ...user, avatar_url: null },
+          auditUserId: Number(inserted.id),
+          auditDetails: { username, email, role },
+        };
+      });
+    } catch (err) {
+      // The check above runs in the transaction, but a concurrent signup can
+      // still win the insert; the database's unique indexes refuse the second.
+      if (err instanceof DomainError) throw err;
+      if (err instanceof UserIdentityTakenError) {
+        throw new DomainError(409, 'Registration failed. Please try different credentials.');
+      }
+      throw new DomainError(500, 'Error creating user');
+    }
+  }
+
+  async loginUser(rawBody: unknown, client?: SessionClient): Promise<{
+    error?: string;
+    status?: number;
+    token?: string;
+    user?: Record<string, unknown>;
+    mfa_required?: boolean;
+    mfa_token?: string;
+    remember?: boolean;
+    auditUserId?: number | null;
+    auditAction?: string;
+    auditDetails?: Record<string, unknown>;
+  }> {
+    const body = rawBody as { email?: string; password?: string; remember_me?: boolean };
+    if (await this.isOidcOnlyMode()) {
+      return { error: 'Password authentication is disabled. Please sign in with SSO.', status: 403 };
+    }
+
+    const { email, password, remember_me } = body;
+    const remember = remember_me === true;
+    if (!email || !password) {
+      return { error: 'Email and password are required', status: 400 };
+    }
+
+    // Guests (#1362) carry a synthetic email but must never authenticate — treat a
+    // matched guest row exactly like an unknown email (dummy-hash timing preserved).
+    const user = await this.usersRepo.findByEmailCI(email);
+
+    // Always run bcrypt — even for unknown/OIDC-only users — so response time
+    // does not reveal whether the email exists in the database (CWE-203/208).
+    const hashToCheck = user?.password_hash ?? DUMMY_PASSWORD_HASH;
+    const validPassword = bcrypt.compareSync(password, hashToCheck);
+
+    if (!user) {
+      return {
+        error: 'Invalid email or password', status: 401,
+        auditUserId: null, auditAction: 'user.login_failed', auditDetails: { email, reason: 'unknown_email' },
+      };
+    }
+    if (!user.password_hash) {
+      return {
+        error: 'Invalid email or password', status: 401,
+        auditUserId: Number(user.id), auditAction: 'user.login_failed', auditDetails: { email, reason: 'oidc_only' },
+      };
+    }
+    if (!validPassword) {
+      return {
+        error: 'Invalid email or password', status: 401,
+        auditUserId: Number(user.id), auditAction: 'user.login_failed', auditDetails: { email, reason: 'wrong_password' },
+      };
+    }
+
+    if (user.mfa_enabled === 1) {
+      const pv = user.password_version ?? 0;
+      const mfa_token = jwt.sign(
+        { id: Number(user.id), purpose: 'mfa_login', pv },
+        JWT_SECRET,
+        { expiresIn: '5m', algorithm: 'HS256' }
+      );
+      return { mfa_required: true, mfa_token };
+    }
+
+    await this.usersRepo.touchLastLogin(user.id);
+    const token = await this.generateToken(user, remember, client);
+    const userSafe = stripUserForClient(toClientUser(user)) as Record<string, unknown>;
+
+    return {
+      token,
+      user: { ...userSafe, avatar_url: avatarUrl(user) },
+      remember,
+      auditUserId: Number(user.id),
+      auditAction: 'user.login',
+      auditDetails: { email },
+    };
+  }
+
+  // -------------------------------------------------------------------------
+  // Session
+  // -------------------------------------------------------------------------
+
+  async getCurrentUser(
+    userId: number
+  ): Promise<(Record<string, unknown> & Pick<User, 'id' | 'username' | 'email' | 'role'> & { avatar_url: string }) | null> {
+    const user = await this.usersRepo.findMeRow(userId);
+    if (!user) return null;
+    // `findMeRow`'s projection (id/username/email/role/avatar/oidc_issuer/
+    // created_at/mfa_enabled/must_change_password) is narrower than `User`
+    // and than `UserRow` — `toClientUser` expects the FULL row, so this one
+    // site keeps the same "trust me" cast the legacy generic-typed
+    // `this.db.get<User>(...)` read effectively was: `stripUserForClient`
+    // only destructures a handful of keys this projection never carried
+    // anyway (password_hash, the API-key columns, mfa_secret), so they're
+    // simply absent, exactly as before.
+    const base = stripUserForClient(user as unknown as User) as Record<string, unknown>;
+    return { ...base, id: user.id, username: user.username, email: user.email, role: user.role === 'admin' ? 'admin' : 'user', avatar_url: avatarUrl(user) };
+  }
+
+  // -------------------------------------------------------------------------
+  // Password & account
+  // -------------------------------------------------------------------------
+
+  async changePassword(
+    userId: number,
+    userEmail: string,
+    rawBody: unknown,
+    remember?: boolean,
+    client?: SessionClient,
+    issueSession = true,
+  ): Promise<{ success?: boolean; token?: string }> {
+    const body = rawBody as { current_password?: string; new_password?: string };
+    if (await this.isOidcOnlyMode()) {
+      throw new DomainError(403, 'Password authentication is disabled.');
+    }
+    if (readEnv().demo.enabled && isDemoEmail(userEmail)) {
+      throw new DomainError(403, 'Password change is disabled in demo mode.');
+    }
+
+    const { current_password, new_password } = body;
+    if (!current_password) throw new DomainError(400, 'Current password is required');
+    if (!new_password) throw new DomainError(400, 'New password is required');
+
+    const pwCheck = validatePassword(new_password);
+    if (!pwCheck.ok) throw new DomainError(400, pwCheck.reason ?? '');
+
+    const user = await this.usersRepo.getPasswordHashAndVersion(userId);
+    if (!user || !bcrypt.compareSync(current_password, user.password_hash)) {
+      throw new DomainError(401, 'Current password is incorrect');
+    }
+
+    const hash = bcrypt.hashSync(new_password, BCRYPT_COST);
+    const newPv = (user.password_version ?? 0) + 1;
+
+    await this.uow.transactional(async () => {
+      await this.usersRepo.setPassword(userId, hash, newPv);
+      // A password change ends every session (the pv bump covers the tokens from
+      // before sessions were tracked) and prunes the MCP static token and OAuth
+      // bearer-token stores to match, the same set the password reset revokes.
+      await this.mcpTokens.deleteAllForUser(userId);
+      try { await this.oauthTokens.revokeAllForUser(userId); } catch { /* no oauth_tokens in very old installs */ }
+      // Push devices keep receiving notifications without any session, so they
+      // go too. The device the change was made on registers again right away:
+      // the client reloads the user after the change, and that re-syncs its
+      // subscription. Other devices do so after their next sign-in.
+      await this.pushSubscriptions.deleteAllForUser(userId);
+      await this.sessions.revokeAll(userId);
+    });
+
+    try { revokeUserSessions?.(userId); } catch { /* best-effort */ }
+
+    // Re-issue a session for the current device only, with the login's remember choice (#1927).
+    // Not for a Bearer caller (`issueSession` false): it never receives the token (see the controller).
+    if (!issueSession) return { success: true };
+    const token = await this.generateToken({ id: userId, password_version: newPv }, remember, client);
+    return { success: true, token };
+  }
+
+  async deleteAccount(userId: number, userEmail: string, userRole: string): Promise<{ success?: boolean }> {
+    if (readEnv().demo.enabled && isDemoEmail(userEmail)) {
+      throw new DomainError(403, 'Account deletion is disabled in demo mode.');
+    }
+    if (userRole === 'admin') {
+      const adminCount = await this.usersRepo.countAdmins();
+      if (adminCount <= 1) {
+        throw new DomainError(400, 'Cannot delete the last admin account');
+      }
+    }
+    await this.userCleanup.deleteUserCompletely(userId);
+    await emitUserDeleted(userId); // let plugins erase their own per-user data
+    return { success: true };
+  }
+
+  // -------------------------------------------------------------------------
+  // Admin settings
+  //
+  // These stay here, against the first instinct to file them under settings/
+  // with the other app_settings readers. updateAppSettings runs the lockout
+  // guard that stops an admin disabling every login method at once, and that
+  // guard is resolveAuthToggles — auth's own view of which methods exist.
+  // Moving the pair would put an AuthModule import inside SettingsModule, a
+  // leaf that half the container pulls in, to buy nothing but a tidier
+  // directory. The role check below is likewise left as written: swapping it
+  // for AdminGuard changes the response body, so it belongs with the guard
+  // work, not with a move.
+  // -------------------------------------------------------------------------
+
+  async getAppSettings(userId: number): Promise<{ data?: Record<string, string> }> {
+    const role = await this.usersRepo.getRole(userId);
+    if (role !== 'admin') throw new DomainError(403, 'Admin access required');
+
+    const result: Record<string, string> = {};
+    for (const key of ADMIN_FORM_SETTING_KEYS) {
+      const value = await readAppSetting(this.appSettings, key);
+      if (value !== null) result[key] = MASKED_ADMIN_SETTING_KEYS.has(key) ? '••••••••' : value;
+    }
+    return { data: result };
+  }
+
+  async updateAppSettings(
+    userId: number,
+    rawBody: unknown
+  ): Promise<{
+    success?: boolean;
+    auditSummary?: Record<string, unknown>;
+    auditDebugDetails?: Record<string, unknown>;
+    /** Names the operator holds, skipped rather than written. Empty when self-hosted. */
+    managedKeys?: string[];
+  }> {
+    const body = rawBody as Record<string, unknown>;
+    const role = await this.usersRepo.getRole(userId);
+    if (role !== 'admin') throw new DomainError(403, 'Admin access required');
+
+    const { require_mfa } = body;
+    if (require_mfa === true || require_mfa === 'true') {
+      const adminMfa = await this.usersRepo.getMfaEnabled(userId);
+      // A user-verified passkey satisfies the MFA policy, so an admin who secured
+      // their own account with a passkey may enable it too (not only TOTP).
+      const adminHasPasskey = await this.webauthnCredentials.hasAny(userId);
+      if (!(adminMfa?.mfa_enabled === 1) && !adminHasPasskey) {
+        throw new DomainError(400, 'Secure your own account with two-factor authentication or a passkey before requiring it for all users.');
+      }
+    }
+
+    // Lockout prevention: can't disable all login methods
+    if (body.password_login !== undefined || body.oidc_login !== undefined) {
+      const current = await this.resolveAuthToggles();
+      const oidcConfigured = await isOidcConfigured(this.appSettings);
+      const nextPasswordLogin = body.password_login !== undefined ? (String(body.password_login) === 'true') : current.password_login;
+      const nextOidcLogin = body.oidc_login !== undefined ? (String(body.oidc_login) === 'true') : current.oidc_login;
+      if (!nextPasswordLogin && (!nextOidcLogin || !oidcConfigured)) {
+        throw new DomainError(400, 'Cannot disable all login methods. At least one must remain enabled.');
+      }
+    }
+
+    // SMTP, the OIDC toggles and the WebAuthn pair share this handler with keys
+    // the admin does own, so a managed install skips those names and keeps the
+    // rest of the save working. Reported, never thrown: the settings tab sends
+    // the whole form in one request.
+    const { blocked } = splitManagedKeys(body as Record<string, unknown>, readEnv().managed.enabled);
+
+    await this.uow.transactional(async () => { // the whole form lands, or none of it
+      for (const key of ADMIN_FORM_SETTING_KEYS) {
+        if (blocked.includes(key)) continue;
+        if (body[key] !== undefined) {
+          let val = String(body[key]);
+          if (key === 'require_mfa') {
+            val = body[key] === true || val === 'true' ? 'true' : 'false';
+          }
+          // An unknown provider name is dropped, not stored: the maps service
+          // degrades an unrecognised row to 'auto', so writing one would show the
+          // admin a saved setting that quietly does nothing.
+          if (key === 'places_provider' && !isPlacesProviderChoice(val)) continue;
+          // A masked key sent back unchanged keeps its stored value.
+          if (MASKED_ADMIN_SETTING_KEYS.has(key) && val === '••••••••') continue;
+          const encrypted: AppSettingDef['encrypted'] = (APP_SETTINGS[key] as AppSettingDef).encrypted;
+          if (encrypted === 'always') val = encrypt_api_key(val);
+          else if (encrypted === 'if-plain' && val) val = maybe_encrypt_api_key(val) ?? val;
+          await this.appSettings.setValue(key, val);
+        }
+      }
+    });
+
+    const changedKeys = ADMIN_FORM_SETTING_KEYS.filter(k => !blocked.includes(k) && body[k] !== undefined && !(k === 'smtp_pass' && String(body[k]) === '••••••••'));
+
+    const summary: Record<string, unknown> = {};
+    const smtpChanged = changedKeys.some(k => k.startsWith('smtp_'));
+    if (changedKeys.includes('notification_channels')) summary.notification_channels = body.notification_channels;
+    if (changedKeys.includes('admin_webhook_url')) summary.admin_webhook_url_updated = true;
+    if (changedKeys.some(k => k.startsWith('admin_ntfy_'))) summary.admin_ntfy_updated = true;
+    if (smtpChanged) summary.smtp_settings_updated = true;
+    if (changedKeys.includes('allow_registration')) summary.allow_registration = body.allow_registration;
+    if (changedKeys.includes('allowed_file_types')) summary.allowed_file_types_updated = true;
+    if (changedKeys.includes('require_mfa')) summary.require_mfa = body.require_mfa;
+
+    const debugDetails: Record<string, unknown> = {};
+    for (const k of changedKeys) {
+      debugDetails[k] = k === 'smtp_pass' ? '***' : body[k];
+    }
+
+    // The reminder crons read their enable gates and channels per tick, so a
+    // notification-settings change takes effect at the next run — no restart.
+    return { success: true, auditSummary: summary, auditDebugDetails: debugDetails, managedKeys: blocked };
+  }
+
+  // -------------------------------------------------------------------------
+  // MFA
+  // -------------------------------------------------------------------------
+
+  async setupMfa(userId: number, userEmail: string): Promise<{ secret?: string; otpauth_url?: string; qrPromise?: Promise<string> }> {
+    if (readEnv().demo.enabled && isDemoEmail(userEmail)) {
+      throw new DomainError(403, 'MFA is not available in demo mode.');
+    }
+    const row = await this.usersRepo.getMfaEnabled(userId);
+    if (row?.mfa_enabled) {
+      throw new DomainError(400, 'MFA is already enabled');
+    }
+    let secret: string, otpauth_url: string;
+    try {
+      secret = authenticator.generateSecret();
+      mfaSetupPending.set(userId, { secret, exp: Date.now() + MFA_SETUP_TTL_MS });
+      otpauth_url = authenticator.keyuri(userEmail, 'TREK', secret);
+    } catch (err) {
+      console.error('[MFA] Setup error:', err);
+      throw new DomainError(500, 'MFA setup failed');
+    }
+    return { secret, otpauth_url, qrPromise: QRCode.toString(otpauth_url, { type: 'svg', width: 250 }) };
+  }
+
+  async enableMfa(userId: number, rawCode: unknown): Promise<{ success?: boolean; mfa_enabled?: boolean; backup_codes?: string[] }> {
+    const code = rawCode as string | undefined;
+    if (!code) {
+      throw new DomainError(400, 'Verification code is required');
+    }
+    const pending = this.getPendingMfaSecret(userId);
+    if (!pending) {
+      throw new DomainError(400, 'No MFA setup in progress. Start the setup again.');
+    }
+    const tokenStr = String(code).replace(/\s/g, '');
+    const ok = authenticator.verify({ token: tokenStr, secret: pending });
+    if (!ok) {
+      throw new DomainError(401, 'Invalid verification code');
+    }
+    const backupCodes = generateBackupCodes();
+    const backupHashes = backupCodes.map(hashBackupCodeBcrypt);
+    const enc = encryptMfaSecret(pending);
+    await this.usersRepo.enableMfa(userId, enc, JSON.stringify(backupHashes));
+    mfaSetupPending.delete(userId);
+    return { success: true, mfa_enabled: true, backup_codes: backupCodes };
+  }
+
+  async disableMfa(
+    userId: number,
+    userEmail: string,
+    rawBody: unknown,
+    currentSessionId?: string,
+  ): Promise<{ success?: boolean; mfa_enabled?: boolean }> {
+    const body = rawBody as { password?: string; code?: string };
+    if (readEnv().demo.enabled && isDemoEmail(userEmail)) {
+      throw new DomainError(403, 'MFA cannot be changed in demo mode.');
+    }
+    const policy = await readAppSetting(this.appSettings, 'require_mfa');
+    if (policy === 'true') {
+      throw new DomainError(403, 'Two-factor authentication cannot be disabled while it is required for all users.');
+    }
+    const { password, code } = body;
+    if (!password || !code) {
+      throw new DomainError(400, 'Password and authenticator code are required');
+    }
+    const user = await this.usersRepo.findById(userId);
+    if (!user?.mfa_enabled || !user.mfa_secret) {
+      throw new DomainError(400, 'MFA is not enabled');
+    }
+    if (!user.password_hash || !bcrypt.compareSync(password, user.password_hash)) {
+      throw new DomainError(401, 'Incorrect password');
+    }
+    const secret = decryptMfaSecret(user.mfa_secret);
+    const tokenStr = String(code).trim();
+    const okTotp = authenticator.verify({ token: tokenStr.replace(/\s/g, ''), secret });
+    // A backup code proves the second factor as at login; disabling drops them all (#2665).
+    if (!okTotp && backupCodeIndex(tokenStr, user.mfa_backup_codes) === -1) {
+      throw new DomainError(401, 'Invalid verification code');
+    }
+    // Every other session ends with the second factor; this one just proved both.
+    await this.uow.transactional(async () => {
+      await this.usersRepo.disableMfa(userId);
+      await this.sessions.revokeAll(userId, currentSessionId);
+    });
+    mfaSetupPending.delete(userId);
+    return { success: true, mfa_enabled: false };
+  }
+
+  async verifyMfaLogin(rawBody: unknown, client?: SessionClient): Promise<{
+    token?: string;
+    user?: Record<string, unknown>;
+    remember?: boolean;
+    auditUserId?: number;
+  }> {
+    const body = rawBody as { mfa_token?: string; code?: string; remember_me?: boolean };
+    const { mfa_token, code, remember_me } = body;
+    const remember = remember_me === true;
+    if (!mfa_token || !code) {
+      throw new DomainError(400, 'Verification token and code are required');
+    }
+    try {
+      const decoded = jwt.verify(mfa_token, JWT_SECRET, { algorithms: ['HS256'] }) as { id: number; purpose?: string };
+      if (decoded.purpose !== 'mfa_login') {
+        throw new DomainError(401, 'Invalid verification token');
+      }
+      const user = await this.usersRepo.findById(decoded.id);
+      if (!user || user.mfa_enabled !== 1 || !user.mfa_secret) {
+        throw new DomainError(401, 'Invalid session');
+      }
+      const secret = decryptMfaSecret(user.mfa_secret);
+      const tokenStr = String(code).trim();
+      const okTotp = authenticator.verify({ token: tokenStr.replace(/\s/g, ''), secret });
+      if (!okTotp) {
+        const hashes = parseBackupCodeHashes(user.mfa_backup_codes);
+        // matchBackupCode handles both bcrypt and legacy SHA-256 hashes;
+        // any store older than the bcrypt migration keeps working.
+        const idx = hashes.findIndex((h) => matchBackupCode(tokenStr, h));
+        if (idx === -1) {
+          throw new DomainError(401, 'Invalid verification code');
+        }
+        hashes.splice(idx, 1);
+        // Consume the backup code and record the login atomically — the code
+        // must not burn without the login landing (or vice versa).
+        await this.uow.transactional(async () => {
+          await this.usersRepo.setBackupCodesAndTouch(user.id, JSON.stringify(hashes));
+          await this.usersRepo.touchLastLogin(user.id);
+        });
+      } else {
+        await this.usersRepo.touchLastLogin(user.id);
+      }
+      const sessionToken = await this.generateToken(user, remember, client);
+      const userSafe = stripUserForClient(toClientUser(user)) as Record<string, unknown>;
+      return {
+        token: sessionToken,
+        user: { ...userSafe, avatar_url: avatarUrl(user) },
+        remember,
+        auditUserId: Number(user.id),
+      };
+    } catch (err) {
+      if (err instanceof DomainError) throw err;
+      throw new DomainError(401, 'Invalid or expired verification token');
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // Password reset
+  // -------------------------------------------------------------------------
+
+  async requestPasswordReset(rawEmail: string, createdIp: string | null): Promise<PasswordResetRequestOutcome> {
+    const email = String(rawEmail || '').trim().toLowerCase();
+    // Basic shape check — a fully empty / malformed email is treated like
+    // "no user" so we still spend the same time internally. Same "x@y.z somewhere
+    // on one line" test as the old /.+@.+\..+/, but anchored per line and pinned to
+    // the first usable '@' and '.', so a body full of '@' can no longer stall it.
+    const looksLikeEmail = email.length > 0 && /^.[^@\r\n\u2028\u2029]*@.[^.\r\n\u2028\u2029]*\../m.test(email);
+
+    // Global policy check: password login disabled → no reset possible.
+    const toggles = await this.resolveAuthToggles();
+    if (!toggles.password_login) {
+      return { tokenForDelivery: null, userId: null, userEmail: null, reason: 'password_login_disabled' };
+    }
+
+    // Per-email throttle. We check this BEFORE the DB lookup so the timing
+    // is identical regardless of whether the account exists.
+    const throttleKey = email || '__noemail__';
+    const now = Date.now();
+    const record = perEmailResetAttempts.get(throttleKey);
+    if (record && record.count >= PASSWORD_RESET_PER_EMAIL_MAX && now - record.first < PASSWORD_RESET_PER_EMAIL_WINDOW_MS) {
+      return { tokenForDelivery: null, userId: null, userEmail: null, reason: 'throttled_per_email' };
+    }
+    if (!record || now - record.first >= PASSWORD_RESET_PER_EMAIL_WINDOW_MS) {
+      perEmailResetAttempts.set(throttleKey, { count: 1, first: now });
+    } else {
+      record.count++;
+    }
+
+    if (!looksLikeEmail) {
+      return { tokenForDelivery: null, userId: null, userEmail: null, reason: 'no_user' };
+    }
+
+    // A guest (#1362) must never receive a reset link — treat its synthetic email as unknown.
+    const user = await this.usersRepo.findForPasswordReset(email);
+
+    if (!user) {
+      return { tokenForDelivery: null, userId: null, userEmail: null, reason: 'no_user' };
+    }
+    // SSO-linked account — refuse a reset. OIDC users are created with a random
+    // bcrypt hash (so password_hash is never empty), which is why we must key off
+    // oidc_sub rather than a missing hash. Letting the reset proceed would set a
+    // local password and revoke session/credential state, which breaks the SSO
+    // login; admins (or the user, with their current password) can still set one.
+    // The client still gets the generic "if that email exists…" response.
+    if (user.oidc_sub) {
+      return { tokenForDelivery: null, userId: user.id, userEmail: user.email, reason: 'oidc_only' };
+    }
+
+    const raw = randomBytes(PASSWORD_RESET_TOKEN_BYTES).toString('base64url');
+    const token_hash = hashResetToken(raw);
+    const expires_at = dbNow(new Date(Date.now() + PASSWORD_RESET_TTL_MS));
+    // Invalidate any prior unconsumed tokens for this user and issue the new one
+    // together, so there is always exactly one live reset link in flight.
+    await this.uow.transactional(async () => {
+      await this.passwordResetTokens.consumeAllLiveForUser(user.id);
+      await this.passwordResetTokens.insertToken({ user_id: user.id, token_hash, expires_at, created_ip: createdIp });
+    });
+
+    return { tokenForDelivery: raw, userId: user.id, userEmail: user.email, reason: 'issued' };
+  }
+
+  /**
+   * Consume a reset token and set a new password. If the target user has
+   * MFA enabled, a valid TOTP code or backup code must be supplied — a
+   * compromised email alone therefore does NOT allow taking over a
+   * 2FA-protected account.
+   */
+  async resetPassword(rawBody: unknown): Promise<ResetPasswordOutcome> {
+    const body = rawBody as { token?: string; new_password?: string; mfa_code?: string };
+    const { token, new_password, mfa_code } = body;
+    if (!token || typeof token !== 'string') {
+      throw new DomainError(400, 'Reset token is required');
+    }
+    if (!new_password || typeof new_password !== 'string') {
+      throw new DomainError(400, 'New password is required');
+    }
+    // Check the policy BEFORE touching the token so an invalid password
+    // does not burn the user's one-time link.
+    const pwCheck = validatePassword(new_password);
+    if (!pwCheck.ok) throw new DomainError(400, pwCheck.reason!);
+
+    const tokenHash = hashResetToken(token);
+    const row = await this.passwordResetTokens.findByTokenHash(tokenHash);
+
+    if (!row) throw new DomainError(400, 'Invalid or expired reset link');
+    if (row.consumed_at) throw new DomainError(400, 'This reset link has already been used');
+    if ((parseDbTimestamp(row.expires_at)?.getTime() ?? Number.NaN) < Date.now()) {
+      throw new DomainError(400, 'Reset link has expired. Please request a new one.');
+    }
+
+    const user = await this.usersRepo.findResetTarget(row.user_id);
+
+    if (!user) throw new DomainError(400, 'Invalid or expired reset link');
+
+    // MFA gate. If enabled, require a valid TOTP or backup code.
+    const mfaOn = user.mfa_enabled === 1;
+    let backupCodeConsumedIndex: number | null = null;
+    if (mfaOn) {
+      if (!user.mfa_secret) {
+        // Data inconsistency — fail closed.
+        throw new DomainError(500, 'MFA is enabled but not configured. Contact your administrator.');
+      }
+      const supplied = typeof mfa_code === 'string' ? mfa_code.trim() : '';
+      if (!supplied) return { mfa_required: true, status: 200 };
+
+      const secret = decryptMfaSecret(user.mfa_secret);
+      const okTotp = authenticator.verify({ token: supplied.replace(/\s/g, ''), secret });
+      if (!okTotp) {
+        backupCodeConsumedIndex = backupCodeIndex(supplied, user.mfa_backup_codes);
+        if (backupCodeConsumedIndex === -1) throw new DomainError(401, 'Invalid MFA code');
+      }
+    }
+
+    const newHash = bcrypt.hashSync(new_password, BCRYPT_COST);
+    const newPv = (user.password_version ?? 0) + 1;
+
+    await this.uow.transactional(async () => {
+      // Burn the token first to keep it atomic with the password change.
+      await this.passwordResetTokens.markConsumed(row.id);
+      // Also burn every OTHER live token for this user — a fresh login
+      // should not leave a second door open.
+      await this.passwordResetTokens.consumeAllLiveForUser(user.id, row.id);
+      await this.usersRepo.setPassword(user.id, newHash, newPv);
+      // Consume backup code if one was used.
+      if (backupCodeConsumedIndex !== null) {
+        const hashes = parseBackupCodeHashes(user.mfa_backup_codes);
+        hashes.splice(backupCodeConsumedIndex, 1);
+        await this.usersRepo.setBackupCodes(user.id, JSON.stringify(hashes));
+      }
+      // Revoke every other credential class the user had. The
+      // password_version bump alone invalidates JWT cookie sessions, but
+      // MCP static tokens and OAuth 2.1 bearer tokens are separate stores
+      // that survive the bump unless we prune them here.
+      await this.mcpTokens.deleteAllForUser(user.id);
+      try {
+        await this.oauthTokens.revokeAllForUser(user.id);
+      } catch { /* oauth_tokens table may not exist in very old installs */ }
+      // Push devices are a delivery channel that outlives every session, so an
+      // intruder's browser would keep reading this account's notifications.
+      await this.pushSubscriptions.deleteAllForUser(user.id);
+      await this.sessions.revokeAll(user.id);
+    });
+
+    // Kick off any MCP/WS session cleanup — same hook the account-delete path uses.
+    try { revokeUserSessions?.(user.id); } catch { /* best-effort */ }
+
+    return { success: true, userId: user.id };
+  }
+
+  // -------------------------------------------------------------------------
+  // JWT verification
+  //
+  // The MCP token half of this section moved to tokens/token.service.ts. What
+  // stays is login identity (verifyJwtToken), which is not about minting a token.
+  // The MCP demo check moved to DemoService, behind the registry's tool gate.
+  // -------------------------------------------------------------------------
+
+  /**
+   * Verify a JWT the same way `auth-core/jwt-verify.ts#verifyJwtAndLoadUser`
+   * does — including the `password_version` check — so that stolen tokens
+   * lose access the moment the victim resets their password.
+   *
+   * This is the single entry point every non-cookie JWT verification path
+   * (MCP bearer, WebSocket handshake, file-download query tokens, photo
+   * route) should go through.
+   */
+  async verifyJwtToken(token: string): Promise<User | null> {
+    return verifyJwtAndLoadUser(token, this.usersRepo, this.sessions);
+  }
+}

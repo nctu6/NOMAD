@@ -1,39 +1,163 @@
-# Stage 1: React Client bauen
-FROM node:22-alpine AS client-builder
-WORKDIR /app/client
-COPY client/package*.json ./
-RUN npm ci
-COPY client/ ./
-RUN npm run build
+# ── Stage 0: gosu ────────────────────────────────────────────────────────────
+# Rebuild gosu with a current Go toolchain so the runtime image ships no stale
+# Go stdlib (Debian's apt gosu is built with an old Go that trips CVE scanners).
+# The binary and its runtime behaviour are identical to the apt package.
+FROM golang:1.26-alpine AS gosu-build
+# Pinned to the commit of gosu's 1.19 tag: @latest made every build pick up whatever
+# was pushed last, and the tag itself is not a semver version go install accepts.
+RUN CGO_ENABLED=0 GOBIN=/out go install github.com/tianon/gosu@6456aaa0f3c854d199d0f037f068eb97515b7513
 
-# Stage 2: Produktions-Server
-FROM node:22-alpine
+# ── Stage 1: shared ──────────────────────────────────────────────────────────
+FROM node:24-alpine AS shared-builder
+WORKDIR /app
+COPY package.json package-lock.json ./
+COPY shared/package.json ./shared/
+RUN npm ci --workspace=shared
+COPY shared/ ./shared/
+RUN npm run build --workspace=shared
 
+# ── Stage 2: client ──────────────────────────────────────────────────────────
+FROM node:24-alpine AS client-builder
+WORKDIR /app
+COPY package.json package-lock.json ./
+COPY shared/package.json ./shared/
+COPY client/package.json ./client/
+RUN npm ci --workspace=client
+COPY --from=shared-builder /app/shared/dist ./shared/dist
+COPY client/ ./client/
+# A prerelease build does not bump client/package.json, so the bundle takes its
+# version from the same build argument the server's VERSION file comes from.
+ARG APP_VERSION=dev
+RUN npm run build --workspace=client
+
+# ── Stage 3: server ──────────────────────────────────────────────────────────
+# --ignore-scripts: nothing here needs a postinstall, tsc only reads types. The one
+# native module, better-sqlite3, ships its binaries inside the npm tarball since 13.x.
+FROM node:24-alpine AS server-builder
+WORKDIR /app
+COPY package.json package-lock.json ./
+COPY shared/package.json ./shared/
+COPY server/package.json ./server/
+RUN npm ci --workspace=server --ignore-scripts
+COPY --from=shared-builder /app/shared/dist ./shared/dist
+COPY server/ ./server/
+# tsc needs more than the 2 GB heap Node picks on a host with about 12 GB of RAM;
+# on a bigger build machine the default is larger, so only small hosts failed.
+RUN NODE_OPTIONS=--max-old-space-size=4096 npm run build --workspace=server
+
+# ── Stage 4: production runtime ──────────────────────────────────────────────
+FROM node:24-trixie-slim
 WORKDIR /app
 
-# Server-Dependencies installieren (better-sqlite3 braucht Build-Tools)
-COPY server/package*.json ./
-RUN apk add --no-cache python3 make g++ && \
-    npm ci --production && \
-    apk del python3 make g++
+# Workspace manifests only — source never enters this stage.
+COPY package.json package-lock.json ./
+COPY shared/package.json ./shared/
+COPY server/package.json ./server/
 
-# Server-Code kopieren
-COPY server/ ./
+# The trailing chown runs in this layer on purpose: it covers the manifests and
+# the freshly installed node_modules while they are already part of this layer's
+# changeset, so it costs nothing. Everything copied after this point carries
+# --chown=node:node for the same reason — a recursive chown in a later layer
+# would copy up every inode it touches and duplicate the whole tree in the image.
+#
+# No compiler in this stage. better-sqlite3 13.x carries prebuilt binaries for
+# amd64 and arm64 inside its tarball, so there is nothing left to build: the old
+# python3 + build-essential fallback compiled it against whatever Node headers
+# the base image had that day, and 24.19+ headers give an addon that aborts with
+# "Assertion failed: (env) != nullptr" the first time a statement is collected
+# (#2421). --ignore-scripts because a lockfile-driven npm ci still synthesises
+# `node-gyp rebuild` for the binding.gyp it finds, blind to the package's
+# gypfile:false (npm/cli#9837). The only other install scripts among the runtime
+# deps are esbuild's binary check, redundant next to its optional platform
+# package, and a telemetry ping.
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends tzdata dumb-init wget ca-certificates \
+    libkitinerary-bin libsqlite3-0 && \
+    npm ci --workspace=server --omit=dev --ignore-scripts && \
+    { ln -sf "$(find /usr/lib -name kitinerary-extractor -type f | head -1)" /usr/local/bin/kitinerary-extractor || true; } && \
+    rm -rf /var/lib/apt/lists/* /usr/local/lib/node_modules/npm /usr/local/bin/npm /usr/local/bin/npx && \
+    chown -R node:node /app
 
-# Gebauten Client kopieren
-COPY --from=client-builder /app/client/dist ./public
+# gosu rebuilt with a current Go toolchain (stage 0) — the entrypoint script uses
+# it to drop to node.
+COPY --from=gosu-build /out/gosu /usr/local/bin/gosu
 
-# Fonts für PDF-Export kopieren
-COPY --from=client-builder /app/client/public/fonts ./public/fonts
+ENV XDG_CACHE_HOME=/tmp/kf6-cache
+# Prevent Qt from probing for a display in headless containers.
+ENV QT_QPA_PLATFORM=offscreen
+# Fixed path for both amd64 (static binary) and arm64 (symlink to apt binary).
+# Override with KITINERARY_EXTRACTOR_PATH if you install it elsewhere.
+ENV KITINERARY_EXTRACTOR_PATH=/usr/local/bin/kitinerary-extractor
 
-# Verzeichnisse erstellen + Symlink für Abwärtskompatibilität (alte docker-compose mounten nach /app/server/uploads)
-RUN mkdir -p /app/data /app/uploads/files /app/uploads/covers /app/uploads/avatars /app/uploads/photos && \
-    mkdir -p /app/server && ln -s /app/uploads /app/server/uploads && ln -s /app/data /app/server/data
+COPY --chown=node:node --from=server-builder /app/server/dist ./server/dist
+# Runtime data assets read from server/assets at runtime: airports.json (flight
+# transport search) and atlas/*.geojson.gz (Atlas country/region map). The build
+# only emits dist, so these must be copied explicitly or the features silently
+# degrade to empty in the image.
+COPY --chown=node:node --from=server-builder /app/server/assets ./server/assets
+# The in-app help pages (/help) read this straight from disk at runtime, so the
+# docs always match the version running. Without it, wikiService falls back to
+# fetching the GitHub wiki, which tracks main and needs network access.
+COPY --chown=node:node wiki ./wiki
+# tsconfig-paths/register reads this at runtime to resolve MCP SDK paths.
+COPY --chown=node:node server/tsconfig.json ./server/
+# Encryption-key rotation is run on demand via tsx (a prod dep) straight from the
+# raw .ts source — it never enters dist, so it must be copied in explicitly or
+# `node --import tsx scripts/migrate-encryption.ts` fails with module-not-found.
+COPY --chown=node:node server/scripts/migrate-encryption.ts ./server/scripts/migrate-encryption.ts
+# Admin recovery script (node server/reset-admin.js) for locked-out installs.
+COPY --chown=node:node server/reset-admin.js ./server/reset-admin.js
+COPY --chown=node:node --from=shared-builder /app/shared/dist ./shared/dist
+COPY --chown=node:node --from=client-builder /app/client/dist ./server/public
+COPY --chown=node:node --from=client-builder /app/client/public/fonts ./server/public/fonts
 
-# Umgebung setzen
+# journey/ and places/ must be listed here and in server/src/index.ts (#1762) —
+# a dir created lazily on first upload needs write permission on the uploads
+# mount point itself, which fails with EACCES when the bind-mounted host dir
+# isn't writable by node. Only paths this layer creates are chowned; anything
+# already in the image arrived node-owned via --chown above.
+RUN mkdir -p /app/data/logs /app/uploads/files /app/uploads/covers /app/uploads/avatars \
+      /app/uploads/photos /app/uploads/journey /app/uploads/places && \
+    ln -s /app/uploads /app/server/uploads && \
+    ln -s /app/data /app/server/data && \
+    chown -R node:node /app/data /app/uploads && \
+    chown -h node:node /app/server/uploads /app/server/data
+
 ENV NODE_ENV=production
+ENV NODE_USE_ENV_PROXY=1
 ENV PORT=3000
+# The version goes into a file, not into ENV. A container keeps its environment
+# when it is recreated on a newer image (Portainer's recreate, a copied run
+# config), so an APP_VERSION env var would keep announcing the old release and
+# the clients would never pick up the new bundle. The server reads this file
+# first (server/src/app-config/image-version.ts).
+ARG APP_VERSION=dev
+RUN if [ "$APP_VERSION" != "dev" ]; then printf '%s\n' "$APP_VERSION" > /app/server/VERSION; fi
+
+# OCI metadata: Renovate, Watchtower and the registries read the source label to
+# link an image update to its release notes (#1498). The release workflows add
+# the commit and the build time; a local build carries everything else.
+LABEL org.opencontainers.image.title="TREK" \
+      org.opencontainers.image.description="Self-hosted collaborative travel planner" \
+      org.opencontainers.image.url="https://github.com/liketrek/TREK" \
+      org.opencontainers.image.source="https://github.com/liketrek/TREK" \
+      org.opencontainers.image.documentation="https://github.com/liketrek/TREK/wiki" \
+      org.opencontainers.image.licenses="AGPL-3.0-only" \
+      org.opencontainers.image.version="${APP_VERSION}"
 
 EXPOSE 3000
 
-CMD ["node", "--import", "tsx", "src/index.ts"]
+HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
+  CMD wget -qO- "http://localhost:${PORT:-3000}/api/health" || exit 1
+
+# Start-up lives in a script, not an inline `sh -c` string: container management
+# UIs re-tokenise Config.Cmd when you edit a container in place, and a command
+# carrying quotes does not survive that round-trip (the container then dies with
+# a shell syntax error before Node starts). A CMD of one bare token does.
+COPY server/scripts/entrypoint.sh /usr/local/bin/trek-entrypoint
+# Root-owned on purpose — this is what calls gosu, so it runs before the drop to
+# node. chmod is explicit because a checkout on Windows carries no exec bit.
+RUN chmod 0755 /usr/local/bin/trek-entrypoint
+
+ENTRYPOINT ["dumb-init", "--"]
+CMD ["/usr/local/bin/trek-entrypoint"]

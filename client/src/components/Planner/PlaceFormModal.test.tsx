@@ -1,0 +1,2768 @@
+// FE-COMP-PLACEFORM-001 to FE-COMP-PLACEFORM-036, FE-PLANNER-PLACEFORM-016 to FE-PLANNER-PLACEFORM-067, plus FE-PLANNER-PLACEFORM-068 to -124
+import { render, screen, waitFor, fireEvent, within, act } from '../../../tests/helpers/render';
+import userEvent from '@testing-library/user-event';
+import { http, HttpResponse } from 'msw';
+import { server } from '../../../tests/helpers/msw/server';
+import { collectionsApi } from '../../api/collections';
+import { useAuthStore } from '../../store/authStore';
+import { useTripStore } from '../../store/tripStore';
+import { useAddonStore } from '../../store/addonStore';
+import { usePermissionsStore } from '../../store/permissionsStore';
+import { usePluginStore } from '../../store/pluginStore';
+import { resetAllStores, seedStore } from '../../../tests/helpers/store';
+import { buildUser, buildTrip, buildPlace, buildCategory, buildAssignment } from '../../../tests/helpers/factories';
+import { placeFormProps, seedPlaceFormStores } from '../../../tests/helpers/placeFormSetup';
+import PlaceFormModal from './PlaceFormModal';
+
+// CustomTimePicker as a plain text input, see TimePickerStub.
+vi.mock('../shared/CustomTimePicker', async () => ({
+  default: (await import('../../../tests/helpers/placeForm')).TimePickerStub,
+}));
+
+const defaultProps = placeFormProps;
+
+beforeEach(() => {
+  resetAllStores();
+  seedPlaceFormStores();
+});
+
+describe('PlaceFormModal', () => {
+  it('FE-COMP-PLACEFORM-2472: an empty search offers adding the place by hand and takes the query as the name', async () => {
+    const user = userEvent.setup();
+    server.use(http.post('/api/maps/search', () => HttpResponse.json({ places: [], source: 'osm' })));
+    render(<PlaceFormModal {...defaultProps} />);
+    const search = screen.getByPlaceholderText(/Search places/i);
+    await user.type(search, 'Tiny Garage Cafe');
+    await user.click(screen.getByRole('button', { name: 'Search' }));
+    expect(await screen.findByText('Nothing found for “Tiny Garage Cafe”')).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: 'Add by hand' }));
+    expect(screen.queryByText('Nothing found for “Tiny Garage Cafe”')).not.toBeInTheDocument();
+    // The search field keeps the query and the name field now holds it too.
+    expect(screen.getAllByDisplayValue('Tiny Garage Cafe')).toHaveLength(2);
+    expect(screen.getByLabelText('Phone')).toBeInTheDocument();
+  });
+
+  it('FE-COMP-PLACEFORM-001: renders modal when isOpen is true', () => {
+    render(<PlaceFormModal {...defaultProps} />);
+    expect(document.body).toBeInTheDocument();
+  });
+
+  it('FE-COMP-PLACEFORM-002: shows Add Place title for new place', () => {
+    render(<PlaceFormModal {...defaultProps} place={null} />);
+    // places.addPlace = "Add Place/Activity"
+    expect(screen.getAllByText(/Add Place\/Activity/i).length).toBeGreaterThan(0);
+  });
+
+  it('FE-COMP-PLACEFORM-003: shows Edit Place title when editing', () => {
+    const place = buildPlace({ name: 'Eiffel Tower' });
+    render(<PlaceFormModal {...defaultProps} place={place} />);
+    expect(screen.getByText('Edit Place')).toBeInTheDocument();
+  });
+
+  it('FE-COMP-PLACEFORM-004: shows Name field with placeholder', () => {
+    render(<PlaceFormModal {...defaultProps} />);
+    expect(screen.getByPlaceholderText(/e\.g\. Eiffel Tower/i)).toBeInTheDocument();
+  });
+
+  it('FE-COMP-PLACEFORM-005: shows Description field', () => {
+    render(<PlaceFormModal {...defaultProps} />);
+    expect(screen.getByPlaceholderText(/Short description/i)).toBeInTheDocument();
+  });
+
+  it('FE-COMP-PLACEFORM-006: shows Address field', () => {
+    render(<PlaceFormModal {...defaultProps} />);
+    expect(screen.getByPlaceholderText(/Street, City, Country/i)).toBeInTheDocument();
+  });
+
+  it('FE-COMP-PLACEFORM-007: shows Add button for new place', () => {
+    render(<PlaceFormModal {...defaultProps} place={null} />);
+    expect(screen.getByRole('button', { name: /^Add$/i })).toBeInTheDocument();
+  });
+
+  it('FE-COMP-PLACEFORM-008: shows Update button when editing', () => {
+    const place = buildPlace({ name: 'Test Place' });
+    render(<PlaceFormModal {...defaultProps} place={place} />);
+    expect(screen.getByRole('button', { name: /^Update$/i })).toBeInTheDocument();
+  });
+
+  it('FE-COMP-PLACEFORM-009: shows Cancel button', () => {
+    render(<PlaceFormModal {...defaultProps} />);
+    expect(screen.getByRole('button', { name: /Cancel/i })).toBeInTheDocument();
+  });
+
+  it('FE-COMP-PLACEFORM-010: clicking Cancel calls onClose', async () => {
+    const user = userEvent.setup();
+    const onClose = vi.fn();
+    render(<PlaceFormModal {...defaultProps} onClose={onClose} />);
+    await user.click(screen.getByRole('button', { name: /Cancel/i }));
+    expect(onClose).toHaveBeenCalled();
+  });
+
+  it('FE-COMP-PLACEFORM-011: pre-fills name field when editing existing place', () => {
+    const place = buildPlace({ name: 'Notre Dame' });
+    render(<PlaceFormModal {...defaultProps} place={place} />);
+    const nameInput = screen.getByDisplayValue('Notre Dame');
+    expect(nameInput).toBeInTheDocument();
+  });
+
+  it('FE-COMP-PLACEFORM-012: pre-fills address when editing existing place', () => {
+    const place = buildPlace({ name: 'Test', address: '123 Main St' });
+    render(<PlaceFormModal {...defaultProps} place={place} />);
+    expect(screen.getByDisplayValue('123 Main St')).toBeInTheDocument();
+  });
+
+  it('FE-COMP-PLACEFORM-013: submitting empty form does not call onSave (name required)', async () => {
+    const user = userEvent.setup();
+    const onSave = vi.fn();
+    render(<PlaceFormModal {...defaultProps} onSave={onSave} />);
+    await user.click(screen.getByRole('button', { name: /^Add$/i }));
+    // Form validation prevents calling onSave without a name
+    expect(onSave).not.toHaveBeenCalled();
+  });
+
+  it('FE-COMP-PLACEFORM-014: typing in name field and submitting calls onSave', async () => {
+    const user = userEvent.setup();
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    render(<PlaceFormModal {...defaultProps} onSave={onSave} />);
+    await user.type(screen.getByPlaceholderText(/e\.g\. Eiffel Tower/i), 'Sacre Coeur');
+    await user.click(screen.getByRole('button', { name: /^Add$/i }));
+    await waitFor(() => expect(onSave).toHaveBeenCalled());
+    expect(onSave).toHaveBeenCalledWith(expect.objectContaining({ name: 'Sacre Coeur' }));
+  });
+
+  it('FE-COMP-PLACEFORM-015: categories appear in category selector', () => {
+    const cats = [buildCategory({ name: 'Museum' }), buildCategory({ name: 'Park' })];
+    render(<PlaceFormModal {...defaultProps} categories={cats} />);
+    // The category is a pill on the head band, named by what it picks.
+    expect(screen.getByRole('button', { name: /^Category:/ })).toBeInTheDocument();
+  });
+
+  // ── Form initialization ──────────────────────────────────────────────────────
+
+  it('FE-PLANNER-PLACEFORM-016: prefillCoords populates lat/lng/name', () => {
+    render(
+      <PlaceFormModal
+        {...defaultProps}
+        place={null}
+        prefillCoords={{ lat: 48.8566, lng: 2.3522, name: 'Paris', address: 'Paris, France' }}
+      />,
+    );
+    expect(screen.getByDisplayValue('48.8566')).toBeInTheDocument();
+    expect(screen.getByDisplayValue('Paris')).toBeInTheDocument();
+  });
+
+  it('FE-PLANNER-PLACEFORM-092: a plugin POI prefill asks the details column about its plugin id and saves it as the osm id', async () => {
+    const asked: unknown[] = [];
+    server.use(
+      http.post('/api/maps/enrichment', async ({ request }) => {
+        asked.push(await request.json());
+        return HttpResponse.json({ photos: [], description: null, facts: [], rating: null, hours: null });
+      }),
+    );
+    const user = userEvent.setup();
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    render(
+      <PlaceFormModal
+        {...defaultProps}
+        onSave={onSave}
+        prefillCoords={{
+          lat: 47.1, lng: 11.2, name: 'Trailhead', address: 'Hut 1',
+          website: 'https://trails.example/th-092', osm_id: 'plugin:trail-finder:th-092',
+        }}
+      />,
+    );
+    expect(screen.getByDisplayValue('Trailhead')).toBeInTheDocument();
+    expect(screen.getByDisplayValue('https://trails.example/th-092')).toBeInTheDocument();
+    // The server picks the provider by this id and never takes a `plugin:` one for Google's.
+    await waitFor(() => expect(asked).toEqual([expect.objectContaining({ placeId: 'plugin:trail-finder:th-092' })]));
+
+    await user.click(screen.getByRole('button', { name: /^Add$/i }));
+    await waitFor(() => expect(onSave).toHaveBeenCalledTimes(1));
+    expect(onSave).toHaveBeenCalledWith(expect.objectContaining({ name: 'Trailhead', osm_id: 'plugin:trail-finder:th-092' }));
+    expect(onSave).not.toHaveBeenCalledWith(expect.objectContaining({ google_place_id: expect.anything() }));
+  });
+
+  it('FE-PLANNER-PLACEFORM-017: form resets when isOpen changes from place to null', () => {
+    const place = buildPlace({ name: 'Old Place' });
+    const { rerender } = render(<PlaceFormModal {...defaultProps} place={place} isOpen={true} />);
+    expect(screen.getByDisplayValue('Old Place')).toBeInTheDocument();
+
+    rerender(<PlaceFormModal {...defaultProps} place={null} isOpen={false} />);
+    expect(screen.queryByDisplayValue('Old Place')).not.toBeInTheDocument();
+  });
+
+  it('FE-PLANNER-PLACEFORM-088: closing the dialog clears the search field', async () => {
+    const user = userEvent.setup();
+    const { rerender } = render(<PlaceFormModal {...defaultProps} isOpen />);
+    await user.type(screen.getByPlaceholderText('Search places...'), 'Eiffel Tower');
+
+    rerender(<PlaceFormModal {...defaultProps} isOpen={false} />);
+    rerender(<PlaceFormModal {...defaultProps} isOpen />);
+
+    expect(screen.getByPlaceholderText('Search places...')).toHaveValue('');
+  });
+
+  it('FE-PLANNER-PLACEFORM-089: closing the dialog drops the result list and its Google line', async () => {
+    const user = userEvent.setup();
+    seedStore(useAuthStore, { user: buildUser(), isAuthenticated: true, hasMapsKey: true });
+    server.use(
+      http.post('/api/maps/search', () =>
+        HttpResponse.json({ places: [{ name: 'Weigh station', address: 'Ritzville', lat: '47.1', lng: '-118.4' }], source: 'trek-places+openstreetmap' }),
+      ),
+    );
+    const { rerender } = render(<PlaceFormModal {...defaultProps} isOpen />);
+    const searchInput = screen.getByPlaceholderText('Search places...');
+    await user.type(searchInput, 'Tokyo Station');
+    await user.click(within(searchInput.closest('.flex') as HTMLElement).getByRole('button'));
+    expect(await screen.findByText('Weigh station')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /Search Google instead/ })).toBeInTheDocument();
+
+    rerender(<PlaceFormModal {...defaultProps} isOpen={false} />);
+    rerender(<PlaceFormModal {...defaultProps} isOpen />);
+
+    expect(screen.getByPlaceholderText('Search places...')).toHaveValue('');
+    expect(screen.queryByText('Weigh station')).toBeNull();
+    expect(screen.queryByRole('button', { name: /Search Google instead/ })).toBeNull();
+  });
+
+  it('FE-PLANNER-PLACEFORM-090: suggestions still on their way when the dialog closes never open over the next one', async () => {
+    const user = userEvent.setup();
+    const gate: { started: boolean; release?: () => void } = { started: false };
+    server.use(
+      http.post('/api/maps/autocomplete', async () => {
+        gate.started = true;
+        await new Promise<void>(res => { gate.release = res; });
+        return HttpResponse.json({ suggestions: [{ placeId: 'late-1', mainText: 'Late Suggestion', secondaryText: 'Nowhere' }], source: 'trek-places' });
+      }),
+    );
+    const { rerender } = render(<PlaceFormModal {...defaultProps} isOpen />);
+    await user.type(screen.getByPlaceholderText('Search places...'), 'Late');
+    await waitFor(() => expect(gate.started).toBe(true));
+
+    rerender(<PlaceFormModal {...defaultProps} isOpen={false} />);
+    gate.release?.();
+    await act(async () => { await new Promise(res => setTimeout(res, 100)); });
+    rerender(<PlaceFormModal {...defaultProps} isOpen />);
+
+    expect(screen.queryByText('Late Suggestion')).toBeNull();
+  });
+
+  it('FE-PLANNER-PLACEFORM-091: a search that answers after the dialog closed leaves the next opening empty', async () => {
+    const user = userEvent.setup();
+    const gate: { started: boolean; release?: () => void } = { started: false };
+    server.use(
+      http.post('/api/maps/search', async () => {
+        gate.started = true;
+        await new Promise<void>(res => { gate.release = res; });
+        return HttpResponse.json({ places: [{ name: 'Late Result', address: 'Nowhere', lat: '1', lng: '2' }] });
+      }),
+    );
+    const { rerender } = render(<PlaceFormModal {...defaultProps} isOpen />);
+    const searchInput = screen.getByPlaceholderText('Search places...');
+    await user.type(searchInput, 'Late');
+    await user.click(within(searchInput.closest('.flex') as HTMLElement).getByRole('button'));
+    await waitFor(() => expect(gate.started).toBe(true));
+
+    rerender(<PlaceFormModal {...defaultProps} isOpen={false} />);
+    gate.release?.();
+    await act(async () => { await new Promise(res => setTimeout(res, 100)); });
+    rerender(<PlaceFormModal {...defaultProps} isOpen />);
+
+    expect(screen.queryByText('Late Result')).toBeNull();
+    // The button is back to its icon rather than the "..." of a search in flight.
+    expect(within(screen.getByPlaceholderText('Search places...').closest('.flex') as HTMLElement).getByRole('button')).not.toHaveTextContent('...');
+  });
+
+  // ── Maps search ──────────────────────────────────────────────────────────────
+
+  it('FE-PLANNER-PLACEFORM-018: maps search populates results via button click', async () => {
+    const user = userEvent.setup();
+    server.use(
+      http.post('/api/maps/search', () =>
+        HttpResponse.json({
+          places: [{ name: 'Eiffel Tower', address: 'Paris', lat: '48.8584', lng: '2.2945' }],
+        }),
+      ),
+    );
+
+    render(<PlaceFormModal {...defaultProps} />);
+    const searchInput = screen.getByPlaceholderText('Search places...');
+    await user.type(searchInput, 'Eiffel Tower');
+
+    // The search button is the sibling button of the search input
+    const searchRow = searchInput.closest('.flex') as HTMLElement;
+    const searchBtn = within(searchRow).getByRole('button');
+    await user.click(searchBtn);
+
+    expect(await screen.findByText('Eiffel Tower')).toBeInTheDocument();
+  });
+
+  it('FE-PLANNER-PLACEFORM-018c: a pin lists the places around it, nearest first with their distance, and one pick fills the form', async () => {
+    const user = userEvent.setup();
+    seedStore(useAuthStore, { user: buildUser(), isAuthenticated: true, hasMapsKey: true });
+    const bodies: Record<string, unknown>[] = [];
+    server.use(
+      http.post('/api/maps/nearby', async ({ request }) => {
+        bodies.push((await request.json()) as Record<string, unknown>);
+        return HttpResponse.json({
+          places: [{ name: 'Café am Tor', address: 'Pariser Platz 1', lat: 52.5163, lng: 13.378, distance_m: 40 }],
+          source: 'trek-places',
+        });
+      }),
+    );
+
+    render(<PlaceFormModal {...defaultProps} prefillCoords={{ lat: 52.5163, lng: 13.3777 }} />);
+    await user.click(screen.getByRole('button', { name: 'Places near this pin' }));
+
+    expect(bodies).toEqual([{ lat: 52.5163, lng: 13.3777 }]);
+    expect(await screen.findByText('Café am Tor')).toBeInTheDocument();
+    expect(screen.getByText('40 m')).toBeInTheDocument();
+    // No typed query, so nothing to send to Google instead.
+    expect(screen.queryByText('Not the right place? Search Google instead')).not.toBeInTheDocument();
+
+    await user.click(screen.getByText('Café am Tor'));
+    expect(screen.getByDisplayValue('Pariser Platz 1')).toBeInTheDocument();
+  });
+
+  it('FE-PLANNER-PLACEFORM-018d: without a pin there is nothing to look around', () => {
+    render(<PlaceFormModal {...defaultProps} />);
+    expect(screen.queryByRole('button', { name: 'Places near this pin' })).not.toBeInTheDocument();
+  });
+
+  it('FE-PLANNER-PLACEFORM-018b: a list the index answered offers Google instead, and the link sends the same query there alone', async () => {
+    const user = userEvent.setup();
+    seedStore(useAuthStore, { user: buildUser(), isAuthenticated: true, hasMapsKey: true });
+    const bodies: Record<string, unknown>[] = [];
+    server.use(
+      http.post('/api/maps/search', async ({ request }) => {
+        const body = (await request.json()) as Record<string, unknown>;
+        bodies.push(body);
+        return body.provider === 'google'
+          ? HttpResponse.json({ places: [{ name: 'Tokyo Station', address: 'Chiyoda', lat: '35.68', lng: '139.77' }], source: 'google' })
+          : HttpResponse.json({ places: [{ name: 'Weigh station', address: 'Ritzville', lat: '47.1', lng: '-118.4' }], source: 'trek-places+openstreetmap' });
+      }),
+    );
+
+    render(<PlaceFormModal {...defaultProps} />);
+    const searchInput = screen.getByPlaceholderText('Search places...');
+    await user.type(searchInput, 'Tokyo Station');
+    const searchRow = searchInput.closest('.flex') as HTMLElement;
+    await user.click(within(searchRow).getByRole('button'));
+    expect(await screen.findByText('Weigh station')).toBeInTheDocument();
+
+    // The quiet line under the list, only because the instance has a key and
+    // this list did not come from Google.
+    const retry = screen.getByRole('button', { name: /Search Google instead/ });
+    await user.click(retry);
+    expect(await screen.findByText('Tokyo Station')).toBeInTheDocument();
+    expect(bodies[0]).not.toHaveProperty('provider');
+    expect(bodies[1]).toMatchObject({ query: 'Tokyo Station', provider: 'google' });
+    // A list Google produced has nowhere further to go.
+    expect(screen.queryByRole('button', { name: /Search Google instead/ })).toBeNull();
+  });
+
+  it('FE-PLANNER-PLACEFORM-018c: without a Google key the list offers nothing', async () => {
+    const user = userEvent.setup();
+    server.use(
+      http.post('/api/maps/search', () =>
+        HttpResponse.json({ places: [{ name: 'Weigh station', address: 'Ritzville', lat: '47.1', lng: '-118.4' }], source: 'trek-places+openstreetmap' }),
+      ),
+    );
+    render(<PlaceFormModal {...defaultProps} />);
+    const searchInput = screen.getByPlaceholderText('Search places...');
+    await user.type(searchInput, 'Tokyo Station');
+    await user.click(within(searchInput.closest('.flex') as HTMLElement).getByRole('button'));
+    expect(await screen.findByText('Weigh station')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /Search Google instead/ })).toBeNull();
+  });
+
+  it('FE-PLANNER-PLACEFORM-018d: a key alone is not enough: with Amap or OpenStreetMap picked the list offers nothing', async () => {
+    // The server only honours the request while Google holds the keyed slot;
+    // under another provider the link would re-run the same search and stay.
+    const user = userEvent.setup();
+    seedStore(useAuthStore, { user: buildUser(), isAuthenticated: true, hasMapsKey: true, placesProvider: 'openstreetmap' });
+    server.use(
+      http.post('/api/maps/search', () =>
+        HttpResponse.json({ places: [{ name: 'Weigh station', address: 'Ritzville', lat: '47.1', lng: '-118.4' }], source: 'trek-places+openstreetmap' }),
+      ),
+    );
+    render(<PlaceFormModal {...defaultProps} />);
+    const searchInput = screen.getByPlaceholderText('Search places...');
+    await user.type(searchInput, 'Tokyo Station');
+    await user.click(within(searchInput.closest('.flex') as HTMLElement).getByRole('button'));
+    expect(await screen.findByText('Weigh station')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /Search Google instead/ })).toBeNull();
+  });
+
+  it('FE-PLANNER-PLACEFORM-018e: the link sends the query the list came from, not what the field holds by then', async () => {
+    const user = userEvent.setup();
+    seedStore(useAuthStore, { user: buildUser(), isAuthenticated: true, hasMapsKey: true });
+    const bodies: Record<string, unknown>[] = [];
+    server.use(
+      http.post('/api/maps/autocomplete', () => HttpResponse.json({ suggestions: [], source: 'trek-places' })),
+      http.post('/api/maps/search', async ({ request }) => {
+        const body = (await request.json()) as Record<string, unknown>;
+        bodies.push(body);
+        return body.provider === 'google'
+          ? HttpResponse.json({ places: [{ name: 'Tokyo Station', address: 'Chiyoda', lat: '35.68', lng: '139.77' }], source: 'google' })
+          : HttpResponse.json({ places: [{ name: 'Weigh station', address: 'Ritzville', lat: '47.1', lng: '-118.4' }], source: 'trek-places+openstreetmap' });
+      }),
+    );
+
+    render(<PlaceFormModal {...defaultProps} />);
+    const searchInput = screen.getByPlaceholderText('Search places...');
+    await user.type(searchInput, 'Tokyo Station');
+    await user.click(within(searchInput.closest('.flex') as HTMLElement).getByRole('button'));
+    expect(await screen.findByText('Weigh station')).toBeInTheDocument();
+
+    // The list stays while the field is retyped; the line still means this list.
+    await user.clear(searchInput);
+    await user.type(searchInput, 'Kyoto');
+    await user.click(screen.getByRole('button', { name: /Search Google instead/ }));
+    expect(await screen.findByText('Tokyo Station')).toBeInTheDocument();
+    expect(bodies).toHaveLength(2);
+    expect(bodies[1]).toMatchObject({ query: 'Tokyo Station', provider: 'google' });
+  });
+
+  it('FE-PLANNER-PLACEFORM-018f: the link still works after the field was cleared', async () => {
+    const user = userEvent.setup();
+    seedStore(useAuthStore, { user: buildUser(), isAuthenticated: true, hasMapsKey: true });
+    const bodies: Record<string, unknown>[] = [];
+    server.use(
+      http.post('/api/maps/search', async ({ request }) => {
+        const body = (await request.json()) as Record<string, unknown>;
+        bodies.push(body);
+        return body.provider === 'google'
+          ? HttpResponse.json({ places: [{ name: 'Tokyo Station', address: 'Chiyoda', lat: '35.68', lng: '139.77' }], source: 'google' })
+          : HttpResponse.json({ places: [{ name: 'Weigh station', address: 'Ritzville', lat: '47.1', lng: '-118.4' }], source: 'trek-places+openstreetmap' });
+      }),
+    );
+
+    render(<PlaceFormModal {...defaultProps} />);
+    const searchInput = screen.getByPlaceholderText('Search places...');
+    await user.type(searchInput, 'Tokyo Station');
+    await user.click(within(searchInput.closest('.flex') as HTMLElement).getByRole('button'));
+    expect(await screen.findByText('Weigh station')).toBeInTheDocument();
+
+    // An empty field used to make the click a silent no-op.
+    await user.clear(searchInput);
+    await user.click(screen.getByRole('button', { name: /Search Google instead/ }));
+    expect(await screen.findByText('Tokyo Station')).toBeInTheDocument();
+    expect(bodies[1]).toMatchObject({ query: 'Tokyo Station', provider: 'google' });
+  });
+
+  it('FE-PLANNER-PLACEFORM-019: pressing Enter in search input triggers search', async () => {
+    const user = userEvent.setup();
+    server.use(
+      http.post('/api/maps/search', () =>
+        HttpResponse.json({
+          places: [{ name: 'Eiffel Tower', address: 'Paris', lat: '48.8584', lng: '2.2945' }],
+        }),
+      ),
+    );
+
+    render(<PlaceFormModal {...defaultProps} />);
+    const searchInput = screen.getByPlaceholderText('Search places...');
+    await user.type(searchInput, 'Eiffel Tower');
+    await user.keyboard('{Enter}');
+
+    expect(await screen.findByText('Eiffel Tower')).toBeInTheDocument();
+  });
+
+  it('FE-PLANNER-PLACEFORM-020: clicking a maps result fills the form', async () => {
+    const user = userEvent.setup();
+    server.use(
+      http.post('/api/maps/search', () =>
+        HttpResponse.json({
+          places: [{ name: 'Eiffel Tower', address: 'Paris', lat: '48.8584', lng: '2.2945' }],
+        }),
+      ),
+    );
+
+    render(<PlaceFormModal {...defaultProps} />);
+    const searchInput = screen.getByPlaceholderText('Search places...');
+    await user.type(searchInput, 'Eiffel Tower');
+    await user.keyboard('{Enter}');
+
+    const resultBtn = await screen.findByText('Eiffel Tower');
+    await user.click(resultBtn);
+
+    expect(screen.getByDisplayValue('Eiffel Tower')).toBeInTheDocument();
+    expect(screen.getByDisplayValue('48.8584')).toBeInTheDocument();
+  });
+
+  it('FE-PLANNER-PLACEFORM-021: maps search error surfaces the server-provided reason', async () => {
+    const addToast = vi.fn();
+    window.__addToast = addToast;
+
+    const user = userEvent.setup();
+    // The backend forwards the real upstream error (e.g. a Google Places API message);
+    // the modal must show it instead of a generic "search failed" so the cause is visible.
+    server.use(
+      http.post('/api/maps/search', () =>
+        HttpResponse.json({ error: 'Places API (New) has not been used in project 123 or it is disabled' }, { status: 403 })),
+    );
+
+    render(<PlaceFormModal {...defaultProps} />);
+    const searchInput = screen.getByPlaceholderText('Search places...');
+    await user.type(searchInput, 'someplace');
+    await user.keyboard('{Enter}');
+
+    await waitFor(() => {
+      expect(addToast).toHaveBeenCalledWith(
+        expect.stringMatching(/Places API \(New\) has not been used/i),
+        'error',
+        undefined,
+      );
+    });
+
+    delete window.__addToast;
+  });
+
+  // ── Autocomplete suggestion click (#1192) ─────────────────────────────────────
+  // Selecting a dropdown suggestion does a second `details` lookup which is fragile
+  // (details kill-switch, an overloaded OSM Overpass mirror, upstream errors). When
+  // it yields no usable place the modal must fall back to the reliable text search
+  // instead of dead-ending on "Place search failed".
+
+  async function openSuggestion(user: ReturnType<typeof userEvent.setup>) {
+    const searchInput = screen.getByPlaceholderText('Search places...');
+    await user.type(searchInput, 'Eiffel');
+    // Debounced autocomplete (300ms) then the dropdown renders the suggestion.
+    return screen.findByText('Paris, France');
+  }
+
+  it('FE-PLANNER-PLACEFORM-021b: suggestion click falls back to search when details fails', async () => {
+    const addToast = vi.fn();
+    window.__addToast = addToast;
+    const user = userEvent.setup();
+    server.use(
+      http.post('/api/maps/autocomplete', () =>
+        HttpResponse.json({
+          suggestions: [{ placeId: 'node:123', mainText: 'Eiffel Tower', secondaryText: 'Paris, France' }],
+          source: 'nominatim',
+        }),
+      ),
+      // details rejects (e.g. proxy 504 from a hung Overpass mirror)
+      http.get('/api/maps/details/:placeId', () => HttpResponse.json({ error: 'boom' }, { status: 500 })),
+      http.post('/api/maps/search', () =>
+        HttpResponse.json({
+          places: [{ name: 'Eiffel Tower', address: 'Paris, France', lat: '48.8584', lng: '2.2945' }],
+          source: 'openstreetmap',
+        }),
+      ),
+    );
+
+    render(<PlaceFormModal {...defaultProps} />);
+    const suggestion = await openSuggestion(user);
+    await user.click(suggestion);
+
+    // Form is populated from the search fallback, and no error toast is shown.
+    expect(await screen.findByDisplayValue('48.8584')).toBeInTheDocument();
+    expect(screen.getByDisplayValue('2.2945')).toBeInTheDocument();
+    expect(addToast).not.toHaveBeenCalledWith(expect.anything(), 'error', expect.anything());
+    delete window.__addToast;
+  });
+
+  it('FE-PLANNER-PLACEFORM-021e: an OpenStreetMap suggestion keeps its own coordinates instead of searching for its label', async () => {
+    // The layer's second line is the name written on the building, not an
+    // address. Joining the two and searching for it asks a question nobody
+    // typed, and whatever came back first was taken as the place the user had
+    // already picked. The row carries coordinates, so the fallback uses those.
+    const user = userEvent.setup();
+    let searched = 0;
+    server.use(
+      http.post('/api/maps/autocomplete', () =>
+        HttpResponse.json({
+          suggestions: [{
+            placeId: 'node:9712313',
+            mainText: 'Tokio Hauptbahnhof',
+            secondaryText: '東京駅丸の内駅舎',
+            source: 'openstreetmap',
+            lat: 35.6811816,
+            lng: 139.76598265,
+          }],
+          source: 'trek-places',
+        }),
+      ),
+      http.get('/api/maps/details/:placeId', () => HttpResponse.json({ place: null, disabled: true })),
+      http.post('/api/maps/search', () => {
+        searched += 1;
+        return HttpResponse.json({ places: [{ name: 'Etwas ganz anderes', lat: '1', lng: '1' }], source: 'trek-places' });
+      }),
+    );
+
+    render(<PlaceFormModal {...defaultProps} />);
+    await user.type(screen.getByPlaceholderText('Search places...'), 'Tokio');
+    await user.click(await screen.findByText('Tokio Hauptbahnhof'));
+
+    expect(await screen.findByDisplayValue('35.6811816')).toBeInTheDocument();
+    expect(screen.getByDisplayValue('139.76598265')).toBeInTheDocument();
+    expect(searched).toBe(0);
+  });
+
+  it('FE-PLANNER-PLACEFORM-021c: suggestion click falls back when details is disabled (place: null)', async () => {
+    const user = userEvent.setup();
+    server.use(
+      http.post('/api/maps/autocomplete', () =>
+        HttpResponse.json({
+          suggestions: [{ placeId: 'node:123', mainText: 'Eiffel Tower', secondaryText: 'Paris, France' }],
+          source: 'nominatim',
+        }),
+      ),
+      http.get('/api/maps/details/:placeId', () => HttpResponse.json({ place: null, disabled: true })),
+      http.post('/api/maps/search', () =>
+        HttpResponse.json({
+          places: [{ name: 'Eiffel Tower', address: 'Paris, France', lat: '48.8584', lng: '2.2945' }],
+          source: 'openstreetmap',
+        }),
+      ),
+    );
+
+    render(<PlaceFormModal {...defaultProps} />);
+    const suggestion = await openSuggestion(user);
+    await user.click(suggestion);
+
+    expect(await screen.findByDisplayValue('48.8584')).toBeInTheDocument();
+  });
+
+  it('FE-PLANNER-PLACEFORM-021d: suggestion click shows error only when the fallback also finds nothing', async () => {
+    const addToast = vi.fn();
+    window.__addToast = addToast;
+    const user = userEvent.setup();
+    server.use(
+      http.post('/api/maps/autocomplete', () =>
+        HttpResponse.json({
+          suggestions: [{ placeId: 'node:123', mainText: 'Eiffel Tower', secondaryText: 'Paris, France' }],
+          source: 'nominatim',
+        }),
+      ),
+      http.get('/api/maps/details/:placeId', () => HttpResponse.json({ place: null, disabled: true })),
+      http.post('/api/maps/search', () => HttpResponse.json({ places: [], source: 'openstreetmap' })),
+    );
+
+    render(<PlaceFormModal {...defaultProps} />);
+    const suggestion = await openSuggestion(user);
+    await user.click(suggestion);
+
+    await waitFor(() => {
+      expect(addToast).toHaveBeenCalledWith('Place search failed.', 'error', undefined);
+    });
+    delete window.__addToast;
+  });
+
+  it('FE-PLANNER-PLACEFORM-022: no standing notice about which index is in use', () => {
+    // It used to say "Using OpenStreetMap" above the box whenever no Google key
+    // was set, which was a sentence about configuration in the middle of a form
+    // about a place. Each result names its own source now, which is the question
+    // people actually had.
+    render(<PlaceFormModal {...defaultProps} />);
+    expect(screen.queryByText(/Using OpenStreetMap/i)).not.toBeInTheDocument();
+  });
+
+  it('FE-PLANNER-PLACEFORM-022b: a suggestion says which index answered', async () => {
+    const user = userEvent.setup();
+    server.use(
+      http.post('/api/maps/autocomplete', () =>
+        HttpResponse.json({
+          suggestions: [{ placeId: 'gers:abc', mainText: 'Eiffel Tower', secondaryText: 'Paris, France' }],
+          source: 'trek-places',
+        }),
+      ),
+    );
+
+    render(<PlaceFormModal {...defaultProps} />);
+    await user.type(screen.getByPlaceholderText('Search places...'), 'Eiffel');
+
+    expect(await screen.findByText('TREK')).toBeInTheDocument();
+  });
+
+  it('FE-PLANNER-PLACEFORM-022d: the typed-ahead list marks the OpenStreetMap rows as such', async () => {
+    // The keystroke path asks both indexes at once, so the name the response
+    // carries for the whole list ('trek-places') is true of the call and wrong
+    // for half the rows. Marking every suggestion TREK is how a list that did
+    // contain OpenStreetMap places read as if it never had.
+    const user = userEvent.setup();
+    server.use(
+      http.post('/api/maps/autocomplete', () =>
+        HttpResponse.json({
+          suggestions: [
+            { placeId: 'gers:abc', mainText: 'Tokyo Station Beer Stand', secondaryText: 'Chiyoda', source: 'trek-places' },
+            { placeId: 'node:9712313', mainText: 'Tokio Hauptbahnhof', secondaryText: '東京駅', source: 'openstreetmap' },
+          ],
+          source: 'trek-places',
+        }),
+      ),
+    );
+
+    render(<PlaceFormModal {...defaultProps} />);
+    await user.type(screen.getByPlaceholderText('Search places...'), 'Tokyo Station');
+
+    expect(await screen.findByText('TREK')).toBeInTheDocument();
+    expect(await screen.findByText('OpenStreetMap')).toBeInTheDocument();
+  });
+
+  it('FE-PLANNER-PLACEFORM-022c: an interleaved result list marks each row with its own index', async () => {
+    // The whole point of putting it on the row: with both indexes answering,
+    // a label above the list could only name one of them. The index marks its
+    // own rows, so the unmarked one is OpenStreetMap by elimination.
+    const user = userEvent.setup();
+    server.use(
+      http.post('/api/maps/search', () =>
+        HttpResponse.json({
+          places: [
+            { name: 'Eiffel Tower', address: 'Paris', lat: '48.85', lng: '2.29', source: 'trek-places' },
+            { name: 'Champ de Mars', address: 'Paris', lat: '48.85', lng: '2.29' },
+          ],
+          source: 'trek-places+openstreetmap',
+        }),
+      ),
+    );
+
+    render(<PlaceFormModal {...defaultProps} />);
+    await user.type(screen.getByPlaceholderText('Search places...'), 'Eiffel');
+    await user.keyboard('{Enter}');
+
+    expect(await screen.findByText('TREK')).toBeInTheDocument();
+    expect(await screen.findByText('OpenStreetMap')).toBeInTheDocument();
+  });
+
+  it('FE-PLANNER-PLACEFORM-022d: an Amap list marks its rows, and a pick keeps the Amap id', async () => {
+    // Amap answers from the slot Google otherwise holds, so its rows get the
+    // same mark the other sources get. The id travels with the place: it is
+    // what lets the saved place keep opening against Amap after the admin
+    // switches providers.
+    const user = userEvent.setup();
+    const onSave = vi.fn();
+    server.use(
+      http.post('/api/maps/search', () =>
+        HttpResponse.json({
+          places: [
+            { name: '天安门', address: '北京市东城区', lat: '39.9087', lng: '116.3975', amap_poi_id: 'amap:B000A7BD6C', source: 'amap' },
+          ],
+          source: 'amap',
+        }),
+      ),
+    );
+
+    render(<PlaceFormModal {...defaultProps} onSave={onSave} />);
+    await user.type(screen.getByPlaceholderText('Search places...'), 'Tiananmen');
+    await user.keyboard('{Enter}');
+
+    expect(await screen.findByText('Amap')).toBeInTheDocument();
+    await user.click(screen.getByText('天安门'));
+    await user.click(screen.getByRole('button', { name: /^Add$/i }));
+
+    await waitFor(() => expect(onSave).toHaveBeenCalled());
+    expect(onSave.mock.calls[0][0].amap_poi_id).toBe('amap:B000A7BD6C');
+  });
+
+  // ── Category ─────────────────────────────────────────────────────────────────
+
+  it('FE-PLANNER-PLACEFORM-023: category selector renders options', () => {
+    // The component conditionally shows CustomSelect (showNewCategory=false) or text input
+    // Default state shows CustomSelect; no visible "+" trigger exists in current code
+    const cats = [buildCategory({ name: 'Beaches' }), buildCategory({ name: 'Museums' })];
+    render(<PlaceFormModal {...defaultProps} categories={cats} />);
+    // The "No category" placeholder text from CustomSelect should be visible
+    expect(screen.getByText(/No category/i)).toBeInTheDocument();
+  });
+
+  it('FE-PLANNER-PLACEFORM-023b: editing a place shows its assigned category, not the placeholder (#1134)', () => {
+    // Regression: form.category_id is a string but the option values were numbers,
+    // so CustomSelect's strict-equality match failed and the trigger fell back to
+    // "No category". With string option values the chosen category renders.
+    const cat = buildCategory({ name: 'Museums' });
+    const place = buildPlace({ name: 'Louvre', category_id: cat.id });
+    render(<PlaceFormModal {...defaultProps} place={place} categories={[cat]} />);
+    // Dropdown is closed, so the only place the category name can appear is the trigger.
+    expect(screen.getByText('Museums')).toBeInTheDocument();
+    expect(screen.queryByText(/No category/i)).not.toBeInTheDocument();
+  });
+
+  it('FE-PLANNER-PLACEFORM-024: onCategoryCreated is called when creating a category', async () => {
+    const user = userEvent.setup();
+    const onCategoryCreated = vi.fn().mockResolvedValue({ id: 99, name: 'Beaches', color: '#6366f1', icon: 'MapPin' });
+
+    render(<PlaceFormModal {...defaultProps} onCategoryCreated={onCategoryCreated} />);
+    expect(onCategoryCreated).not.toHaveBeenCalled();
+
+    // The plus next to the category select swaps in the inline name field.
+    await user.click(screen.getByRole('button', { name: 'New category' }));
+    await user.type(screen.getByPlaceholderText('Category name'), 'Beaches');
+    await user.click(screen.getByRole('button', { name: 'OK' }));
+
+    expect(onCategoryCreated).toHaveBeenCalledWith({ name: 'Beaches', color: '#6366f1', icon: 'MapPin' });
+    // The new category is selected and the inline field closes again.
+    await waitFor(() => expect(screen.queryByPlaceholderText('Category name')).not.toBeInTheDocument());
+  });
+
+  it('FE-PLANNER-PLACEFORM-024b: an empty category name does not call onCategoryCreated', async () => {
+    const user = userEvent.setup();
+    const onCategoryCreated = vi.fn();
+
+    render(<PlaceFormModal {...defaultProps} onCategoryCreated={onCategoryCreated} />);
+    await user.click(screen.getByRole('button', { name: 'New category' }));
+    await user.click(screen.getByRole('button', { name: 'OK' }));
+
+    expect(onCategoryCreated).not.toHaveBeenCalled();
+
+    const inlineRow = screen.getByPlaceholderText('Category name').parentElement!;
+    await user.click(within(inlineRow).getByRole('button', { name: 'Cancel' }));
+    expect(screen.queryByPlaceholderText('Category name')).not.toBeInTheDocument();
+  });
+
+  // ── Time section (edit mode only) ────────────────────────────────────────────
+
+  it('FE-PLANNER-PLACEFORM-025: time section is NOT shown in create mode', () => {
+    render(<PlaceFormModal {...defaultProps} place={null} />);
+    // English labels are 'Start' and 'End' (places.startTime / places.endTime)
+    expect(screen.queryByText(/^Start$/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/^End$/i)).not.toBeInTheDocument();
+    // Also verify no time pickers rendered
+    expect(screen.queryByTestId('time-picker')).not.toBeInTheDocument();
+  });
+
+  it('FE-PLANNER-PLACEFORM-026: time section is hidden in edit mode when no assignment is in context', () => {
+    // Times are per day-assignment; editing a pool place with no day in context
+    // (assignmentId null) hides the fields, which otherwise would not persist (#1247)
+    const place = buildPlace({ name: 'Test' });
+    render(<PlaceFormModal {...defaultProps} place={place} assignmentId={null} />);
+    expect(screen.queryByTestId('time-picker')).not.toBeInTheDocument();
+  });
+
+  it('FE-PLANNER-PLACEFORM-026b: time section IS shown when an assignment is in context', () => {
+    const place = buildPlace({ name: 'Test', place_time: '09:00', end_time: '10:00' });
+    const assignment = buildAssignment({ id: 10, day_id: 5, place });
+    render(<PlaceFormModal {...defaultProps} place={place} assignmentId={10} dayAssignments={[assignment]} />);
+    expect(screen.getAllByTestId('time-picker').length).toBeGreaterThanOrEqual(2);
+  });
+
+  it('FE-PLANNER-PLACEFORM-026c: hydrates Start/End from the assignment when the pool place lacks times (#1247)', () => {
+    // The pool Place carries no times — they live on the day-assignment. Opening the
+    // editor with an assignmentId must hydrate the fields from assignment.place, not
+    // the (timeless) pool place that the Places panel passes in.
+    const poolPlace = buildPlace({ id: 7, name: 'Museum' });
+    const assignmentPlace = buildPlace({ id: 7, name: 'Museum', place_time: '20:20', end_time: '20:34' });
+    const assignment = buildAssignment({ id: 42, day_id: 3, place: assignmentPlace });
+    render(<PlaceFormModal {...defaultProps} place={poolPlace} assignmentId={42} dayAssignments={[assignment]} />);
+    expect(screen.getByDisplayValue('20:20')).toBeInTheDocument();
+    expect(screen.getByDisplayValue('20:34')).toBeInTheDocument();
+  });
+
+  it('FE-PLANNER-PLACEFORM-086: on a road trip the End says the drive leaves at it', () => {
+    const place = buildPlace({ name: 'Test', place_time: '09:00', end_time: '14:00' });
+    const assignment = buildAssignment({ id: 10, day_id: 5, place });
+    render(<PlaceFormModal {...defaultProps} place={place} assignmentId={10} dayAssignments={[assignment]} roadtripActive />);
+    expect(screen.getByText('On the road trip, the drive leaves at this time.')).toBeInTheDocument();
+  });
+
+  it('FE-PLANNER-PLACEFORM-087: in Days the End stays a plain label', () => {
+    const place = buildPlace({ name: 'Test', place_time: '09:00', end_time: '14:00' });
+    const assignment = buildAssignment({ id: 10, day_id: 5, place });
+    render(<PlaceFormModal {...defaultProps} place={place} assignmentId={10} dayAssignments={[assignment]} />);
+    expect(screen.queryByText('On the road trip, the drive leaves at this time.')).not.toBeInTheDocument();
+  });
+
+  it('FE-PLANNER-PLACEFORM-027: end-before-start error disables submit', () => {
+    // Build an assignment whose place has end_time before place_time
+    const place = buildPlace({ name: 'Test', place_time: '14:00', end_time: '13:00' });
+    const assignment = buildAssignment({ id: 11, day_id: 5, place });
+    render(<PlaceFormModal {...defaultProps} place={place} assignmentId={11} dayAssignments={[assignment]} />);
+
+    // hasTimeError = true → submit button disabled
+    const submitBtn = screen.getByRole('button', { name: /^Update$/i });
+    expect(submitBtn).toBeDisabled();
+  });
+
+  it('FE-PLANNER-PLACEFORM-028: time collision warning appears when assignments overlap', () => {
+    // Create an assignment for the "current" place being edited
+    const currentPlace = buildPlace({ name: 'My Event', place_time: '12:30', end_time: '13:30' });
+    const conflictingPlace = buildPlace({ name: 'Other Event', place_time: '13:00', end_time: '14:00' });
+
+    const currentAssignment = buildAssignment({ id: 10, day_id: 5, place: currentPlace });
+    const otherAssignment = buildAssignment({ id: 20, day_id: 5, place: conflictingPlace });
+
+    render(
+      <PlaceFormModal
+        {...defaultProps}
+        place={currentPlace}
+        assignmentId={10}
+        dayAssignments={[currentAssignment, otherAssignment]}
+      />,
+    );
+
+    // English translation: 'places.timeCollision' = 'Time overlap with:'
+    expect(screen.getByText(/Time overlap with:/i)).toBeInTheDocument();
+  });
+
+  // ── File attachments ──────────────────────────────────────────────────────────
+
+  it('FE-PLANNER-PLACEFORM-029: file attachment section shown when canUploadFiles=true', () => {
+    // Default: permissions={} → not configured → allow → canUploadFiles=true
+    render(<PlaceFormModal {...defaultProps} />);
+    expect(screen.getByText('Attach')).toBeInTheDocument();
+  });
+
+  it('FE-PLANNER-PLACEFORM-030: file attachment section hidden when canUploadFiles=false', () => {
+    // Set file_upload to 'admin' level; non-admin user cannot upload
+    seedStore(usePermissionsStore, { permissions: { file_upload: 'admin' } });
+    render(<PlaceFormModal {...defaultProps} />);
+    expect(screen.queryByText('Attach')).not.toBeInTheDocument();
+  });
+
+  it('FE-PLANNER-PLACEFORM-031: pending files list shows file names after adding', async () => {
+    render(<PlaceFormModal {...defaultProps} />);
+    const fileInput = document.querySelector('input[type="file"][multiple]') as HTMLInputElement;
+    expect(fileInput).toBeTruthy();
+
+    const file = new File(['x'], 'photo.jpg', { type: 'image/jpeg' });
+    fireEvent.change(fileInput, { target: { files: [file] } });
+
+    await screen.findByText('photo.jpg');
+  });
+
+  it('FE-PLANNER-PLACEFORM-032: removing a pending file removes it from the list', async () => {
+    const user = userEvent.setup();
+    render(<PlaceFormModal {...defaultProps} />);
+    const fileInput = document.querySelector('input[type="file"][multiple]') as HTMLInputElement;
+
+    const file = new File(['x'], 'remove-me.jpg', { type: 'image/jpeg' });
+    fireEvent.change(fileInput, { target: { files: [file] } });
+    await screen.findByText('remove-me.jpg');
+
+    // The X button is inside the file item's container div
+    const fileItem = screen.getByText('remove-me.jpg').closest('div.flex') as HTMLElement;
+    const removeBtn = within(fileItem).getByRole('button');
+    await user.click(removeBtn);
+
+    expect(screen.queryByText('remove-me.jpg')).not.toBeInTheDocument();
+  });
+
+  // ── Submit ────────────────────────────────────────────────────────────────────
+
+  it('FE-PLANNER-PLACEFORM-033: onSave receives parsed lat/lng as numbers', async () => {
+    const user = userEvent.setup();
+    const onSave = vi.fn().mockResolvedValue(undefined);
+
+    render(<PlaceFormModal {...defaultProps} onSave={onSave} />);
+    await user.type(screen.getByPlaceholderText(/e\.g\. Eiffel Tower/i), 'Notre Dame');
+
+    const latInput = screen.getByPlaceholderText(/Latitude/i);
+    await user.clear(latInput);
+    await user.type(latInput, '48.853');
+
+    await user.click(screen.getByRole('button', { name: /^Add$/i }));
+    await waitFor(() => expect(onSave).toHaveBeenCalled());
+    expect(onSave).toHaveBeenCalledWith(expect.objectContaining({ lat: 48.853 }));
+  });
+
+  it('FE-PLANNER-PLACEFORM-034: onSave error shows toast', async () => {
+    const addToast = vi.fn();
+    window.__addToast = addToast;
+
+    const user = userEvent.setup();
+    const onSave = vi.fn().mockRejectedValue(new Error('Server error'));
+
+    render(<PlaceFormModal {...defaultProps} onSave={onSave} />);
+    await user.type(screen.getByPlaceholderText(/e\.g\. Eiffel Tower/i), 'Notre Dame');
+    await user.click(screen.getByRole('button', { name: /^Add$/i }));
+
+    await waitFor(() => {
+      expect(addToast).toHaveBeenCalledWith('Server error', 'error', undefined);
+    });
+
+    delete window.__addToast;
+  });
+
+  it('FE-PLANNER-PLACEFORM-035: save button shows "Saving..." while saving', async () => {
+    const user = userEvent.setup();
+    const onSave = vi.fn().mockReturnValue(new Promise(() => {})); // never resolves
+
+    render(<PlaceFormModal {...defaultProps} onSave={onSave} />);
+    await user.type(screen.getByPlaceholderText(/e\.g\. Eiffel Tower/i), 'Notre Dame');
+    await user.click(screen.getByRole('button', { name: /^Add$/i }));
+
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: /saving/i })).toBeInTheDocument();
+    });
+  });
+
+  it('FE-PLANNER-PLACEFORM-036: lat/lng paste splits "48.8566, 2.3522" into lat and lng fields', () => {
+    render(<PlaceFormModal {...defaultProps} />);
+    const latInput = screen.getByPlaceholderText(/Latitude/i);
+
+    fireEvent.paste(latInput, {
+      clipboardData: {
+        getData: () => '48.8566, 2.3522',
+      },
+    });
+
+    expect(screen.getByDisplayValue('48.8566')).toBeInTheDocument();
+    expect(screen.getByDisplayValue('2.3522')).toBeInTheDocument();
+  });
+
+  // ── Duplicate detection (#1152) ────────────────────────────────────────────
+
+  it('FE-PLANNER-PLACEFORM-037: a same-named place warns first and saves only on the second click', async () => {
+    const addToast = vi.fn();
+    window.__addToast = addToast;
+    const user = userEvent.setup();
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    seedStore(useTripStore, { trip: buildTrip({ id: 1 }), places: [buildPlace({ name: 'Louvre' })] });
+
+    render(<PlaceFormModal {...defaultProps} onSave={onSave} />);
+    // Case-insensitive match against the existing trip place.
+    await user.type(screen.getByPlaceholderText(/e\.g\. Eiffel Tower/i), '  louvre ');
+    await user.click(screen.getByRole('button', { name: /^Add$/i }));
+
+    expect(onSave).not.toHaveBeenCalled();
+    expect(addToast).toHaveBeenCalledWith(expect.stringContaining('Louvre'), 'warning', undefined);
+    // The button now reads as the explicit confirmation.
+    const addAnyway = await screen.findByRole('button', { name: /Add anyway/i });
+    await user.click(addAnyway);
+    await waitFor(() => expect(onSave).toHaveBeenCalled());
+
+    delete window.__addToast;
+  });
+
+  it('FE-PLANNER-PLACEFORM-038: near-identical coordinates count as a duplicate even under a new name', async () => {
+    const addToast = vi.fn();
+    window.__addToast = addToast;
+    const user = userEvent.setup();
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    seedStore(useTripStore, {
+      trip: buildTrip({ id: 1 }),
+      places: [buildPlace({ name: 'Tour Eiffel', lat: 48.8584, lng: 2.2945 })],
+    });
+
+    render(<PlaceFormModal {...defaultProps} onSave={onSave} />);
+    await user.type(screen.getByPlaceholderText(/e\.g\. Eiffel Tower/i), 'Iron Lady');
+    fireEvent.paste(screen.getByPlaceholderText(/Latitude/i), {
+      clipboardData: { getData: () => '48.85845, 2.29455' },
+    });
+    await user.click(screen.getByRole('button', { name: /^Add$/i }));
+
+    expect(onSave).not.toHaveBeenCalled();
+    expect(addToast).toHaveBeenCalledWith(expect.stringContaining('Tour Eiffel'), 'warning', undefined);
+
+    delete window.__addToast;
+  });
+
+  it('FE-PLANNER-PLACEFORM-039: a far-away place with a fresh name saves straight away', async () => {
+    const user = userEvent.setup();
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    seedStore(useTripStore, {
+      trip: buildTrip({ id: 1 }),
+      places: [buildPlace({ name: 'Tour Eiffel', lat: 48.8584, lng: 2.2945 })],
+    });
+
+    render(<PlaceFormModal {...defaultProps} onSave={onSave} />);
+    await user.type(screen.getByPlaceholderText(/e\.g\. Eiffel Tower/i), 'Colosseum');
+    fireEvent.paste(screen.getByPlaceholderText(/Latitude/i), {
+      clipboardData: { getData: () => '41.8902, 12.4922' },
+    });
+    await user.click(screen.getByRole('button', { name: /^Add$/i }));
+
+    await waitFor(() => expect(onSave).toHaveBeenCalled());
+    expect(onSave).toHaveBeenCalledWith(expect.objectContaining({ name: 'Colosseum', lat: 41.8902, lng: 12.4922 }));
+  });
+
+  it('FE-PLANNER-PLACEFORM-040: editing an existing place never triggers the duplicate guard', async () => {
+    const user = userEvent.setup();
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    const place = buildPlace({ name: 'Louvre' });
+    seedStore(useTripStore, { trip: buildTrip({ id: 1 }), places: [place] });
+
+    render(<PlaceFormModal {...defaultProps} place={place} onSave={onSave} />);
+    await user.click(screen.getByRole('button', { name: /^Update$/i }));
+    await waitFor(() => expect(onSave).toHaveBeenCalled());
+  });
+
+  it('FE-PLANNER-PLACEFORM-041: an empty name is rejected with the name-required toast', async () => {
+    const addToast = vi.fn();
+    window.__addToast = addToast;
+    const user = userEvent.setup();
+    const onSave = vi.fn();
+
+    render(<PlaceFormModal {...defaultProps} onSave={onSave} />);
+    await user.click(screen.getByRole('button', { name: /^Add$/i }));
+
+    expect(onSave).not.toHaveBeenCalled();
+    expect(addToast).toHaveBeenCalledWith('Please enter a name', 'error', undefined);
+
+    delete window.__addToast;
+  });
+
+  // ── Location bias from the trip's existing places ───────────────────────────
+
+  it('FE-PLANNER-PLACEFORM-042: a tight cluster of trip places biases the autocomplete bounding box', async () => {
+    const user = userEvent.setup();
+    const bodies: Record<string, unknown>[] = [];
+    server.use(
+      http.post('/api/maps/autocomplete', async ({ request }) => {
+        bodies.push((await request.json()) as Record<string, unknown>);
+        return HttpResponse.json({ suggestions: [] });
+      }),
+    );
+    seedStore(useTripStore, {
+      trip: buildTrip({ id: 1 }),
+      places: [
+        buildPlace({ lat: 48.85, lng: 2.34 }),
+        buildPlace({ lat: 48.87, lng: 2.37 }),
+        // Garbage coordinates must be skipped, not poison the box.
+        buildPlace({ lat: 'x' as unknown as number, lng: 'y' as unknown as number }),
+      ],
+    });
+
+    render(<PlaceFormModal {...defaultProps} />);
+    await user.type(screen.getByPlaceholderText('Search places...'), 'Eiffel');
+
+    await waitFor(() => expect(bodies).toHaveLength(1));
+    expect(bodies[0].locationBias).toEqual({
+      low: { lat: 48.85, lng: 2.34 },
+      high: { lat: 48.87, lng: 2.37 },
+    });
+  });
+
+  it('FE-PLANNER-PLACEFORM-043: places spread over more than 500 km send no location bias', async () => {
+    const user = userEvent.setup();
+    const bodies: Record<string, unknown>[] = [];
+    server.use(
+      http.post('/api/maps/autocomplete', async ({ request }) => {
+        bodies.push((await request.json()) as Record<string, unknown>);
+        return HttpResponse.json({ suggestions: [] });
+      }),
+    );
+    seedStore(useTripStore, {
+      trip: buildTrip({ id: 1 }),
+      places: [buildPlace({ lat: 48.85, lng: 2.34 }), buildPlace({ lat: 41.89, lng: 12.49 })],
+    });
+
+    render(<PlaceFormModal {...defaultProps} />);
+    await user.type(screen.getByPlaceholderText('Search places...'), 'Eiffel');
+
+    await waitFor(() => expect(bodies).toHaveLength(1));
+    expect(bodies[0].locationBias).toBeUndefined();
+  });
+
+  it('FE-PLANNER-PLACEFORM-043b: trip places with unusable coordinates yield no bias at all', async () => {
+    const user = userEvent.setup();
+    const bodies: Record<string, unknown>[] = [];
+    server.use(
+      http.post('/api/maps/autocomplete', async ({ request }) => {
+        bodies.push((await request.json()) as Record<string, unknown>);
+        return HttpResponse.json({ suggestions: [] });
+      }),
+    );
+    seedStore(useTripStore, {
+      trip: buildTrip({ id: 1 }),
+      places: [buildPlace({ lat: 'x' as unknown as number, lng: 'y' as unknown as number })],
+    });
+
+    render(<PlaceFormModal {...defaultProps} />);
+    await user.type(screen.getByPlaceholderText('Search places...'), 'Eiffel');
+
+    await waitFor(() => expect(bodies).toHaveLength(1));
+    expect(bodies[0].locationBias).toBeUndefined();
+  });
+
+  it('FE-PLANNER-PLACEFORM-045b: focusing with a Google Maps URL in the box fetches no suggestions', async () => {
+    const user = userEvent.setup();
+    let calls = 0;
+    server.use(
+      http.post('/api/maps/autocomplete', () => {
+        calls += 1;
+        return HttpResponse.json({ suggestions: [] });
+      }),
+    );
+
+    render(<PlaceFormModal {...defaultProps} />);
+    const searchInput = screen.getByPlaceholderText('Search places...');
+    await user.type(searchInput, 'https://maps.google.com/maps?q=x');
+    fireEvent.focus(searchInput);
+
+    await waitFor(() => expect(screen.queryByText('Paris, France')).not.toBeInTheDocument());
+    expect(calls).toBe(0);
+  });
+
+  it('FE-PLANNER-PLACEFORM-044: a failing autocomplete clears the dropdown instead of surfacing an error', async () => {
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const addToast = vi.fn();
+    window.__addToast = addToast;
+    const user = userEvent.setup();
+    server.use(http.post('/api/maps/autocomplete', () => HttpResponse.json({ error: 'boom' }, { status: 500 })));
+
+    render(<PlaceFormModal {...defaultProps} />);
+    await user.type(screen.getByPlaceholderText('Search places...'), 'Eiffel');
+
+    await waitFor(() => expect(consoleError).toHaveBeenCalledWith('Autocomplete failed:', expect.anything()));
+    expect(addToast).not.toHaveBeenCalled();
+
+    consoleError.mockRestore();
+    delete window.__addToast;
+  });
+
+  it('FE-PLANNER-PLACEFORM-045: re-focusing the search box refetches when the dropdown is empty', async () => {
+    const user = userEvent.setup();
+    let calls = 0;
+    server.use(
+      http.post('/api/maps/autocomplete', () => {
+        calls += 1;
+        return HttpResponse.json({ suggestions: [] });
+      }),
+    );
+
+    render(<PlaceFormModal {...defaultProps} />);
+    const searchInput = screen.getByPlaceholderText('Search places...');
+    await user.type(searchInput, 'Eiffel');
+    await waitFor(() => expect(calls).toBe(1));
+
+    fireEvent.focus(searchInput);
+    await waitFor(() => expect(calls).toBe(2));
+  });
+
+  // ── Maps search / Google Maps URL resolve ──────────────────────────────────
+
+  it('FE-PLANNER-PLACEFORM-046: clicking search with an empty box makes no request', async () => {
+    const user = userEvent.setup();
+    let calls = 0;
+    server.use(
+      http.post('/api/maps/search', () => {
+        calls += 1;
+        return HttpResponse.json({ places: [] });
+      }),
+    );
+
+    render(<PlaceFormModal {...defaultProps} />);
+    const searchInput = screen.getByPlaceholderText('Search places...');
+    const searchBtn = within(searchInput.closest('.flex') as HTMLElement).getByRole('button');
+    await user.click(searchBtn);
+
+    expect(calls).toBe(0);
+  });
+
+  it('FE-PLANNER-PLACEFORM-047: pasting a Google Maps URL resolves it straight into the form', async () => {
+    const addToast = vi.fn();
+    window.__addToast = addToast;
+    const user = userEvent.setup();
+    server.use(
+      http.post('/api/maps/resolve-url', () =>
+        HttpResponse.json({ name: 'Notre-Dame', address: 'Parvis Notre-Dame, Paris', lat: 48.8530, lng: 2.3499, google_ftid: 'ftid-1' }),
+      ),
+    );
+
+    render(<PlaceFormModal {...defaultProps} />);
+    await user.type(screen.getByPlaceholderText('Search places...'), 'https://maps.google.com/maps?q=notredame');
+    await user.keyboard('{Enter}');
+
+    expect(await screen.findByDisplayValue('Notre-Dame')).toBeInTheDocument();
+    expect(screen.getByDisplayValue('48.853')).toBeInTheDocument();
+    expect(screen.getByDisplayValue('Parvis Notre-Dame, Paris')).toBeInTheDocument();
+    // The URL is consumed, so the search box empties out.
+    expect(screen.getByPlaceholderText('Search places...')).toHaveValue('');
+    expect(addToast).toHaveBeenCalledWith('Place imported from URL', 'success', undefined);
+
+    delete window.__addToast;
+  });
+
+  it('FE-PLANNER-PLACEFORM-048: an unresolvable Google Maps URL falls through to the text search', async () => {
+    const user = userEvent.setup();
+    server.use(
+      http.post('/api/maps/resolve-url', () => HttpResponse.json({ name: 'Notre-Dame', lat: null, lng: null })),
+      http.post('/api/maps/search', () =>
+        HttpResponse.json({ places: [{ name: 'Notre-Dame de Paris', address: 'Paris', lat: '48.853', lng: '2.3499' }] }),
+      ),
+    );
+
+    render(<PlaceFormModal {...defaultProps} />);
+    await user.type(screen.getByPlaceholderText('Search places...'), 'https://maps.google.com/maps?q=notredame');
+    await user.keyboard('{Enter}');
+
+    expect(await screen.findByText('Notre-Dame de Paris')).toBeInTheDocument();
+  });
+
+  // ── Autocomplete keyboard navigation ───────────────────────────────────────
+
+  const twoSuggestions = () =>
+    http.post('/api/maps/autocomplete', () =>
+      HttpResponse.json({
+        suggestions: [
+          { placeId: 'node:1', mainText: 'Eiffel Tower', secondaryText: 'Paris, France' },
+          { placeId: 'node:2', mainText: 'Eiffel Museum', secondaryText: 'Berlin, Germany' },
+        ],
+      }),
+    );
+
+  it('FE-PLANNER-PLACEFORM-049: ArrowDown/ArrowUp move the highlight and Enter picks the highlighted suggestion', async () => {
+    const user = userEvent.setup();
+    server.use(
+      twoSuggestions(),
+      http.get('/api/maps/details/:placeId', () =>
+        HttpResponse.json({ place: { name: 'Eiffel Museum', address: 'Berlin', lat: 52.52, lng: 13.405 } }),
+      ),
+    );
+
+    render(<PlaceFormModal {...defaultProps} />);
+    const searchInput = screen.getByPlaceholderText('Search places...');
+    await user.type(searchInput, 'Eiffel');
+    await screen.findByText('Paris, France');
+
+    // -1 → wraps to the last entry, then ArrowDown wraps back to the first.
+    await user.keyboard('{ArrowUp}');
+    expect(screen.getByText('Eiffel Museum').closest('button')).toHaveClass('bg-surface-tertiary');
+    await user.keyboard('{ArrowDown}');
+    expect(screen.getByText('Eiffel Tower').closest('button')).toHaveClass('bg-surface-tertiary');
+    await user.keyboard('{ArrowDown}');
+    expect(screen.getByText('Eiffel Museum').closest('button')).toHaveClass('bg-surface-tertiary');
+
+    await user.keyboard('{Enter}');
+    expect(await screen.findByDisplayValue('52.52')).toBeInTheDocument();
+    expect(screen.getByDisplayValue('13.405')).toBeInTheDocument();
+  });
+
+  it('FE-PLANNER-PLACEFORM-050: Escape closes the dropdown without searching', async () => {
+    const user = userEvent.setup();
+    let searches = 0;
+    server.use(
+      twoSuggestions(),
+      http.post('/api/maps/search', () => {
+        searches += 1;
+        return HttpResponse.json({ places: [] });
+      }),
+    );
+
+    render(<PlaceFormModal {...defaultProps} />);
+    await user.type(screen.getByPlaceholderText('Search places...'), 'Eiffel');
+    await screen.findByText('Paris, France');
+
+    await user.keyboard('{Escape}');
+    expect(screen.queryByText('Paris, France')).not.toBeInTheDocument();
+    expect(searches).toBe(0);
+  });
+
+  it('FE-PLANNER-PLACEFORM-051: Enter with nothing highlighted closes the dropdown and runs the full search', async () => {
+    const user = userEvent.setup();
+    server.use(
+      twoSuggestions(),
+      http.post('/api/maps/search', () =>
+        HttpResponse.json({ places: [{ name: 'Eiffel Tower', address: 'Champ de Mars', lat: '48.8584', lng: '2.2945' }] }),
+      ),
+    );
+
+    render(<PlaceFormModal {...defaultProps} />);
+    await user.type(screen.getByPlaceholderText('Search places...'), 'Eiffel');
+    await screen.findByText('Paris, France');
+
+    await user.keyboard('{Enter}');
+    expect(await screen.findByText('Champ de Mars')).toBeInTheDocument();
+  });
+
+  it('FE-PLANNER-PLACEFORM-052: when both details and the search fallback fail the query is restored', async () => {
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const addToast = vi.fn();
+    window.__addToast = addToast;
+    const user = userEvent.setup();
+    server.use(
+      twoSuggestions(),
+      http.get('/api/maps/details/:placeId', () => HttpResponse.json({ error: 'nope' }, { status: 500 })),
+      http.post('/api/maps/search', () => HttpResponse.json({ error: 'nope' }, { status: 500 })),
+    );
+
+    render(<PlaceFormModal {...defaultProps} />);
+    await user.type(screen.getByPlaceholderText('Search places...'), 'Eiffel');
+    await user.click(await screen.findByText('Paris, France'));
+
+    await waitFor(() =>
+      expect(addToast).toHaveBeenCalledWith(expect.stringMatching(/Place search failed|nope/i), 'error', undefined),
+    );
+    // The typed query comes back so the user can retry instead of starting over.
+    await waitFor(() => expect(screen.getByPlaceholderText('Search places...')).toHaveValue('Eiffel'));
+
+    consoleError.mockRestore();
+    delete window.__addToast;
+  });
+
+  it('FE-PLANNER-PLACEFORM-053: a Google place id shared with an existing trip place is flagged as duplicate', async () => {
+    const addToast = vi.fn();
+    window.__addToast = addToast;
+    const user = userEvent.setup();
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    seedStore(useTripStore, {
+      trip: buildTrip({ id: 1 }),
+      places: [buildPlace({ name: 'Already Here', google_place_id: 'gp-1', lat: null, lng: null })],
+    });
+    server.use(
+      http.post('/api/maps/search', () =>
+        HttpResponse.json({ places: [{ name: 'Same Spot', address: 'Somewhere', lat: '10', lng: '10', google_place_id: 'gp-1' }] }),
+      ),
+    );
+
+    render(<PlaceFormModal {...defaultProps} onSave={onSave} />);
+    await user.type(screen.getByPlaceholderText('Search places...'), 'same spot');
+    await user.keyboard('{Enter}');
+    await user.click(await screen.findByText('Same Spot'));
+
+    await user.click(screen.getByRole('button', { name: /^Add$/i }));
+    expect(onSave).not.toHaveBeenCalled();
+    expect(addToast).toHaveBeenCalledWith(expect.stringContaining('Already Here'), 'warning', undefined);
+
+    delete window.__addToast;
+  });
+
+  // ── Paste-to-attach ────────────────────────────────────────────────────────
+
+  function pasteItems(target: Element, items: { type: string; file: File | null }[]) {
+    fireEvent.paste(target, {
+      clipboardData: {
+        items: items.map(i => ({ type: i.type, getAsFile: () => i.file })),
+      },
+    });
+  }
+
+  it('FE-PLANNER-PLACEFORM-054: pasting an image attaches it as a pending file', () => {
+    render(<PlaceFormModal {...defaultProps} />);
+    const form = document.querySelector('form') as HTMLFormElement;
+    pasteItems(form, [
+      { type: 'text/plain', file: null },
+      { type: 'image/png', file: new File(['x'], 'screenshot.png', { type: 'image/png' }) },
+    ]);
+    expect(screen.getByText('screenshot.png')).toBeInTheDocument();
+  });
+
+  it('FE-PLANNER-PLACEFORM-057: a prefilled place drives the detail column, not the previous one', () => {
+    // A POI tapped on the map opens the dialog through prefillCoords, never
+    // through the search handler — the column used to keep the last place.
+    const { rerender } = render(
+      <PlaceFormModal {...defaultProps} prefillCoords={{ lat: 53.55, lng: 9.99, name: 'Helgas Kitchen', osm_id: 'node:1' }} />,
+    );
+    expect(screen.getByDisplayValue('Helgas Kitchen')).toBeInTheDocument();
+
+    rerender(
+      <PlaceFormModal {...defaultProps} prefillCoords={{ lat: 50.9, lng: 6.96, name: 'Museum Ludwig', osm_id: 'node:2' }} />,
+    );
+    expect(screen.getByDisplayValue('Museum Ludwig')).toBeInTheDocument();
+    expect(screen.queryByDisplayValue('Helgas Kitchen')).not.toBeInTheDocument();
+  });
+
+  it('FE-PLANNER-PLACEFORM-055: pasting plain text alone attaches nothing', () => {
+    render(<PlaceFormModal {...defaultProps} />);
+    const form = document.querySelector('form') as HTMLFormElement;
+    pasteItems(form, [{ type: 'text/plain', file: null }]);
+    // The list only renders once something is attached, so its absence is the
+    // assertion (this used to lean on the clipboard hint, which is gone).
+    expect(screen.queryByTestId('pending-files')).not.toBeInTheDocument();
+
+    // Counter-check, so the assertion above cannot pass on a missing testid:
+    // a real file does show up in that list.
+    pasteItems(form, [{ type: 'image/png', file: new File(['x'], 'shot.png', { type: 'image/png' }) }]);
+    expect(screen.getByTestId('pending-files')).toBeInTheDocument();
+  });
+
+  it('FE-PLANNER-PLACEFORM-056: paste is ignored entirely without upload permission', () => {
+    seedStore(usePermissionsStore, { permissions: { file_upload: 'admin' } });
+    render(<PlaceFormModal {...defaultProps} />);
+    const form = document.querySelector('form') as HTMLFormElement;
+    pasteItems(form, [{ type: 'application/pdf', file: new File(['x'], 'ticket.pdf', { type: 'application/pdf' }) }]);
+    expect(screen.queryByText('ticket.pdf')).not.toBeInTheDocument();
+  });
+
+  it('FE-PLANNER-PLACEFORM-057: the Attach button opens the hidden file input', async () => {
+    const user = userEvent.setup();
+    render(<PlaceFormModal {...defaultProps} />);
+    const fileInput = document.querySelector('input[type="file"][multiple]') as HTMLInputElement;
+    const clickSpy = vi.spyOn(fileInput, 'click').mockImplementation(() => {});
+    await user.click(screen.getByRole('button', { name: /Attach/i }));
+    expect(clickSpy).toHaveBeenCalled();
+    clickSpy.mockRestore();
+  });
+
+  // ── Remaining form fields ──────────────────────────────────────────────────
+
+  it('FE-PLANNER-PLACEFORM-058: description, notes, website and category all reach the save payload', async () => {
+    const user = userEvent.setup();
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    const cat = buildCategory({ name: 'Museums' });
+
+    render(<PlaceFormModal {...defaultProps} onSave={onSave} categories={[cat]} />);
+    await user.type(screen.getByPlaceholderText(/e\.g\. Eiffel Tower/i), 'Louvre');
+    await user.type(screen.getByPlaceholderText(/Short description/i), 'Glass pyramid');
+    await user.type(screen.getByPlaceholderText(/Personal notes/i), 'Book ahead');
+    await user.type(screen.getByPlaceholderText(/Street, City, Country/i), 'Rue de Rivoli');
+    await user.type(screen.getByPlaceholderText(/Longitude/i), '2.3376');
+    await user.type(screen.getByPlaceholderText('https://...'), 'https://louvre.fr');
+    // Pick the category through the CustomSelect trigger.
+    await user.click(screen.getByText(/No category/i));
+    await user.click(screen.getByRole('button', { name: 'Museums' }));
+
+    await user.click(screen.getByRole('button', { name: /^Add$/i }));
+    await waitFor(() => expect(onSave).toHaveBeenCalled());
+    expect(onSave).toHaveBeenCalledWith(
+      expect.objectContaining({
+        name: 'Louvre',
+        description: 'Glass pyramid',
+        notes: 'Book ahead',
+        address: 'Rue de Rivoli',
+        lng: 2.3376,
+        website: 'https://louvre.fr',
+        category_id: String(cat.id),
+      }),
+    );
+  });
+
+  it('FE-PLANNER-PLACEFORM-059: the Collections column only appears on desktop with the addon enabled', () => {
+    seedStore(useAddonStore, {
+      addons: [{ id: 'collections', name: 'Collections', type: 'collections', icon: '', enabled: true }],
+      loaded: true,
+    });
+    const { unmount } = render(<PlaceFormModal {...defaultProps} isMobile={false} />);
+    expect(screen.getByPlaceholderText(/Search your saved places/i)).toBeInTheDocument();
+    unmount();
+
+    render(<PlaceFormModal {...defaultProps} isMobile />);
+    expect(screen.queryByPlaceholderText(/Search your saved places/i)).not.toBeInTheDocument();
+  });
+
+  // ── Time section edge cases ────────────────────────────────────────────────
+
+  it('FE-PLANNER-PLACEFORM-060: editing the times through the pickers updates the save payload', async () => {
+    const user = userEvent.setup();
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    const place = buildPlace({ name: 'Museum' });
+    const assignment = buildAssignment({ id: 12, day_id: 4, place });
+
+    render(<PlaceFormModal {...defaultProps} place={place} assignmentId={12} dayAssignments={[assignment]} onSave={onSave} />);
+    const [start, end] = screen.getAllByTestId('time-picker');
+    fireEvent.change(start, { target: { value: '09:00' } });
+    fireEvent.change(end, { target: { value: '10:30' } });
+
+    await user.click(screen.getByRole('button', { name: /^Update$/i }));
+    await waitFor(() => expect(onSave).toHaveBeenCalled());
+    expect(onSave).toHaveBeenCalledWith(expect.objectContaining({ place_time: '09:00', end_time: '10:30' }));
+  });
+
+  it('FE-PLANNER-PLACEFORM-061: an assignment id that is not in the day list reports no collisions', () => {
+    const place = buildPlace({ name: 'Ghost', place_time: '12:00', end_time: '13:00' });
+    render(<PlaceFormModal {...defaultProps} place={place} assignmentId={999} dayAssignments={[]} />);
+    expect(screen.getAllByTestId('time-picker').length).toBeGreaterThanOrEqual(2);
+    expect(screen.queryByText(/Time overlap with:/i)).not.toBeInTheDocument();
+  });
+
+  it('FE-PLANNER-PLACEFORM-062: collisions ignore other days and timeless assignments', () => {
+    const current = buildPlace({ name: 'My Event', place_time: '12:30', end_time: '13:30' });
+    const otherDay = buildPlace({ name: 'Other Day Event', place_time: '13:00', end_time: '14:00' });
+    const timeless = buildPlace({ name: 'Timeless Event' });
+    const overlapping = buildPlace({ name: 'Overlapping Event', place_time: '13:00', end_time: '14:00' });
+
+    render(
+      <PlaceFormModal
+        {...defaultProps}
+        place={current}
+        assignmentId={10}
+        dayAssignments={[
+          buildAssignment({ id: 10, day_id: 5, place: current }),
+          buildAssignment({ id: 20, day_id: 6, place: otherDay }),
+          buildAssignment({ id: 30, day_id: 5, place: timeless }),
+          buildAssignment({ id: 40, day_id: 5, place: overlapping }),
+        ]}
+      />,
+    );
+
+    const warning = screen.getByText(/Time overlap with:/i).closest('div') as HTMLElement;
+    expect(warning).toHaveTextContent('Overlapping Event');
+    expect(warning).not.toHaveTextContent('Other Day Event');
+    expect(warning).not.toHaveTextContent('Timeless Event');
+  });
+});
+
+// FE-W5PFM-001 to FE-W5PFM-014 — the remaining prefill, response-shape and
+// error branches of the place form.
+describe('PlaceFormModal remaining branches', () => {
+  it('FE-W5PFM-001: an existing place with empty fields opens on the defaults', () => {
+    const place = buildPlace({
+      name: null, description: null, address: null, lat: null, lng: null,
+      category_id: null, notes: null, transport_mode: null, website: null,
+    });
+    render(<PlaceFormModal {...defaultProps} place={place} />);
+
+    expect(screen.getByPlaceholderText(/e\.g\. Eiffel Tower/i)).toHaveValue('');
+    expect(screen.getByPlaceholderText(/Latitude/i)).toHaveValue('');
+    expect(screen.getByPlaceholderText(/Longitude/i)).toHaveValue('');
+    expect(screen.getByPlaceholderText('https://...')).toHaveValue('');
+  });
+
+  it('FE-W5PFM-002: prefilled coordinates without a name only fill the coordinates', () => {
+    render(<PlaceFormModal {...defaultProps} prefillCoords={{ lat: 48.8584, lng: 2.2945 }} />);
+
+    expect(screen.getByPlaceholderText(/Latitude/i)).toHaveValue('48.8584');
+    expect(screen.getByPlaceholderText(/Longitude/i)).toHaveValue('2.2945');
+    expect(screen.getByPlaceholderText(/e\.g\. Eiffel Tower/i)).toHaveValue('');
+    expect(screen.getByPlaceholderText(/Street, City, Country/i)).toHaveValue('');
+  });
+
+  it('FE-W5PFM-003: an autocomplete response without a suggestions array shows no dropdown', async () => {
+    const user = userEvent.setup();
+    server.use(http.post('/api/maps/autocomplete', () => HttpResponse.json({})));
+
+    render(<PlaceFormModal {...defaultProps} />);
+    await user.type(screen.getByPlaceholderText('Search places...'), 'Eiffel');
+
+    await waitFor(() => expect(screen.queryByRole('listbox')).not.toBeInTheDocument());
+    expect(screen.queryByText('Eiffel Tower, Paris')).not.toBeInTheDocument();
+  });
+
+  it('FE-W5PFM-004: an aborted autocomplete is swallowed without logging', async () => {
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const user = userEvent.setup();
+    const gate: { release?: () => void } = {};
+    let seen = 0;
+    server.use(
+      http.post('/api/maps/autocomplete', async () => {
+        seen += 1;
+        if (seen === 1) await new Promise<void>(res => { gate.release = res; });
+        return HttpResponse.json({
+          suggestions: [{ placeId: 'node:1', mainText: 'Eiffel Tower', secondaryText: 'Paris, France' }],
+        });
+      }),
+    );
+
+    render(<PlaceFormModal {...defaultProps} />);
+    const searchInput = screen.getByPlaceholderText('Search places...');
+    await user.type(searchInput, 'Eiff');
+    await waitFor(() => expect(seen).toBe(1));
+    // The second query aborts the still-open first one
+    await user.type(searchInput, 'el tower');
+    await waitFor(() => expect(seen).toBe(2));
+    gate.release?.();
+
+    expect(await screen.findByText('Paris, France')).toBeInTheDocument();
+    expect(screen.getAllByText('Eiffel Tower')).toHaveLength(1);
+    expect(consoleError).not.toHaveBeenCalledWith('Autocomplete failed:', expect.anything());
+    consoleError.mockRestore();
+  });
+
+  it('FE-W5PFM-005: a resolved URL without a name or address keeps the form values', async () => {
+    const user = userEvent.setup();
+    server.use(
+      http.post('/api/maps/resolve-url', () => HttpResponse.json({ lat: 48.853, lng: 2.3499 })),
+    );
+
+    render(<PlaceFormModal {...defaultProps} />);
+    await user.type(screen.getByPlaceholderText(/e\.g\. Eiffel Tower/i), 'Kept Name');
+    await user.type(screen.getByPlaceholderText('Search places...'), 'https://maps.google.com/maps?q=x');
+    await user.keyboard('{Enter}');
+
+    expect(await screen.findByDisplayValue('48.853')).toBeInTheDocument();
+    expect(screen.getByPlaceholderText(/e\.g\. Eiffel Tower/i)).toHaveValue('Kept Name');
+  });
+
+  it('FE-W5PFM-006: a search response without a places array renders no results', async () => {
+    const user = userEvent.setup();
+    server.use(http.post('/api/maps/search', () => HttpResponse.json({})));
+
+    render(<PlaceFormModal {...defaultProps} />);
+    await user.type(screen.getByPlaceholderText('Search places...'), 'nowhere');
+    await user.keyboard('{Enter}');
+
+    await waitFor(() => expect(screen.getByPlaceholderText('Search places...')).toHaveValue('nowhere'));
+    expect(screen.queryByRole('button', { name: /nowhere/i })).not.toBeInTheDocument();
+  });
+
+  it('FE-W5PFM-007: picking a bare search result leaves the typed fields alone', async () => {
+    const user = userEvent.setup();
+    server.use(
+      http.post('/api/maps/search', () => HttpResponse.json({ places: [{ name: 'Bare Result' }] })),
+    );
+
+    render(<PlaceFormModal {...defaultProps} />);
+    await user.type(screen.getByPlaceholderText(/Street, City, Country/i), 'Rue de Rivoli');
+    await user.type(screen.getByPlaceholderText('Search places...'), 'bare');
+    await user.keyboard('{Enter}');
+    await user.click(await screen.findByText('Bare Result'));
+
+    expect(screen.getByPlaceholderText(/e\.g\. Eiffel Tower/i)).toHaveValue('Bare Result');
+    expect(screen.getByPlaceholderText(/Street, City, Country/i)).toHaveValue('Rue de Rivoli');
+    expect(screen.getByPlaceholderText(/Latitude/i)).toHaveValue('');
+  });
+
+  it('FE-W5PFM-008: a place sharing only the name is flagged as a duplicate', async () => {
+    const addToast = vi.fn();
+    window.__addToast = addToast;
+    const user = userEvent.setup();
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    seedStore(useTripStore, { trip: buildTrip({ id: 1 }), places: [buildPlace({ name: 'Louvre', lat: null, lng: null })] });
+
+    render(<PlaceFormModal {...defaultProps} onSave={onSave} />);
+    await user.type(screen.getByPlaceholderText(/e\.g\. Eiffel Tower/i), 'louvre');
+    await user.click(screen.getByRole('button', { name: /^Add$/i }));
+
+    expect(onSave).not.toHaveBeenCalled();
+    expect(addToast).toHaveBeenCalledWith(expect.stringContaining('Louvre'), 'warning', undefined);
+
+    // The second click is the explicit confirmation
+    await user.click(screen.getByRole('button', { name: /Add anyway/i }));
+    await waitFor(() => expect(onSave).toHaveBeenCalled());
+
+    delete window.__addToast;
+  });
+
+  it('FE-W5PFM-009: a place sharing only the coordinates is flagged as a duplicate', async () => {
+    const addToast = vi.fn();
+    window.__addToast = addToast;
+    const user = userEvent.setup();
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    seedStore(useTripStore, { trip: buildTrip({ id: 1 }), places: [buildPlace({ name: null, lat: 48.8584, lng: 2.2945 })] });
+
+    render(<PlaceFormModal {...defaultProps} onSave={onSave} />);
+    await user.type(screen.getByPlaceholderText(/e\.g\. Eiffel Tower/i), 'Tour Eiffel');
+    await user.type(screen.getByPlaceholderText(/Latitude/i), '48.85841');
+    await user.type(screen.getByPlaceholderText(/Longitude/i), '2.29451');
+    await user.click(screen.getByRole('button', { name: /^Add$/i }));
+
+    expect(onSave).not.toHaveBeenCalled();
+    // the existing place has no name, so the warning falls back to the typed one
+    expect(addToast).toHaveBeenCalledWith(expect.stringContaining('Tour Eiffel'), 'warning', undefined);
+
+    delete window.__addToast;
+  });
+
+  it('FE-W5PFM-010: a rejected save without an Error surfaces the generic message', async () => {
+    const addToast = vi.fn();
+    window.__addToast = addToast;
+    const user = userEvent.setup();
+    const onSave = vi.fn().mockRejectedValue('nope');
+    const onClose = vi.fn();
+
+    render(<PlaceFormModal {...defaultProps} onSave={onSave} onClose={onClose} />);
+    await user.type(screen.getByPlaceholderText(/e\.g\. Eiffel Tower/i), 'Louvre');
+    await user.click(screen.getByRole('button', { name: /^Add$/i }));
+
+    await waitFor(() => expect(addToast).toHaveBeenCalledWith('Failed to save', 'error', undefined));
+    expect(onClose).not.toHaveBeenCalled();
+
+    delete window.__addToast;
+  });
+
+  it('FE-W5PFM-011: pasting a coordinate pair into latitude fills both fields', () => {
+    render(<PlaceFormModal {...defaultProps} />);
+    const lat = screen.getByPlaceholderText(/Latitude/i);
+
+    fireEvent.paste(lat, { clipboardData: { getData: () => ' 48.8584, 2.2945 ' } });
+    expect(screen.getByPlaceholderText(/Latitude/i)).toHaveValue('48.8584');
+    expect(screen.getByPlaceholderText(/Longitude/i)).toHaveValue('2.2945');
+  });
+
+  it('FE-W5PFM-012: pasting anything else into latitude is left to the input', () => {
+    render(<PlaceFormModal {...defaultProps} />);
+    const lat = screen.getByPlaceholderText(/Latitude/i);
+
+    fireEvent.paste(lat, { clipboardData: { getData: () => 'not a coordinate' } });
+    expect(screen.getByPlaceholderText(/Longitude/i)).toHaveValue('');
+  });
+
+  it('FE-W5PFM-013: a missing category list still renders the no-category option', () => {
+    render(<PlaceFormModal {...defaultProps} categories={null} />);
+
+    expect(screen.getByText(/No category/i)).toBeInTheDocument();
+  });
+
+  it('FE-W5PFM-014: an open-ended assignment collapses to a point in time', () => {
+    const current = buildPlace({ name: 'My Event', place_time: '11:30', end_time: '' });
+    const spanning = buildPlace({ name: 'Spanning Event', place_time: '11:00', end_time: '12:00' });
+    const earlier = buildPlace({ name: 'Earlier Event', place_time: '11:00', end_time: '' });
+
+    render(
+      <PlaceFormModal
+        {...defaultProps}
+        place={current}
+        assignmentId={10}
+        dayAssignments={[
+          buildAssignment({ id: 10, day_id: 5, place: current }),
+          buildAssignment({ id: 20, day_id: 5, place: spanning }),
+          buildAssignment({ id: 30, day_id: 5, place: earlier }),
+        ]}
+      />,
+    );
+
+    const warning = screen.getByText(/Time overlap with:/i).closest('div') as HTMLElement;
+    expect(warning).toHaveTextContent('Spanning Event');
+    expect(warning).not.toHaveTextContent('Earlier Event');
+  });
+
+  /**
+   * FE-PLANNER-PLACEFORM-063..068 — what a second pick may overwrite.
+   *
+   * Search Hamburg Airport, then Berlin Hauptbahnhof, and the airport's website
+   * was still in the field: `result.website || prev.website` cannot tell "the
+   * user typed this" from "the last result wrote this". Saving then gave the
+   * station the airport's website.
+   */
+  describe('picking a second place', () => {
+    const searchFor = async (user: ReturnType<typeof userEvent.setup>, place: Record<string, unknown>) => {
+      server.use(http.post('/api/maps/search', () => HttpResponse.json({ places: [place] })));
+      const searchInput = screen.getByPlaceholderText('Search places...');
+      await user.clear(searchInput);
+      await user.type(searchInput, String(place.name));
+      const searchRow = searchInput.closest('.flex') as HTMLElement;
+      await user.click(within(searchRow).getByRole('button', { name: 'Search' }));
+      await user.click(await screen.findByText(String(place.name)));
+    };
+
+    const AIRPORT = {
+      name: 'Hamburg Airport',
+      address: 'Hamburg',
+      lat: '53.6323',
+      lng: '10.0067',
+      website: 'https://www.hamburg-airport.de/',
+    };
+    const STATION = { name: 'Berlin Hauptbahnhof', address: 'Berlin', lat: '52.525', lng: '13.3694' };
+
+    const websiteInput = () => screen.getByPlaceholderText('https://...') as HTMLInputElement;
+
+    it('FE-PLANNER-PLACEFORM-063: a place with no website clears the previous one', async () => {
+      const user = userEvent.setup();
+      render(<PlaceFormModal {...defaultProps} />);
+
+      await searchFor(user, AIRPORT);
+      expect(websiteInput().value).toBe('https://www.hamburg-airport.de/');
+
+      await searchFor(user, STATION);
+      expect(websiteInput().value).toBe('');
+    });
+
+    it('FE-PLANNER-PLACEFORM-064: a website the user typed survives the next pick', async () => {
+      const user = userEvent.setup();
+      render(<PlaceFormModal {...defaultProps} />);
+
+      await user.type(websiteInput(), 'https://mine.example');
+      await searchFor(user, STATION);
+
+      expect(websiteInput().value).toBe('https://mine.example');
+    });
+
+    it('FE-PLANNER-PLACEFORM-065: a picked value the user then edited also survives', async () => {
+      const user = userEvent.setup();
+      render(<PlaceFormModal {...defaultProps} />);
+
+      await searchFor(user, AIRPORT);
+      await user.clear(websiteInput());
+      await user.type(websiteInput(), 'https://corrected.example');
+      await searchFor(user, STATION);
+
+      expect(websiteInput().value).toBe('https://corrected.example');
+    });
+
+    it('FE-PLANNER-PLACEFORM-066: the ids of the previous place do not travel with the new one', async () => {
+      const user = userEvent.setup();
+      const onSave = vi.fn();
+      render(<PlaceFormModal {...defaultProps} onSave={onSave} />);
+
+      await searchFor(user, { ...AIRPORT, google_place_id: 'ChIJham' });
+      await searchFor(user, { ...STATION, osm_id: 'relation:3600565' });
+      await user.click(screen.getByRole('button', { name: /^Add$/i }));
+
+      await waitFor(() => expect(onSave).toHaveBeenCalled());
+      const payload = onSave.mock.calls[0][0];
+      expect(payload.osm_id).toBe('relation:3600565');
+      expect(payload.google_place_id).toBeFalsy();
+    });
+
+    it('FE-PLANNER-PLACEFORM-067: editing a saved place keeps its stored website', async () => {
+      // The dangerous direction: the form was filled from the database, so a
+      // search result that says nothing about a field must not empty it.
+      const user = userEvent.setup();
+      render(
+        <PlaceFormModal
+          {...defaultProps}
+          place={{ id: 7, name: 'Old', website: 'https://stored.example', lat: 1, lng: 2 } as never}
+        />,
+      );
+      expect(websiteInput().value).toBe('https://stored.example');
+
+      await searchFor(user, STATION);
+      expect(websiteInput().value).toBe('https://stored.example');
+    });
+  });
+
+  // ── Linked expense (#1298) — the same block bookings have ──────────────────
+
+  describe('Costs section', () => {
+    const withBudget = () => seedStore(useAddonStore, {
+      addons: [{ id: 'budget', name: 'Budget', type: 'budget', icon: '', enabled: true }],
+      loaded: true,
+    });
+
+    it('FE-PLANNER-PLACEFORM-068: the block only appears while the Budget addon is on', () => {
+      const { unmount } = render(<PlaceFormModal {...defaultProps} />);
+      expect(screen.queryByRole('button', { name: /Create expense/i })).not.toBeInTheDocument();
+      unmount();
+
+      withBudget();
+      render(<PlaceFormModal {...defaultProps} />);
+      expect(screen.getByRole('button', { name: /Create expense/i })).toBeInTheDocument();
+    });
+
+    it('FE-PLANNER-PLACEFORM-069: creating an expense saves the place first, then opens the editor', async () => {
+      withBudget();
+      const onSave = vi.fn().mockResolvedValue({ id: 42 });
+      const onOpenExpense = vi.fn();
+      render(<PlaceFormModal {...defaultProps} onSave={onSave} onOpenExpense={onOpenExpense} />);
+
+      fireEvent.change(screen.getByPlaceholderText(/e\.g\. Eiffel Tower/i), { target: { value: 'Louvre' } });
+      fireEvent.click(screen.getByRole('button', { name: /Create expense/i }));
+
+      await waitFor(() => expect(onOpenExpense).toHaveBeenCalled());
+      expect(onSave).toHaveBeenCalled();
+      expect(onSave.mock.invocationCallOrder[0]).toBeLessThan(onOpenExpense.mock.invocationCallOrder[0]);
+      expect(onOpenExpense).toHaveBeenCalledWith({
+        prefill: { placeId: 42, name: 'Louvre', category: 'activities' },
+      });
+    });
+
+    it('FE-PLANNER-PLACEFORM-070: a save that yields no id opens no editor', async () => {
+      withBudget();
+      const onSave = vi.fn().mockResolvedValue(undefined);
+      const onOpenExpense = vi.fn();
+      render(<PlaceFormModal {...defaultProps} onSave={onSave} onOpenExpense={onOpenExpense} />);
+
+      fireEvent.change(screen.getByPlaceholderText(/e\.g\. Eiffel Tower/i), { target: { value: 'Louvre' } });
+      fireEvent.click(screen.getByRole('button', { name: /Create expense/i }));
+
+      await waitFor(() => expect(onSave).toHaveBeenCalled());
+      expect(onOpenExpense).not.toHaveBeenCalled();
+    });
+
+    it('FE-PLANNER-PLACEFORM-070b: a nameless click drops the intent instead of arming the next save', async () => {
+      withBudget();
+      const onSave = vi.fn().mockResolvedValue({ id: 42 });
+      const onOpenExpense = vi.fn();
+      render(<PlaceFormModal {...defaultProps} onSave={onSave} onOpenExpense={onOpenExpense} />);
+
+      // No name yet — the save is refused and the intent must not survive it.
+      fireEvent.click(screen.getByRole('button', { name: /Create expense/i }));
+      await waitFor(() => expect(onSave).not.toHaveBeenCalled());
+
+      fireEvent.change(screen.getByPlaceholderText(/e\.g\. Eiffel Tower/i), { target: { value: 'Louvre' } });
+      fireEvent.click(screen.getByRole('button', { name: /^Add$/i }));
+
+      await waitFor(() => expect(onSave).toHaveBeenCalled());
+      expect(onOpenExpense).not.toHaveBeenCalled();
+    });
+
+    it('FE-PLANNER-PLACEFORM-071: an already-linked expense is listed with its amount, and another can still be created', () => {
+      withBudget();
+      seedStore(useTripStore, {
+        trip: buildTrip({ id: 1 }),
+        budgetItems: [{ id: 8, trip_id: 1, name: 'Louvre tickets', total_price: 34, category: 'activities', place_id: 7 }],
+      });
+      render(<PlaceFormModal {...defaultProps} place={{ id: 7, name: 'Louvre' } as never} />);
+
+      expect(screen.getByText('Louvre tickets')).toBeInTheDocument();
+      expect(screen.getByText('Linked expenses')).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: 'Unlink, keep the expense' })).toBeInTheDocument();
+      // A place can carry several expenses (#2084), so the create button stays and the hint goes.
+      expect(screen.getByRole('button', { name: /Create expense/i })).toBeInTheDocument();
+      expect(screen.queryByText('Saves the place, then opens the Costs editor.')).not.toBeInTheDocument();
+    });
+
+    it('FE-PLANNER-PLACEFORM-072: an expense linked to another place is not claimed', () => {
+      withBudget();
+      seedStore(useTripStore, {
+        trip: buildTrip({ id: 1 }),
+        budgetItems: [{ id: 8, trip_id: 1, name: 'Orsay tickets', total_price: 16, category: 'activities', place_id: 99 }],
+      });
+      render(<PlaceFormModal {...defaultProps} place={{ id: 7, name: 'Louvre' } as never} />);
+
+      expect(screen.queryByText('Orsay tickets')).not.toBeInTheDocument();
+      expect(screen.getByRole('button', { name: /Create expense/i })).toBeInTheDocument();
+    });
+  });
+});
+
+// ── The road trip's own use of this form: a service stop added by hand ────────
+
+/**
+ * FE-PLANNER-PLACEFORM-073 to -080.
+ *
+ * The corridor search reads OpenStreetMap and misses a good share of the chargers
+ * actually standing at a junction, so "add manually" opens THIS form rather than a
+ * bespoke one: its typed-ahead search is the one the rest of TREK uses. Three things
+ * change and nothing else does, which is what the first two tests here pin.
+ *
+ * Where the stop goes cannot be decided when the dialog opens, because nothing has been
+ * chosen yet. It is worked out at the save, from the coordinates being saved.
+ */
+describe('PlaceFormModal as a road trip service stop', () => {
+  type Mode = NonNullable<React.ComponentProps<typeof PlaceFormModal>['serviceStop']>;
+
+  const serviceStop = (over: Partial<Mode> = {}): Mode => ({
+    days: [
+      { dayId: 5, dayNumber: 1, stops: ['Hamburg', 'Bremen', 'Berlin'] },
+      { dayId: 6, dayNumber: 2, stops: ['Berlin', 'Dresden'] },
+    ],
+    appendDay: { dayId: 5, dayNumber: 1, position: 3 },
+    // Everything east of the twelfth meridian falls on the second day's leg here; the
+    // real projection is the planner's and has its own suite.
+    targetFor: (_lat: number, lng: number) =>
+      lng > 12 ? { dayId: 6, position: 1, offRouteKm: 0.4 } : { dayId: 5, position: 1, offRouteKm: 0.2 },
+    ...over,
+  });
+
+  const withBudgetAddon = () => seedStore(useAddonStore, {
+    addons: [{ id: 'budget', name: 'Budget', type: 'budget', icon: '', enabled: true }],
+    loaded: true,
+  });
+
+  const typeCoords = (lat: string, lng: string) => {
+    fireEvent.change(screen.getByPlaceholderText(/Latitude/i), { target: { value: lat } });
+    fireEvent.change(screen.getByPlaceholderText(/Longitude/i), { target: { value: lng } });
+  };
+
+  const named = (name: string) => {
+    fireEvent.change(screen.getByPlaceholderText(/e\.g\. Eiffel Tower/i), { target: { value: name } });
+  };
+
+  it('FE-PLANNER-PLACEFORM-073: the ordinary add place keeps its category and its costs', () => {
+    withBudgetAddon();
+    render(<PlaceFormModal {...defaultProps} />);
+
+    expect(screen.getByRole('button', { name: /^Category:/ })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /Create expense/i })).toBeInTheDocument();
+    expect(screen.queryByText('Kind of stop')).not.toBeInTheDocument();
+  });
+
+  it('FE-PLANNER-PLACEFORM-074: a service stop swaps the category for the kind and drops the costs', () => {
+    withBudgetAddon();
+    render(<PlaceFormModal {...defaultProps} serviceStop={serviceStop()} />);
+
+    expect(screen.getByText('Kind of stop')).toBeInTheDocument();
+    expect(screen.getByText('Time at this stop')).toBeInTheDocument();
+    // Nothing has been chosen yet, so the row that asks where on the drive it goes says
+    // what it needs first. It turns into the list of legs the moment a place arrives.
+    expect(screen.getByTestId('service-stop-needs-point')).toBeInTheDocument();
+    // A petrol stop is not an activity with a budget line, and it is not a taste either.
+    expect(screen.queryByRole('button', { name: /^Category:/ })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'New category' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /Create expense/i })).not.toBeInTheDocument();
+  });
+
+  it('FE-PLANNER-PLACEFORM-075: it opens on a kind rather than on none, and says which dialog it is', () => {
+    render(<PlaceFormModal {...defaultProps} serviceStop={serviceStop()} />);
+
+    // A stop left without a kind is a numbered destination that counts in every total,
+    // which is the very thing this path exists to avoid.
+    expect(screen.getByRole('button', { name: 'Fuel' })).toHaveAttribute('aria-pressed', 'true');
+    expect(screen.getByRole('button', { name: /10 min/ })).toHaveAttribute('aria-pressed', 'true');
+    expect(screen.getAllByText('Add as a stop').length).toBeGreaterThan(0);
+  });
+
+  it('FE-PLANNER-PLACEFORM-085: it opens on the kind the corridor was looking for, dwell and all', () => {
+    // The panel seeds itself to charging on an electric car, and a form opening on a
+    // fuel pump under a picker that says Charging is the fault this carries the answer to.
+    render(<PlaceFormModal {...defaultProps} serviceStop={serviceStop({ defaultKind: 'charging' })} />);
+
+    expect(screen.getByRole('button', { name: 'Charging' })).toHaveAttribute('aria-pressed', 'true');
+    expect(screen.getByRole('button', { name: /30 min/ })).toHaveAttribute('aria-pressed', 'true');
+    expect(screen.getByRole('button', { name: 'Fuel' })).toHaveAttribute('aria-pressed', 'false');
+  });
+
+  it('FE-PLANNER-PLACEFORM-076: picking a kind also picks how long that kind takes', async () => {
+    const onSave = vi.fn().mockResolvedValue({ id: 9 });
+    render(<PlaceFormModal {...defaultProps} onSave={onSave} serviceStop={serviceStop()} />);
+
+    named('Supercharger');
+    fireEvent.click(screen.getByRole('button', { name: 'Charging' }));
+    fireEvent.click(screen.getByRole('button', { name: /^Add$/i }));
+
+    await waitFor(() => expect(onSave).toHaveBeenCalled());
+    expect(onSave).toHaveBeenCalledWith(expect.objectContaining({
+      stop_type: 'charging',
+      duration_minutes: 30,
+      category_id: null,
+    }));
+  });
+
+  it('FE-PLANNER-PLACEFORM-077: where it goes is worked out from the coordinates that are saved', async () => {
+    const onSave = vi.fn().mockResolvedValue({ id: 9 });
+    render(<PlaceFormModal {...defaultProps} onSave={onSave} serviceStop={serviceStop()} />);
+
+    // The form opened on nothing at all. These coordinates arrive afterwards, and they
+    // are what the position has to follow.
+    named('Supercharger');
+    typeCoords('51.05', '13.73');
+    fireEvent.click(screen.getByRole('button', { name: /^Add$/i }));
+
+    await waitFor(() => expect(onSave).toHaveBeenCalled());
+    expect(onSave).toHaveBeenCalledWith(expect.objectContaining({
+      _serviceStop: { dayId: 6, position: 1, offRouteKm: 0.4 },
+    }));
+  });
+
+  it('FE-PLANNER-PLACEFORM-078: the leg the traveller overrules is the one that lands', async () => {
+    const onSave = vi.fn().mockResolvedValue({ id: 9 });
+    render(<PlaceFormModal {...defaultProps} onSave={onSave} serviceStop={serviceStop()} />);
+
+    named('Supercharger');
+    typeCoords('51.05', '13.73');
+    fireEvent.click(screen.getByRole('button', { name: /Berlin\s+Dresden/ }));
+    fireEvent.click(screen.getByText(/Bremen\s+Berlin/));
+    fireEvent.click(screen.getByRole('button', { name: /^Add$/i }));
+
+    await waitFor(() => expect(onSave).toHaveBeenCalled());
+    expect(onSave).toHaveBeenCalledWith(expect.objectContaining({
+      // Overruled onto another stretch, so the projection's distance does not come
+      // along: it was measured against the leg the drive guessed, not this one.
+      _serviceStop: { dayId: 5, position: 2, offRouteKm: null },
+    }));
+  });
+
+  it('FE-PLANNER-PLACEFORM-079: a place far off the drawn line is noted, never refused', async () => {
+    const onSave = vi.fn().mockResolvedValue({ id: 9 });
+    const far = serviceStop({ targetFor: () => ({ dayId: 5, position: 2, offRouteKm: 18.3 }) });
+    render(<PlaceFormModal {...defaultProps} onSave={onSave} serviceStop={far} />);
+
+    named('Supercharger');
+    typeCoords('41.9', '12.5');
+    expect(screen.getByText(/check which leg it belongs on/)).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: /^Add$/i }));
+    await waitFor(() => expect(onSave).toHaveBeenCalled());
+    expect(onSave).toHaveBeenCalledWith(expect.objectContaining({
+      _serviceStop: { dayId: 5, position: 2, offRouteKm: 18.3 },
+    }));
+  });
+
+  it('FE-PLANNER-PLACEFORM-081: a stop with no coordinates is not filed onto a leg by guesswork', async () => {
+    const onSave = vi.fn().mockResolvedValue({ id: 9 });
+    render(<PlaceFormModal {...defaultProps} onSave={onSave} serviceStop={serviceStop()} />);
+
+    // The premise case: the charger is in no index, so the traveller types the name. It
+    // cannot be measured onto a road, and picking a leg for it anyway used to file it as
+    // the first stop of the trip's first day without a word.
+    named('Supercharger Dammer Berge');
+    expect(screen.getByTestId('service-stop-needs-point')).toBeInTheDocument();
+    expect(screen.queryByText('Add between')).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: /^Add$/i }));
+
+    await waitFor(() => expect(onSave).toHaveBeenCalled());
+    expect(onSave).toHaveBeenCalledWith(expect.objectContaining({ _serviceStop: null }));
+  });
+
+  it('FE-PLANNER-PLACEFORM-082: a second stop of the same brand saves on the first press', async () => {
+    // Four hundred kilometres apart and both called Aral, which on a motorway is the
+    // normal case and is exactly what this path is for. The name check used to refuse
+    // the first press and demand a second.
+    seedStore(useTripStore, {
+      trip: buildTrip({ id: 1 }),
+      places: [buildPlace({ id: 3, name: 'Aral', lat: 53.1, lng: 8.8 })],
+    });
+    const onSave = vi.fn().mockResolvedValue({ id: 9 });
+    render(<PlaceFormModal {...defaultProps} onSave={onSave} serviceStop={serviceStop()} />);
+
+    named('Aral');
+    typeCoords('51.05', '13.73');
+    fireEvent.click(screen.getByRole('button', { name: /^Add$/i }));
+
+    await waitFor(() => expect(onSave).toHaveBeenCalledTimes(1));
+    expect(screen.queryByRole('button', { name: /Add anyway/i })).not.toBeInTheDocument();
+  });
+
+  it('FE-PLANNER-PLACEFORM-083: the same pump twice over is noted beside the name, not refused', async () => {
+    seedStore(useTripStore, {
+      trip: buildTrip({ id: 1 }),
+      places: [buildPlace({ id: 3, name: 'Aral Dammer Berge', lat: 52.5, lng: 8.2 })],
+    });
+    const onSave = vi.fn().mockResolvedValue({ id: 9 });
+    render(<PlaceFormModal {...defaultProps} onSave={onSave} serviceStop={serviceStop()} />);
+
+    named('Tankstelle');
+    typeCoords('52.5', '8.2');
+
+    // The same place standing at the same coordinates is worth saying. It is a note
+    // while the form is being filled, and the press that saves still saves.
+    expect(screen.getByText(/is already on this trip/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: /^Add$/i }));
+    await waitFor(() => expect(onSave).toHaveBeenCalledTimes(1));
+  });
+
+  it('FE-PLANNER-PLACEFORM-084: an expense intent left over from a refused save never reaches this form', async () => {
+    withBudgetAddon();
+    const refused = vi.fn().mockRejectedValue(new Error('Server error'));
+    const onOpenExpense = vi.fn();
+    const { rerender } = render(
+      <PlaceFormModal {...defaultProps} onSave={refused} onOpenExpense={onOpenExpense} />,
+    );
+
+    // An ordinary add place, asked for an expense, that the server refuses.
+    named('Louvre');
+    fireEvent.click(screen.getByRole('button', { name: /Create expense/i }));
+    await waitFor(() => expect(refused).toHaveBeenCalled());
+    expect(onOpenExpense).not.toHaveBeenCalled();
+
+    const saved = vi.fn().mockResolvedValue({ id: 9 });
+    rerender(<PlaceFormModal {...defaultProps} isOpen={false} onSave={saved} onOpenExpense={onOpenExpense} />);
+    rerender(
+      <PlaceFormModal
+        {...defaultProps}
+        onSave={saved}
+        onOpenExpense={onOpenExpense}
+        serviceStop={serviceStop()}
+      />,
+    );
+
+    named('Supercharger');
+    fireEvent.click(screen.getByRole('button', { name: /^Add$/i }));
+
+    // The one mode whose contract is that costs are gone: an editor opening here would
+    // file a petrol stop as an activity nobody asked to pay for.
+    await waitFor(() => expect(saved).toHaveBeenCalled());
+    expect(onOpenExpense).not.toHaveBeenCalled();
+  });
+
+  it('FE-PLANNER-PLACEFORM-080: with nothing routed it appends to the day the panel is on', async () => {
+    const onSave = vi.fn().mockResolvedValue({ id: 9 });
+    const unrouted = serviceStop({ days: [], appendDay: { dayId: 5, dayNumber: 1, position: 2 } });
+    render(<PlaceFormModal {...defaultProps} onSave={onSave} serviceStop={unrouted} />);
+
+    named('Supercharger');
+    typeCoords('53.55', '9.99');
+    expect(screen.getByText(/it goes at the end of day 1/)).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: /^Add$/i }));
+
+    await waitFor(() => expect(onSave).toHaveBeenCalled());
+    expect(onSave).toHaveBeenCalledWith(expect.objectContaining({
+      _serviceStop: { dayId: 5, position: 2, offRouteKm: 0 },
+    }));
+  });
+});
+
+describe('PlaceFormModal plugin search (#2221)', () => {
+  const ATP = { id: 'all-the-places', name: 'All the Places', type: 'integration' as const, icon: null };
+  const hit = {
+    osm_id: 'plugin:all-the-places:ichiran-ueno', name: 'Ichiran Ueno', address: 'Ueno 6-11-12, Taito',
+    lat: 35.7101, lng: 139.7745, rating: 4.3, website: 'https://ichiran.com/shop/ueno', phone: '+81 3 5818 3531',
+    category: 'restaurant', description: null, source: 'plugin:all-the-places', pluginId: 'all-the-places',
+  };
+
+  afterEach(() => {
+    usePluginStore.setState({ plugins: [] });
+  });
+
+  it('FE-PLANNER-PLACEFORM-093: a search plugin that answers as you type lists its places under the core ones, marked with its name', async () => {
+    usePluginStore.setState({ plugins: [{ ...ATP, searchProvider: true }] });
+    const user = userEvent.setup();
+    server.use(
+      http.post('/api/maps/autocomplete', () =>
+        HttpResponse.json({ suggestions: [{ placeId: 'gers:1', mainText: 'Ichiran Shibuya', secondaryText: 'Jinnan', source: 'trek-places' }], source: 'trek-places' })),
+      http.get('/api/plugin-search/suggest', () => HttpResponse.json({ places: [hit] })),
+    );
+    render(<PlaceFormModal {...defaultProps} />);
+    await user.type(screen.getByPlaceholderText('Search places...'), 'Ichiran');
+
+    const pluginRow = (await screen.findByText('Ichiran Ueno')).closest('button')!;
+    const coreRow = screen.getByText('Ichiran Shibuya').closest('button')!;
+    expect(within(pluginRow).getByText('All the Places')).toBeInTheDocument();
+    expect(within(coreRow).getByText('TREK')).toBeInTheDocument();
+    // Appended, never ahead of the ranked core list.
+    expect(coreRow.compareDocumentPosition(pluginRow) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  });
+
+  it('FE-PLANNER-PLACEFORM-094: picking a plugin row takes its place as it is, with no details lookup and no search', async () => {
+    usePluginStore.setState({ plugins: [{ ...ATP, searchProvider: true }] });
+    const user = userEvent.setup();
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    const detour = vi.fn();
+    server.use(
+      http.post('/api/maps/autocomplete', () => HttpResponse.json({ suggestions: [], source: 'trek-places' })),
+      http.get('/api/plugin-search/suggest', () => HttpResponse.json({ places: [hit] })),
+      http.get('/api/maps/details/:placeId', () => { detour(); return HttpResponse.json({ place: null }); }),
+      http.post('/api/maps/search', () => { detour(); return HttpResponse.json({ places: [], source: 'trek-places' }); }),
+    );
+    render(<PlaceFormModal {...defaultProps} onSave={onSave} />);
+    await user.type(screen.getByPlaceholderText('Search places...'), 'Ichiran');
+    await user.click(await screen.findByText('Ichiran Ueno'));
+
+    expect(await screen.findByDisplayValue('35.7101')).toBeInTheDocument();
+    expect(screen.getByDisplayValue('139.7745')).toBeInTheDocument();
+    expect(screen.getByDisplayValue('https://ichiran.com/shop/ueno')).toBeInTheDocument();
+    expect(detour).not.toHaveBeenCalled();
+
+    await user.click(screen.getByRole('button', { name: /^Add$/i }));
+    await waitFor(() => expect(onSave).toHaveBeenCalledTimes(1));
+    expect(onSave).toHaveBeenCalledWith(expect.objectContaining({
+      name: 'Ichiran Ueno', address: 'Ueno 6-11-12, Taito', osm_id: 'plugin:all-the-places:ichiran-ueno',
+    }));
+  });
+
+  it('FE-PLANNER-PLACEFORM-095: without a search plugin nothing is asked per keystroke, and a searched plugin row still names its plugin', async () => {
+    usePluginStore.setState({ plugins: [ATP] });
+    const user = userEvent.setup();
+    const perKeystroke = vi.fn();
+    server.use(
+      http.post('/api/maps/autocomplete', () => HttpResponse.json({ suggestions: [], source: 'trek-places' })),
+      http.get('/api/plugin-search/suggest', () => { perKeystroke(); return HttpResponse.json({ places: [] }); }),
+      http.post('/api/maps/search', () =>
+        HttpResponse.json({ places: [{ name: 'Ichiran Shibuya', address: 'Jinnan', lat: 35.66, lng: 139.7, source: 'trek-places' }], source: 'trek-places' })),
+      http.get('/api/plugin-search', () => HttpResponse.json({ places: [hit] })),
+    );
+    render(<PlaceFormModal {...defaultProps} />);
+    await user.type(screen.getByPlaceholderText('Search places...'), 'Ichiran{Enter}');
+
+    const pluginRow = (await screen.findByText('Ichiran Ueno')).closest('button')!;
+    expect(within(pluginRow).getByText('All the Places')).toBeInTheDocument();
+    expect(perKeystroke).not.toHaveBeenCalled();
+  });
+});
+
+// ── The dialog frame: keys, focus, paste and the columns beside the form ──────
+
+describe('PlaceFormModal on the dialog frame', () => {
+  const withCollections = () => {
+    seedStore(useAddonStore, {
+      addons: [{ id: 'collections', name: 'Collections', type: 'collections', icon: '', enabled: true }],
+      loaded: true,
+    });
+    vi.spyOn(collectionsApi, 'list').mockResolvedValue({
+      collections: [{ id: 1, owner_id: 1, name: 'Tokyo 2026', color: '#ec4899' }],
+      incomingInvites: [],
+    });
+    vi.spyOn(collectionsApi, 'get').mockResolvedValue({
+      collection: { id: 1, owner_id: 1, name: 'Tokyo 2026', color: '#ec4899' },
+      places: [{ id: 10, collection_id: 1, name: 'Zebra Cafe', status: 'idea' }],
+    });
+  };
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('FE-PLANNER-PLACEFORM-096: the dialog is named by its title', () => {
+    render(<PlaceFormModal {...defaultProps} place={buildPlace({ name: 'Louvre' })} />);
+    expect(screen.getByRole('dialog', { name: 'Edit Place' })).toBeInTheDocument();
+  });
+
+  it('FE-PLANNER-PLACEFORM-097: Escape in the suggestion list closes the list, and only the next one closes the dialog', async () => {
+    const user = userEvent.setup();
+    const onClose = vi.fn();
+    server.use(
+      http.post('/api/maps/autocomplete', () =>
+        HttpResponse.json({ suggestions: [{ placeId: 'node:1', mainText: 'Eiffel Tower', secondaryText: 'Paris, France' }] }),
+      ),
+    );
+    render(<PlaceFormModal {...defaultProps} onClose={onClose} />);
+    await user.type(screen.getByPlaceholderText('Search places...'), 'Eiffel');
+    await screen.findByText('Paris, France');
+
+    await user.keyboard('{Escape}');
+    expect(screen.queryByText('Paris, France')).not.toBeInTheDocument();
+    expect(onClose).not.toHaveBeenCalled();
+
+    await user.keyboard('{Escape}');
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it('FE-PLANNER-PLACEFORM-098: Escape in a saved-places filter closes the filter, not the dialog', async () => {
+    withCollections();
+    const onClose = vi.fn();
+    render(<PlaceFormModal {...defaultProps} onClose={onClose} />);
+    await screen.findByText('Zebra Cafe');
+
+    const trigger = screen.getByRole('button', { name: /All lists/ });
+    fireEvent.click(trigger);
+    expect(screen.getByRole('listbox')).toBeInTheDocument();
+    fireEvent.keyDown(trigger, { key: 'Escape' });
+
+    await waitFor(() => expect(screen.queryByRole('listbox')).not.toBeInTheDocument());
+    expect(onClose).not.toHaveBeenCalled();
+  });
+
+  it('FE-PLANNER-PLACEFORM-099: Escape with nothing open closes the dialog', () => {
+    const onClose = vi.fn();
+    render(<PlaceFormModal {...defaultProps} onClose={onClose} />);
+    fireEvent.keyDown(screen.getByPlaceholderText(/e\.g\. Eiffel Tower/i), { key: 'Escape' });
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it('FE-PLANNER-PLACEFORM-100: a new place opens with the search focused; an edit and a place from the map do not', () => {
+    const { unmount } = render(<PlaceFormModal {...defaultProps} />);
+    expect(screen.getByPlaceholderText('Search places...')).toHaveFocus();
+    unmount();
+
+    const edit = render(<PlaceFormModal {...defaultProps} place={buildPlace({ name: 'Louvre' })} />);
+    expect(screen.getByPlaceholderText('Search places...')).not.toHaveFocus();
+    expect(screen.getByRole('dialog')).toHaveFocus();
+    edit.unmount();
+
+    render(<PlaceFormModal {...defaultProps} prefillCoords={{ lat: 48.85, lng: 2.35, name: 'Pin' }} />);
+    expect(screen.getByPlaceholderText('Search places...')).not.toHaveFocus();
+  });
+
+  it('FE-PLANNER-PLACEFORM-101: Enter in a field never saves; only the footer button does', async () => {
+    const user = userEvent.setup();
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    render(<PlaceFormModal {...defaultProps} onSave={onSave} />);
+    await user.type(screen.getByPlaceholderText(/e\.g\. Eiffel Tower/i), 'Louvre{Enter}');
+    await user.type(screen.getByPlaceholderText('https://...'), 'https://louvre.fr{Enter}');
+    expect(onSave).not.toHaveBeenCalled();
+
+    await user.click(screen.getByRole('button', { name: /^Add$/i }));
+    await waitFor(() => expect(onSave).toHaveBeenCalledTimes(1));
+  });
+
+  it('FE-PLANNER-PLACEFORM-102: an image pasted anywhere in the dialog, head band included, is attached', () => {
+    render(<PlaceFormModal {...defaultProps} />);
+    fireEvent.paste(screen.getByText('Add Place/Activity'), {
+      clipboardData: { items: [{ type: 'image/png', getAsFile: () => new File(['x'], 'from-header.png', { type: 'image/png' }) }] },
+    });
+    expect(within(screen.getByTestId('pending-files')).getByText('from-header.png')).toBeInTheDocument();
+  });
+
+  it('FE-PLANNER-PLACEFORM-103: a pending file is removed by its named button', async () => {
+    const user = userEvent.setup();
+    render(<PlaceFormModal {...defaultProps} />);
+    fireEvent.change(document.querySelector('input[type="file"][multiple]') as HTMLInputElement, {
+      target: { files: [new File(['x'], 'ticket.pdf', { type: 'application/pdf' })] },
+    });
+    await user.click(within(screen.getByTestId('pending-files')).getByRole('button', { name: 'Delete' }));
+    expect(screen.queryByTestId('pending-files')).not.toBeInTheDocument();
+  });
+
+  it('FE-PLANNER-PLACEFORM-104: every field is labelled, the coordinates as one group', () => {
+    const place = buildPlace({ name: 'Louvre' });
+    const assignment = buildAssignment({ id: 10, day_id: 5, place });
+    render(<PlaceFormModal {...defaultProps} place={place} assignmentId={10} dayAssignments={[assignment]} />);
+
+    expect(screen.getByRole('textbox', { name: 'Search' })).toBe(screen.getByPlaceholderText('Search places...'));
+    // The icon button beside it carries the same name.
+    expect(within(screen.getByPlaceholderText('Search places...').closest('.flex') as HTMLElement).getByRole('button', { name: 'Search' })).toBeInTheDocument();
+    expect(screen.getByLabelText('Name *')).toHaveValue('Louvre');
+    expect(screen.getByLabelText('Description')).toBe(screen.getByPlaceholderText(/Short description/i));
+    expect(screen.getByLabelText('Notes')).toBe(screen.getByPlaceholderText(/Personal notes/i));
+    expect(screen.getByLabelText('Address')).toBe(screen.getByPlaceholderText(/Street, City, Country/i));
+    expect(screen.getByLabelText('Notes for this day')).toBeInTheDocument();
+    expect(screen.getByLabelText('Website')).toBe(screen.getByPlaceholderText('https://...'));
+    const coords = screen.getByRole('group', { name: 'Coordinates' });
+    expect(within(coords).getByPlaceholderText(/Latitude/i)).toBeInTheDocument();
+    expect(within(coords).getByPlaceholderText(/Longitude/i)).toBeInTheDocument();
+    // Each Markdown field keeps its own formatting bar.
+    expect(screen.getAllByRole('toolbar')).toHaveLength(2);
+  });
+
+  it('FE-PLANNER-PLACEFORM-105: the new category field takes the focus when it opens', async () => {
+    const user = userEvent.setup();
+    render(<PlaceFormModal {...defaultProps} />);
+    await user.click(screen.getByRole('button', { name: 'New category' }));
+    expect(screen.getByPlaceholderText('Category name')).toHaveFocus();
+  });
+
+  it('FE-PLANNER-PLACEFORM-106: the dialog widens with the columns beside the form', async () => {
+    seedStore(useAuthStore, { user: buildUser(), isAuthenticated: true, placesEnrichEnabled: false });
+    const alone = render(<PlaceFormModal {...defaultProps} />);
+    expect(screen.getByRole('dialog')).toHaveClass('max-w-[600px]');
+    alone.unmount();
+
+    seedStore(useAuthStore, { placesEnrichEnabled: true });
+    const withDetails = render(<PlaceFormModal {...defaultProps} />);
+    expect(screen.getByRole('dialog')).toHaveClass('max-w-[960px]');
+    withDetails.unmount();
+
+    withCollections();
+    render(<PlaceFormModal {...defaultProps} />);
+    expect(screen.getByRole('dialog')).toHaveClass('max-w-[1280px]');
+    // Details on the left, the form, saved places on the right.
+    const [details, form, saved] = Array.from(document.querySelector('form')!.parentElement!.children);
+    expect(details).toHaveTextContent('Place details');
+    expect(form.tagName).toBe('FORM');
+    expect(saved).toContainElement(screen.getByPlaceholderText(/Search your saved places/i));
+    await screen.findByText('Zebra Cafe');
+  });
+});
+
+// ── The head band and the panels: the booking editors' look ──────────────────
+
+describe('PlaceFormModal in the look of the booking editors', () => {
+  const header = () => screen.getByRole('dialog').querySelector('header') as HTMLElement;
+
+  it('FE-PLANNER-PLACEFORM-107: the name is typed in the head band, under the title as its eyebrow', async () => {
+    const user = userEvent.setup();
+    render(<PlaceFormModal {...defaultProps} />);
+
+    const name = screen.getByPlaceholderText(/e\.g\. Eiffel Tower/i);
+    expect(header()).toContainElement(name);
+    expect(within(header()).getByRole('heading', { name: 'Add Place/Activity' })).toBeInTheDocument();
+    // Until there is a name, the line under it says one is required.
+    expect(within(header()).getByText('Name *')).toBeInTheDocument();
+
+    await user.type(name, 'Louvre');
+    expect(within(header()).queryByText('Name *')).not.toBeInTheDocument();
+  });
+
+  it('FE-PLANNER-PLACEFORM-108: the category pill picks a category and clears it again', async () => {
+    const user = userEvent.setup();
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    const cat = buildCategory({ name: 'Museums' });
+    render(<PlaceFormModal {...defaultProps} onSave={onSave} categories={[cat]} />);
+
+    await user.click(screen.getByRole('button', { name: /^Category:/ }));
+    await user.click(screen.getByRole('button', { name: 'Museums' }));
+    expect(within(header()).getByText('Museums')).toBeInTheDocument();
+
+    await user.click(screen.getByRole('button', { name: /^Category:/ }));
+    await user.click(screen.getByRole('button', { name: 'No Category' }));
+
+    fireEvent.change(screen.getByPlaceholderText(/e\.g\. Eiffel Tower/i), { target: { value: 'Louvre' } });
+    await user.click(screen.getByRole('button', { name: /^Add$/i }));
+    await waitFor(() => expect(onSave).toHaveBeenCalled());
+    expect(onSave.mock.calls[0][0].category_id).toBeNull();
+  });
+
+  it('FE-PLANNER-PLACEFORM-109: Enter in the new category field creates it, and never saves the place', async () => {
+    const user = userEvent.setup();
+    const onSave = vi.fn();
+    const onCategoryCreated = vi.fn().mockResolvedValue({ id: 99, name: 'Beaches', color: '#6366f1', icon: 'MapPin' });
+    render(<PlaceFormModal {...defaultProps} onSave={onSave} onCategoryCreated={onCategoryCreated} />);
+
+    await user.click(screen.getByRole('button', { name: 'New category' }));
+    // The field takes the pill's place on the band, OK and Cancel beside it.
+    expect(header()).toContainElement(screen.getByPlaceholderText('Category name'));
+    await user.type(screen.getByPlaceholderText('Category name'), 'Beaches{Enter}');
+
+    expect(onCategoryCreated).toHaveBeenCalledWith({ name: 'Beaches', color: '#6366f1', icon: 'MapPin' });
+    await waitFor(() => expect(screen.queryByPlaceholderText('Category name')).not.toBeInTheDocument());
+    expect(onSave).not.toHaveBeenCalled();
+  });
+
+  it('FE-PLANNER-PLACEFORM-110: a picked result names its index in the band until the dialog reopens', async () => {
+    const user = userEvent.setup();
+    server.use(
+      http.post('/api/maps/search', () =>
+        HttpResponse.json({ places: [{ name: 'Louvre', address: 'Paris', lat: '48.86', lng: '2.33' }], source: 'openstreetmap' }),
+      ),
+    );
+    const { rerender } = render(<PlaceFormModal {...defaultProps} />);
+    await user.type(screen.getByPlaceholderText('Search places...'), 'Louvre{Enter}');
+    await user.click(await screen.findByText('Louvre'));
+
+    expect(within(header()).getByText('OpenStreetMap')).toBeInTheDocument();
+
+    rerender(<PlaceFormModal {...defaultProps} isOpen={false} />);
+    rerender(<PlaceFormModal {...defaultProps} />);
+    expect(within(header()).queryByText('OpenStreetMap')).not.toBeInTheDocument();
+  });
+
+  it('FE-PLANNER-PLACEFORM-111: a picked suggestion is named after the row that was clicked', async () => {
+    const user = userEvent.setup();
+    server.use(
+      http.post('/api/maps/autocomplete', () =>
+        HttpResponse.json({ suggestions: [{ placeId: 'gers:abc', mainText: 'Eiffel Tower', secondaryText: 'Paris, France' }], source: 'trek-places' }),
+      ),
+      http.get('/api/maps/details/:placeId', () =>
+        HttpResponse.json({ place: { name: 'Eiffel Tower', address: 'Paris', lat: 48.858, lng: 2.294 } }),
+      ),
+    );
+    render(<PlaceFormModal {...defaultProps} />);
+    await user.type(screen.getByPlaceholderText('Search places...'), 'Eiffel');
+    fireEvent.mouseDown(await screen.findByText('Paris, France'));
+
+    expect(await screen.findByDisplayValue('48.858')).toBeInTheDocument();
+    expect(within(header()).getByText('TREK')).toBeInTheDocument();
+  });
+
+  it('FE-PLANNER-PLACEFORM-112: a lookup in flight shows as a status pill in the band', async () => {
+    const user = userEvent.setup();
+    let answer: () => void = () => {};
+    server.use(
+      http.post('/api/maps/search', async () => {
+        await new Promise<void>(resolve => { answer = resolve; });
+        return HttpResponse.json({ places: [], source: 'openstreetmap' });
+      }),
+    );
+    render(<PlaceFormModal {...defaultProps} />);
+    await user.type(screen.getByPlaceholderText('Search places...'), 'Louvre{Enter}');
+
+    const busy = await screen.findByRole('status', { name: 'Loading place details…' });
+    expect(header()).toContainElement(busy);
+    answer();
+    await waitFor(() => expect(screen.queryByRole('status', { name: 'Loading place details…' })).not.toBeInTheDocument());
+  });
+
+  it('FE-PLANNER-PLACEFORM-113: each coordinate has its own label, and the pair stays one group', () => {
+    render(<PlaceFormModal {...defaultProps} />);
+    const coords = screen.getByRole('group', { name: 'Coordinates' });
+    expect(within(coords).getByLabelText('Latitude')).toBe(screen.getByPlaceholderText(/Latitude/i));
+    expect(within(coords).getByLabelText('Longitude')).toBe(screen.getByPlaceholderText(/Longitude/i));
+  });
+
+  it('FE-PLANNER-PLACEFORM-114: the actions in the body are white, not grey', () => {
+    seedStore(useAddonStore, {
+      addons: [{ id: 'budget', name: 'Budget', type: 'budget', icon: '', enabled: true }],
+      loaded: true,
+    });
+    render(<PlaceFormModal {...defaultProps} />);
+    for (const button of [screen.getByRole('button', { name: /Attach/i }), screen.getByRole('button', { name: /Create expense/i })]) {
+      expect(button).toHaveClass('bg-surface-card');
+      expect(button).not.toHaveClass('bg-surface-secondary');
+    }
+  });
+
+  it('FE-PLANNER-PLACEFORM-115: a stop on a drive shows its kind in the band, and a double as the line under the name', () => {
+    seedStore(useTripStore, {
+      trip: buildTrip({ id: 1 }),
+      places: [buildPlace({ id: 3, name: 'Aral Dammer Berge', lat: 52.5, lng: 8.2 })],
+    });
+    render(
+      <PlaceFormModal
+        {...defaultProps}
+        serviceStop={{
+          days: [{ dayId: 5, dayNumber: 1, stops: ['Hamburg', 'Bremen'] }],
+          appendDay: { dayId: 5, dayNumber: 1, position: 2 },
+          targetFor: () => ({ dayId: 5, position: 1, offRouteKm: 0.2 }),
+        }}
+      />,
+    );
+    expect(within(header()).getByText('Fuel')).toBeInTheDocument();
+    expect(within(header()).queryByRole('button', { name: /^Category:/ })).not.toBeInTheDocument();
+
+    fireEvent.change(screen.getByPlaceholderText(/e\.g\. Eiffel Tower/i), { target: { value: 'Tankstelle' } });
+    fireEvent.change(screen.getByPlaceholderText(/Latitude/i), { target: { value: '52.5' } });
+    fireEvent.change(screen.getByPlaceholderText(/Longitude/i), { target: { value: '8.2' } });
+    expect(header()).toContainElement(screen.getByText(/is already on this trip/));
+  });
+
+  it('FE-PLANNER-PLACEFORM-116: the details column waits with a quiet hint, not the mascot', () => {
+    seedStore(useAuthStore, { placesEnrichEnabled: true });
+    render(<PlaceFormModal {...defaultProps} />);
+    const column = screen.getByText('Place details', { exact: true }).closest('aside') as HTMLElement;
+    expect(within(column).getByText('Pick a result to see more')).toBeInTheDocument();
+  });
+
+  it('FE-PLANNER-PLACEFORM-117: Escape closes only the new category field, and the focus goes back to its +', async () => {
+    const user = userEvent.setup();
+    const onClose = vi.fn();
+    render(<PlaceFormModal {...defaultProps} onClose={onClose} />);
+    fireEvent.change(screen.getByPlaceholderText(/e\.g\. Eiffel Tower/i), { target: { value: 'Louvre' } });
+
+    await user.click(screen.getByRole('button', { name: 'New category' }));
+    await user.type(screen.getByPlaceholderText('Category name'), 'Beaches');
+    await user.keyboard('{Escape}');
+
+    expect(screen.queryByPlaceholderText('Category name')).not.toBeInTheDocument();
+    expect(onClose).not.toHaveBeenCalled();
+    expect(screen.getByPlaceholderText(/e\.g\. Eiffel Tower/i)).toHaveValue('Louvre');
+    expect(screen.getByRole('button', { name: 'New category' })).toHaveFocus();
+  });
+
+  it('FE-PLANNER-PLACEFORM-118: Cancel and OK hand the focus back to the + as well', async () => {
+    const user = userEvent.setup();
+    const onCategoryCreated = vi.fn().mockResolvedValue({ id: 99, name: 'Beaches', color: '#6366f1', icon: 'MapPin' });
+    render(<PlaceFormModal {...defaultProps} onCategoryCreated={onCategoryCreated} />);
+
+    await user.click(screen.getByRole('button', { name: 'New category' }));
+    await user.click(within(header()).getByRole('button', { name: 'Cancel' }));
+    expect(screen.getByRole('button', { name: 'New category' })).toHaveFocus();
+
+    await user.click(screen.getByRole('button', { name: 'New category' }));
+    await user.type(screen.getByPlaceholderText('Category name'), 'Beaches');
+    await user.click(within(header()).getByRole('button', { name: 'OK' }));
+    await waitFor(() => expect(screen.getByRole('button', { name: 'New category' })).toHaveFocus());
+  });
+
+  it('FE-PLANNER-PLACEFORM-119: the time fields carry their names, and End says when it is wrong', () => {
+    const place = buildPlace({ name: 'Test', place_time: '14:00', end_time: '13:00' });
+    const assignment = buildAssignment({ id: 11, day_id: 5, place });
+    render(<PlaceFormModal {...defaultProps} place={place} assignmentId={11} dayAssignments={[assignment]} />);
+
+    expect(screen.getByRole('textbox', { name: 'Start' })).not.toHaveAttribute('aria-invalid', 'true');
+    const end = screen.getByRole('textbox', { name: 'End' });
+    expect(end).toHaveAttribute('aria-invalid', 'true');
+    expect(end).toHaveAccessibleDescription('End time is before start time');
+  });
+
+  it('FE-PLANNER-PLACEFORM-120: the formatting bars show their names in the shared tooltip, never the native one', async () => {
+    const user = userEvent.setup();
+    render(<PlaceFormModal {...defaultProps} />);
+    const bars = screen.getAllByRole('toolbar');
+    expect(bars).toHaveLength(2);
+    for (const bar of bars) {
+      for (const button of within(bar).getAllByRole('button')) expect(button).not.toHaveAttribute('title');
+    }
+    await user.hover(within(bars[0]).getByRole('button', { name: 'Bold' }));
+    expect(await screen.findByRole('tooltip')).toHaveTextContent('Bold');
+  });
+
+  it('FE-PLANNER-PLACEFORM-121: stacked in a narrow window, the details column takes the full width', () => {
+    seedStore(useAuthStore, { placesEnrichEnabled: true });
+    const { unmount } = render(<PlaceFormModal {...defaultProps} isMobile />);
+    const stacked = screen.getByText('Place details', { exact: true }).closest('aside') as HTMLElement;
+    expect(stacked).not.toHaveClass('sm:w-80');
+    unmount();
+
+    render(<PlaceFormModal {...defaultProps} />);
+    const beside = screen.getByText('Place details', { exact: true }).closest('aside') as HTMLElement;
+    expect(beside).toHaveClass('sm:w-80');
+  });
+});
+
+describe('PlaceFormModal and the columns beside it', () => {
+  it('FE-PLANNER-PLACEFORM-122: a picture picked and a description adopted in the details column are saved with the place', async () => {
+    seedStore(useAuthStore, { placesEnrichEnabled: true });
+    const photoUrl = '/api/maps/place-photo/way%3A122~p0/bytes';
+    server.use(
+      http.post('/api/maps/enrichment', () => HttpResponse.json({
+        photos: [{ key: 'way:122~p0', url: photoUrl, attribution: 'Alice', license: 'CC BY 4.0', licenseUrl: null, sourceUrl: null, source: 'wikimedia' }],
+        facts: [],
+        description: { text: 'A museum by the river.', source: 'wikipedia', sourceUrl: null, license: 'CC BY-SA 4.0' },
+        rating: null,
+        hours: null,
+      })),
+    );
+    const user = userEvent.setup();
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    render(<PlaceFormModal {...defaultProps} onSave={onSave} prefillCoords={{ lat: 50.9, lng: 6.96, name: 'Museum 122', osm_id: 'way:122' }} />);
+
+    await user.click(await screen.findByRole('button', { name: 'Use this text' }));
+    expect(screen.getByLabelText('Description')).toHaveValue('A museum by the river.');
+    // With a description in place, the column asks for it to be cleared first.
+    expect(screen.getByRole('button', { name: 'Use this text' })).toBeDisabled();
+
+    const tile = screen.getByRole('button', { name: /^Pick a picture/ });
+    await user.click(tile);
+    expect(tile).toHaveAttribute('aria-pressed', 'true');
+    await user.click(tile);
+    expect(tile).toHaveAttribute('aria-pressed', 'false');
+    await user.click(tile);
+
+    await user.click(screen.getByRole('button', { name: /^Add$/i }));
+    await waitFor(() => expect(onSave).toHaveBeenCalledTimes(1));
+    expect(onSave).toHaveBeenCalledWith(expect.objectContaining({ image_url: photoUrl, description: 'A museum by the river.' }));
+  });
+
+  it('FE-PLANNER-PLACEFORM-123: the notes for this day are saved when they changed', async () => {
+    const user = userEvent.setup();
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    const place = buildPlace({ name: 'Cafe 123' });
+    const assignment = buildAssignment({ id: 123, day_id: 5, place, notes: 'Old note' });
+    render(<PlaceFormModal {...defaultProps} onSave={onSave} place={place} assignmentId={123} dayAssignments={[assignment]} />);
+
+    const notes = screen.getByRole('textbox', { name: 'Notes for this day' });
+    expect(notes).toHaveValue('Old note');
+    await user.clear(notes);
+    await user.type(notes, 'Book a table by the window');
+    await user.click(screen.getByRole('button', { name: /^Update$/i }));
+    await waitFor(() => expect(onSave).toHaveBeenCalledTimes(1));
+    expect(onSave).toHaveBeenCalledWith(expect.objectContaining({ assignment_notes: 'Book a table by the window' }));
+  });
+
+  it('FE-PLANNER-PLACEFORM-124: unchanged notes for the day are left out of the save', async () => {
+    const user = userEvent.setup();
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    const place = buildPlace({ name: 'Cafe 124' });
+    const assignment = buildAssignment({ id: 124, day_id: 5, place, notes: 'Keep me' });
+    render(<PlaceFormModal {...defaultProps} onSave={onSave} place={place} assignmentId={124} dayAssignments={[assignment]} />);
+    await user.click(screen.getByRole('button', { name: /^Update$/i }));
+    await waitFor(() => expect(onSave).toHaveBeenCalledTimes(1));
+    expect(onSave.mock.calls[0][0]).not.toHaveProperty('assignment_notes');
+  });
+});

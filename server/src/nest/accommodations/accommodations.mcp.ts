@@ -1,0 +1,381 @@
+import { noAccess, permissionDenied } from '../../mcp/tools/_shared';
+import {
+  McpController,
+  Tool,
+  ResourceTemplate,
+  type McpContext,
+  TOOL_ANNOTATIONS_WRITE,
+  TOOL_ANNOTATIONS_DELETE,
+  TOOL_ANNOTATIONS_NON_IDEMPOTENT,
+  TOOL_ANNOTATIONS_READONLY,
+  ok,
+} from '../../nest-mcp';
+import { UnitOfWork } from '../database/unit-of-work';
+import { McpToolGuardsService } from '../mcp-shared/mcp-tool-guards.service';
+import { PlacesService } from '../places/places.service';
+import { AccommodationsService } from './accommodations.service';
+import {
+  idSchema,
+  listAccommodationsRequestSchema,
+  placeWebsiteSchema,
+  type ListAccommodationsRequest,
+} from '@trek/shared';
+
+import { z } from 'zod';
+
+function parseId(value: string | string[]): number | null {
+  const n = Number(Array.isArray(value) ? value[0] : value);
+  return Number.isInteger(n) && n > 0 ? n : null;
+}
+
+/**
+ * Accommodation MCP surface. The four tools and the
+ * trek://trips/{tripId}/accommodations resource moved here verbatim from
+ * DaysMcp when accommodations became their own domain; names, descriptions,
+ * schemas, annotations, error shapes and broadcasts are unchanged.
+ *
+ * It keeps PlacesService because create_place_accommodation creates the place
+ * and the stay in one transaction. That is also what let DaysMcp drop it, and
+ * DaysModule its PlacesModule import.
+ *
+ * R12 (Plan 3d Task 3): the `DatabaseService` this class used to inject was
+ * unused (§18.15 of the inventory) — dropped. The shared positional
+ * test-helper (`tests/helpers/mcp-test-controllers.ts:303`) that builds this
+ * class by constructor position is a concurrent implementer's file (Task 5)
+ * and was not touched here (the task brief's own hard rule); it needs a
+ * one-line follow-up dropping the `dbService` argument from its
+ * `new AccommodationsMcp(...)` call.
+ */
+@McpController()
+export class AccommodationsMcp {
+  constructor(
+    private readonly accommodations: AccommodationsService,
+    private readonly places: PlacesService,
+    private readonly guards: McpToolGuardsService,
+    private readonly uow: UnitOfWork,
+  ) {}
+
+  @Tool({
+    name: 'create_accommodation',
+    description:
+      'Add an accommodation (hotel, Airbnb, etc.) to a trip, linked to a place and a date range. This also puts the place on its check-in day, so the stay shows up as a stop on the route.',
+    inputSchema: {
+      tripId: idSchema,
+      place_id: idSchema.describe('The place to use as the accommodation'),
+      start_day_id: idSchema.describe('Check-in day ID'),
+      end_day_id: idSchema.describe('Check-out day ID'),
+      check_in: z.string().max(10).optional().describe('Check-in time e.g. "15:00"'),
+      check_in_end: z.string().max(10).optional().describe('Check-in window end time e.g. "20:00"'),
+      check_out: z.string().max(10).optional().describe('Check-out time e.g. "11:00"'),
+      confirmation: z.string().max(100).optional(),
+      notes: z.string().max(1000).optional(),
+    },
+    annotations: TOOL_ANNOTATIONS_NON_IDEMPOTENT,
+    access: { group: 'trips', mode: 'write' },
+  })
+  async createAccommodation(
+    {
+      tripId,
+      place_id,
+      start_day_id,
+      end_day_id,
+      check_in,
+      check_in_end,
+      check_out,
+      confirmation,
+      notes,
+    }: {
+      tripId: number;
+      place_id: number;
+      start_day_id: number;
+      end_day_id: number;
+      check_in?: string;
+      check_in_end?: string;
+      check_out?: string;
+      confirmation?: string;
+      notes?: string;
+    },
+    ctx: McpContext,
+  ) {
+    const writer = await this.guards.tripWriter(tripId, ctx.userId);
+    const { accommodation, mirror } = await this.accommodations.createStay(
+      tripId,
+      { place_id, start_day_id, end_day_id, check_in, check_in_end, check_out, confirmation, notes },
+      writer,
+    );
+    return ok({ accommodation, assignment: mirror.created });
+  }
+
+  @Tool({
+    name: 'create_place_accommodation',
+    description:
+      'Create a new place, set it as an accommodation for a date range and put it on its check-in day, in one atomic operation. Use place details from search_place results. Only use when the place does not yet exist — if it already exists, use create_accommodation directly. Set price + currency to record the accommodation cost so it shows on the item.',
+    inputSchema: {
+      tripId: idSchema,
+      name: z.string().min(1).max(200),
+      description: z.string().max(2000).optional(),
+      lat: z.number().optional(),
+      lng: z.number().optional(),
+      address: z.string().max(500).optional(),
+      category_id: idSchema.optional().describe('Category ID — use list_categories to see available options'),
+      google_place_id: z
+        .string()
+        .optional()
+        .describe('Google Place ID from search_place — enables opening hours display'),
+      google_ftid: z
+        .string()
+        .optional()
+        .describe('Google Maps feature ID from search_place — enables direct Google Maps links'),
+      osm_id: z.string().optional().describe('OpenStreetMap ID from search_place (e.g. "way:12345")'),
+      place_notes: z.string().max(2000).optional().describe('Notes for the place'),
+      website: z.string().max(500).optional(),
+      phone: z.string().max(50).optional(),
+      start_day_id: idSchema.describe('Check-in day ID'),
+      end_day_id: idSchema.describe('Check-out day ID'),
+      check_in: z.string().max(10).optional().describe('Check-in time e.g. "15:00"'),
+      check_in_end: z.string().max(10).optional().describe('Check-in window end time e.g. "20:00"'),
+      check_out: z.string().max(10).optional().describe('Check-out time e.g. "11:00"'),
+      confirmation: z.string().max(100).optional(),
+      accommodation_notes: z.string().max(1000).optional().describe('Notes for the accommodation'),
+      price: z.number().nonnegative().optional().describe('Total accommodation cost (shown on the item)'),
+      currency: z.string().length(3).optional().describe('ISO 4217 currency code (e.g. "EUR", "USD")'),
+    },
+    annotations: TOOL_ANNOTATIONS_NON_IDEMPOTENT,
+    access: { group: 'trips', mode: 'write' },
+  })
+  async createPlaceAccommodation(
+    {
+      tripId,
+      name,
+      description,
+      lat,
+      lng,
+      address,
+      category_id,
+      google_place_id,
+      google_ftid,
+      osm_id,
+      place_notes,
+      website,
+      phone,
+      start_day_id,
+      end_day_id,
+      check_in,
+      check_in_end,
+      check_out,
+      confirmation,
+      accommodation_notes,
+      price,
+      currency,
+    }: {
+      tripId: number;
+      name: string;
+      description?: string;
+      lat?: number;
+      lng?: number;
+      address?: string;
+      category_id?: number;
+      google_place_id?: string;
+      google_ftid?: string;
+      osm_id?: string;
+      place_notes?: string;
+      website?: string;
+      phone?: string;
+      start_day_id: number;
+      end_day_id: number;
+      check_in?: string;
+      check_in_end?: string;
+      check_out?: string;
+      confirmation?: string;
+      accommodation_notes?: string;
+      price?: number;
+      currency?: string;
+    },
+    ctx: McpContext,
+  ) {
+    if (!(await this.accommodations.verifyTripAccess(tripId, ctx.userId))) return noAccess();
+    if (!(await this.guards.hasTripPermission('day_edit', tripId, ctx.userId))) return permissionDenied();
+    const dayErrors = await this.accommodations.validateAccommodationRefs(tripId, undefined, start_day_id, end_day_id);
+    if (dayErrors.length > 0)
+      return { content: [{ type: 'text' as const, text: dayErrors.map((e) => e.message).join(', ') }], isError: true };
+    // The website takes the place contract create_place uses, so a bare host
+    // gains https (#2483). A value that contract refuses is left off instead of
+    // failing the booking: this tool always took any text here, '' as none.
+    const site = website ? placeWebsiteSchema.safeParse(website) : null;
+    try {
+      const result = await this.uow.transactional(async () => {
+        const place = await this.places.create(String(tripId), {
+          name,
+          description,
+          lat,
+          lng,
+          address,
+          category_id,
+          google_place_id,
+          google_ftid,
+          osm_id,
+          notes: place_notes,
+          website: site?.success ? site.data : undefined,
+          phone,
+          price,
+          currency,
+        });
+        const { accommodation, mirror } = await this.accommodations.createAccommodation(tripId, {
+          place_id: place.id,
+          start_day_id,
+          end_day_id,
+          check_in,
+          check_in_end,
+          check_out,
+          confirmation,
+          notes: accommodation_notes,
+        });
+        return { place, accommodation, mirror };
+      });
+      // The stamped copy, not the one create() returned: booking the night types the
+      // place as lodging, and place:created is the only announcement it gets here.
+      const place = (await result.mirror).stamped ?? result.place;
+      this.guards.safeBroadcast(tripId, 'place:created', { place });
+      // The same events a booking made on its own sends, the partner reservation's
+      // refetch ping among them; the stamp already went out as place:created.
+      await this.accommodations.announceStayCreated(
+        tripId,
+        { accommodation: result.accommodation, mirror: { ...result.mirror, stamped: null } },
+        await this.guards.tripWriter(tripId, ctx.userId),
+      );
+      return ok({ place, accommodation: result.accommodation, assignment: (await result.mirror).created });
+    } catch {
+      return { content: [{ type: 'text' as const, text: 'Failed to create place and accommodation.' }], isError: true };
+    }
+  }
+
+  @Tool({
+    name: 'update_accommodation',
+    description:
+      'Update fields on an existing accommodation. Moving it to another check-in day or place moves the stop it put on the route with it.',
+    inputSchema: {
+      tripId: idSchema,
+      accommodationId: idSchema,
+      place_id: idSchema.optional(),
+      start_day_id: idSchema.optional(),
+      end_day_id: idSchema.optional(),
+      check_in: z.string().max(10).optional(),
+      check_in_end: z.string().max(10).optional().describe('Check-in window end time e.g. "20:00"'),
+      check_out: z.string().max(10).optional(),
+      confirmation: z.string().max(100).optional(),
+      notes: z.string().max(1000).optional(),
+    },
+    annotations: TOOL_ANNOTATIONS_WRITE,
+    access: { group: 'trips', mode: 'write' },
+  })
+  async updateAccommodation(
+    {
+      tripId,
+      accommodationId,
+      place_id,
+      start_day_id,
+      end_day_id,
+      check_in,
+      check_in_end,
+      check_out,
+      confirmation,
+      notes,
+    }: {
+      tripId: number;
+      accommodationId: number;
+      place_id?: number;
+      start_day_id?: number;
+      end_day_id?: number;
+      check_in?: string;
+      check_in_end?: string;
+      check_out?: string;
+      confirmation?: string;
+      notes?: string;
+    },
+    ctx: McpContext,
+  ) {
+    const writer = await this.guards.tripWriter(tripId, ctx.userId);
+    const { accommodation, mirror } = await this.accommodations.updateStay(
+      tripId,
+      accommodationId,
+      { place_id, start_day_id, end_day_id, check_in, check_in_end, check_out, confirmation, notes },
+      writer,
+    );
+    // movedAssignment rather than a delete/create pair: an edit carries the booking's
+    // own stop across instead of rebuilding it, so the caller sees the same row.
+    return ok({
+      accommodation,
+      assignment: mirror.created,
+      movedAssignment: mirror.moved,
+      removedAssignments: mirror.removed,
+    });
+  }
+
+  @Tool({
+    name: 'delete_accommodation',
+    description:
+      'Delete an accommodation from a trip. The stop this booking put on its check-in day goes with it; a stop that was already there stays.',
+    inputSchema: {
+      tripId: idSchema,
+      accommodationId: idSchema,
+    },
+    annotations: TOOL_ANNOTATIONS_DELETE,
+    access: { group: 'trips', mode: 'write' },
+  })
+  async deleteAccommodation({ tripId, accommodationId }: { tripId: number; accommodationId: number }, ctx: McpContext) {
+    const writer = await this.guards.tripWriter(tripId, ctx.userId);
+    // linkedReservationId stays the first one so the tool's answer keeps its shape;
+    // linkedReservationIds carries the rest for a block that had more than one booking.
+    const { linkedReservationId, linkedReservationIds, mirror } = await this.accommodations.deleteStay(
+      tripId,
+      accommodationId,
+      writer,
+    );
+    return ok({ success: true, linkedReservationId, linkedReservationIds, removedAssignments: mirror.removed });
+  }
+
+  @Tool({
+    name: 'list_accommodations',
+    description:
+      'List where a trip sleeps, stay by stay: the place, its address and position, the check-in and check-out days with their times, and the booking linked to it, its reference included, as the trip-accommodations resource reads them.',
+    inputSchema: listAccommodationsRequestSchema.shape,
+    annotations: TOOL_ANNOTATIONS_READONLY,
+    access: { group: 'trips', mode: 'read' },
+  })
+  async listAccommodations({ tripId }: ListAccommodationsRequest, ctx: McpContext) {
+    if (!(await this.accommodations.verifyTripAccess(tripId, ctx.userId))) return noAccess();
+    return ok({ accommodations: await this.accommodations.listAccommodations(tripId) });
+  }
+
+  @ResourceTemplate({
+    name: 'trip-accommodations',
+    uriTemplate: 'trek://trips/{tripId}/accommodations',
+    description: 'Accommodations (hotels, rentals) for a trip with check-in/out details',
+    mimeType: 'application/json',
+    access: { group: 'trips', mode: 'read' },
+  })
+  async tripAccommodationsResource(uri: URL, { tripId }: { tripId: string | string[] }, ctx: McpContext) {
+    const id = parseId(tripId);
+    if (id === null || !(await this.accommodations.verifyTripAccess(id, ctx.userId))) {
+      return {
+        contents: [
+          {
+            uri: uri.href,
+            mimeType: 'application/json',
+            text: JSON.stringify({ error: 'Trip not found or access denied' }),
+          },
+        ],
+      };
+    }
+    const accommodations = await this.accommodations.listAccommodations(id);
+    return {
+      contents: [
+        {
+          uri: uri.href,
+          mimeType: 'application/json',
+          text: JSON.stringify(accommodations, null, 2),
+        },
+      ],
+    };
+  }
+}

@@ -13,8 +13,14 @@
  */
 import fs from 'fs';
 import path from 'path';
-import { db, closeDb } from '../src/db/database';
+import Database from 'better-sqlite3';
 import { METRIC } from '../src/services/cityScores';
+
+const dbFile = process.env.TREK_DB_FILE || path.join(__dirname, '../data/travel.db');
+fs.mkdirSync(path.dirname(dbFile), { recursive: true });
+const db = new Database(dbFile);
+db.pragma('journal_mode = WAL');
+db.pragma('foreign_keys = ON');
 
 const UA = 'NOMAD-city-seed/1.0 (self-hosted travel planner; +https://github.com/mauriceboe/NOMAD)';
 
@@ -1025,5 +1031,5 @@ main()
     process.exitCode = 1;
   })
   .finally(() => {
-    try { closeDb(); } catch { /* already closed */ }
+    try { db.close(); } catch { /* already closed */ }
   });

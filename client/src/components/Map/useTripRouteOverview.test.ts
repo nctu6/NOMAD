@@ -1,0 +1,326 @@
+import { act, renderHook, waitFor } from '@testing-library/react'
+import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { dayColor } from '../Roadtrip/dayColors'
+import { useTripRouteOverview } from './useTripRouteOverview'
+import { buildAssignment, buildDay, buildPlace } from '../../../tests/helpers/factories'
+import { useAddonStore } from '../../store/addonStore'
+import type { AssignmentsMap, RouteSegment } from '../../types'
+
+vi.mock('./RouteCalculator', async (importActual) => {
+  const actual = await importActual<typeof import('./RouteCalculator')>()
+  return { ...actual, calculateRouteWithLegs: vi.fn() }
+})
+
+const { calculateRouteWithLegs, RoutingRefusedError } = await import('./RouteCalculator')
+
+type RouteAnswer = Awaited<ReturnType<typeof calculateRouteWithLegs>>
+
+const leg = (distance: number, duration: number): RouteSegment => ({
+  mid: [0, 0], from: [0, 0], to: [0, 0],
+  distance, duration,
+  distanceText: `${Math.round(distance / 1000)} km`,
+  durationText: '1 h', walkingText: '5 h', drivingText: '1 h',
+})
+
+const at = (lat: number, lng: number, order: number, dayId: number, extra: Record<string, unknown> = {}) =>
+  buildAssignment({ day_id: dayId, order_index: order, place: buildPlace({ lat, lng }), ...extra })
+
+const DAYS = [buildDay({ id: 1, day_number: 1 }), buildDay({ id: 2, day_number: 2 })]
+const ASSIGNMENTS: AssignmentsMap = {
+  '1': [at(48.86, 2.35, 0, 1), at(48.88, 2.36, 1, 1)],
+  '2': [at(45.76, 4.83, 0, 2), at(45.78, 4.85, 1, 2)],
+}
+
+const render = (enabled = true, assignments: AssignmentsMap = ASSIGNMENTS, days = DAYS) =>
+  renderHook(
+    ({ enabled: on, assignments: a }: { enabled: boolean; assignments: AssignmentsMap }) =>
+      useTripRouteOverview(7, days, a, [], [], 'driving', on),
+    { initialProps: { enabled, assignments } },
+  )
+
+beforeEach(() => {
+  useAddonStore.setState({ addons: [] })
+  vi.mocked(calculateRouteWithLegs).mockReset()
+  vi.mocked(calculateRouteWithLegs).mockResolvedValue({
+    coordinates: [[48.86, 2.35], [48.87, 2.355], [48.88, 2.36]],
+    distance: 12000, duration: 900,
+    legs: [leg(12000, 900)],
+  })
+})
+
+describe('useTripRouteOverview', () => {
+  it('updates an excluded Tour-only overview from current Place geometry without routing or reframing edits', async () => {
+    useAddonStore.setState({ addons: [{ id: 'tours', name: 'Tours', icon: 'Route', type: 'feature', enabled: true }] })
+    const geometry = [[48.1, 11.1], [48.2, 11.2], [48.3, 11.3]]
+    const place = buildPlace({ id: 71, lat: 48.1, lng: 11.1, route_geometry: JSON.stringify(geometry) })
+    const assignments = { '1': [buildAssignment({ day_id: 1, place, tour_place_id: 71,
+      tour_route_geometry: '[[49,12],[49.1,12.1]]', route_excluded: true })] }
+    const days = [DAYS[0]]
+    const { result, rerender } = renderHook(
+      ({ places, enabled }: { places: typeof place[]; enabled: boolean }) =>
+        useTripRouteOverview(7, days, assignments, [], [], 'walking', enabled, places),
+      { initialProps: { places: [place], enabled: true } },
+    )
+    await waitFor(() => expect(result.current.loading).toBe(false))
+    expect(result.current.days[0].tourLines).toEqual([geometry])
+    expect(result.current.focusPoints).toEqual(geometry)
+    expect(result.current.lines).toEqual([])
+    expect(calculateRouteWithLegs).not.toHaveBeenCalled()
+    const frame = result.current.focusPoints
+    const changed = [[48.1, 11.1], [48.25, 11.28], [48.3, 11.3]]
+    const places = [{ ...place, route_geometry: JSON.stringify(changed) }]
+    rerender({ places, enabled: true })
+    await waitFor(() => expect(result.current.days[0].tourLines).toEqual([changed]))
+    await waitFor(() => expect(result.current.loading).toBe(false))
+    expect(result.current.focusPoints).toBe(frame)
+    expect(calculateRouteWithLegs).not.toHaveBeenCalled()
+    rerender({ places, enabled: false })
+    rerender({ places, enabled: true })
+    await waitFor(() => expect(result.current.loading).toBe(false))
+    expect(result.current.focusPoints).toEqual(changed)
+    expect(result.current.focusPoints).not.toBe(frame)
+  })
+
+  it('FE-MAP-TRO-001: does nothing at all until it is switched on', () => {
+    const { result } = render(false)
+
+    expect(result.current.days).toEqual([])
+    expect(result.current.totalDistance).toBe(0)
+    expect(result.current.loading).toBe(false)
+    expect(calculateRouteWithLegs).not.toHaveBeenCalled()
+  })
+
+  it('FE-MAP-TRO-002: sums every day into the trip total', async () => {
+    const { result } = render()
+
+    await waitFor(() => expect(result.current.loading).toBe(false))
+    expect(result.current.days).toHaveLength(2)
+    expect(result.current.days.map(d => d.distance)).toEqual([12000, 12000])
+    expect(result.current.totalDistance).toBe(24000)
+    expect(result.current.totalDuration).toBe(1800)
+  })
+
+  it('FE-MAP-TRO-003: gives each day the colour the road trip draws it in', async () => {
+    const { result } = render()
+
+    await waitFor(() => expect(result.current.loading).toBe(false))
+    const colors = result.current.days.map(d => d.color)
+    // The same palette either way, so a day does not change colour when the trip is
+    // read as a road trip instead of an overview.
+    expect(colors[0]).toEqual(dayColor(1))
+    expect(colors[1]).toEqual(dayColor(2))
+    // Every drawn line is labelled with the colour of the day it belongs to.
+    expect(result.current.lineColors).toHaveLength(result.current.lines.length)
+    expect(new Set(result.current.lineColors.map(c => c.line)).size).toBe(2)
+  })
+
+  it('FE-MAP-TRO-004: reports the modes each day is travelled in', async () => {
+    const { result } = render(true, {
+      '1': [at(48.86, 2.35, 0, 1, { leg_transport_mode: 'walking' }), at(48.88, 2.36, 1, 1)],
+      '2': ASSIGNMENTS['2'],
+    })
+
+    await waitFor(() => expect(result.current.loading).toBe(false))
+    expect(result.current.days[0].modes).toEqual(['walking'])
+    expect(result.current.days[1].modes).toEqual(['driving'])
+    expect(result.current.days[0].segments[0].mode).toBe('walking')
+  })
+
+  it('FE-MAP-TRO-005: draws straight lines first and keeps them when routing refuses', async () => {
+    vi.mocked(calculateRouteWithLegs).mockRejectedValue(new Error('429'))
+    const { result } = render()
+
+    await waitFor(() => expect(result.current.loading).toBe(false))
+    // The shape of the trip is still on the map...
+    expect(result.current.lines).toHaveLength(2)
+    expect(result.current.lines[0]).toEqual([[48.86, 2.35], [48.88, 2.36]])
+    // ...but a leg that never answered contributes no distance.
+    expect(result.current.totalDistance).toBe(0)
+  })
+
+  it('FE-MAP-TRO-006: a day with nothing to drive is left out', async () => {
+    const { result } = render(true, { '1': ASSIGNMENTS['1'], '2': [at(45.76, 4.83, 0, 2)] })
+
+    await waitFor(() => expect(result.current.loading).toBe(false))
+    expect(result.current.days.map(d => d.dayId)).toEqual([1])
+  })
+
+  it('FE-MAP-TRO-007: frames the whole trip, not one day of it', async () => {
+    const { result } = render()
+
+    await waitFor(() => expect(result.current.loading).toBe(false))
+    expect(result.current.focusPoints.length).toBe(result.current.lines.flat().length)
+    expect(result.current.focusPoints.length).toBeGreaterThan(2)
+  })
+
+  it('FE-MAP-TRO-008: renaming a place does not re-route the trip', async () => {
+    const { result, rerender } = render()
+    await waitFor(() => expect(result.current.loading).toBe(false))
+    const calls = vi.mocked(calculateRouteWithLegs).mock.calls.length
+
+    expect(calls).toBeGreaterThan(0)
+
+    // A new object identity with the same geometry: the plan memo re-runs, the
+    // routing round must not.
+    rerender({
+      enabled: true,
+      assignments: {
+        ...ASSIGNMENTS,
+        '1': ASSIGNMENTS['1'].map(a => ({ ...a, place: { ...a.place, name: 'Renamed' } })),
+      },
+    })
+
+    await waitFor(() => expect(result.current.loading).toBe(false))
+    expect(vi.mocked(calculateRouteWithLegs).mock.calls.length).toBe(calls)
+  })
+
+  it('FE-MAP-TRO-009: a leg the router refused outright is counted, so the total is not taken for complete', async () => {
+    // A 400 objects to these coordinates; the leg stays a straight line with no distance.
+    vi.mocked(calculateRouteWithLegs).mockRejectedValueOnce(new RoutingRefusedError(400, null))
+    const { result } = render()
+
+    await waitFor(() => expect(result.current.loading).toBe(false), { timeout: 3000 })
+    expect(result.current.days.map(d => d.unroutedLegs)).toEqual([1, 0])
+    expect(result.current.unroutedLegs).toBe(1)
+    expect(result.current.totalDistance).toBe(12000)
+  })
+
+  it('FE-MAP-TRO-010: each day is drawn as soon as its road answers, not when the round is over', async () => {
+    // The legs go to the router one at a time with a pause between them, so a cold trip
+    // takes a second per leg; roads filling in one by one is what makes that read as
+    // progress rather than as a hang.
+    const answer: RouteAnswer = {
+      coordinates: [[48.86, 2.35], [48.87, 2.355], [48.88, 2.36]],
+      distance: 12000, duration: 900,
+      legs: [leg(12000, 900)],
+    }
+    const answers: Array<(value: RouteAnswer) => void> = []
+    vi.mocked(calculateRouteWithLegs).mockImplementation(
+      () => new Promise<RouteAnswer>(resolve => { answers.push(resolve) }),
+    )
+    const { result } = render()
+
+    // Only the first leg has been asked for.
+    expect(answers).toHaveLength(1)
+    await act(async () => { answers[0](answer) })
+
+    // Its day is on the map while the second is still waiting.
+    expect(result.current.loading).toBe(true)
+    expect(result.current.days[0].distance).toBe(12000)
+    expect(result.current.days[1].distance).toBe(0)
+
+    await waitFor(() => expect(answers).toHaveLength(2), { timeout: 3000 })
+    await act(async () => { answers[1](answer) })
+    await waitFor(() => expect(result.current.loading).toBe(false))
+    expect(result.current.totalDistance).toBe(24000)
+  })
+
+  it('FE-MAP-TRO-011: keeps the frame it set on the straight lines until the round is over', async () => {
+    // A fresh `focusPoints` array is what tells the map to fit the camera. One per
+    // answering leg would take the map back from wherever the reader has panned to, so
+    // within a round the frame changes exactly once — on the straight lines — and the
+    // finished roads are framed only on an activation round (see TRO-012/013).
+    const answer: RouteAnswer = {
+      coordinates: [[48.86, 2.35], [48.87, 2.355], [48.88, 2.36]],
+      distance: 12000, duration: 900,
+      legs: [leg(12000, 900)],
+    }
+    const answers: Array<(value: RouteAnswer) => void> = []
+    vi.mocked(calculateRouteWithLegs).mockImplementation(
+      () => new Promise<RouteAnswer>(resolve => { answers.push(resolve) }),
+    )
+    const { result } = render()
+    const frame = result.current.focusPoints
+    expect(frame.length).toBeGreaterThan(0)
+
+    await act(async () => { answers[0](answer) })
+    // The road is drawn, the camera stays put.
+    expect(result.current.days[0].distance).toBe(12000)
+    expect(result.current.focusPoints).toBe(frame)
+
+    await waitFor(() => expect(answers).toHaveLength(2), { timeout: 3000 })
+    await act(async () => { answers[1](answer) })
+    await waitFor(() => expect(result.current.loading).toBe(false))
+    // The finished result frames the roads themselves, which have more points than the
+    // straight lines had — the second of the two fits an activation makes.
+    expect(result.current.focusPoints).not.toBe(frame)
+    expect(result.current.focusPoints.length).toBeGreaterThan(frame.length)
+  })
+
+  it('FE-MAP-TRO-012: editing the trip does not reframe the map', async () => {
+    // Dropping a place onto a day re-plans the route. Publishing a fresh frame for
+    // that recompute yanked the camera mid-edit — the map zoomed out to the whole
+    // trip every time a place was dragged onto the plan.
+    const { result, rerender } = render()
+    await waitFor(() => expect(result.current.loading).toBe(false))
+    const frame = result.current.focusPoints
+    const totalBefore = result.current.totalDistance
+
+    rerender({
+      enabled: true,
+      assignments: {
+        ...ASSIGNMENTS,
+        // The walking override on the middle stop makes the new leg a routing
+        // request of its own: neighbouring legs in one mode travel as a single
+        // chunk, which a third driving stop would have joined instead.
+        '2': [
+          ASSIGNMENTS['2'][0],
+          { ...ASSIGNMENTS['2'][1], leg_transport_mode: 'walking' },
+          at(45.8, 4.9, 2, 2),
+        ],
+      },
+    })
+
+    await waitFor(() => expect(result.current.loading).toBe(false))
+    // The recompute really happened — a third stop means a second leg on day 2.
+    expect(result.current.totalDistance).toBe(totalBefore + 12000)
+    // …and the camera frame is the one the activation published, unchanged.
+    expect(result.current.focusPoints).toBe(frame)
+  })
+
+  it('FE-MAP-TRO-015: a road picked in the road trip re-routes the overview through it (#2580)', async () => {
+    const via = { id: 1, day_id: 1, after_order_index: 0, sequence: 0, lat: 48.95, lng: 2.6, created_at: '' }
+    const { result, rerender } = renderHook(
+      ({ viasByDay }: { viasByDay: Record<number, typeof via[]> }) =>
+        useTripRouteOverview(7, DAYS, ASSIGNMENTS, [], [], 'driving', true, undefined, { storedAssignments: ASSIGNMENTS, viasByDay }),
+      { initialProps: { viasByDay: {} } },
+    )
+    await waitFor(() => expect(result.current.loading).toBe(false))
+    const asked = () => vi.mocked(calculateRouteWithLegs).mock.calls.map(call => call[0].map(p => p.lat))
+    expect(asked()).toEqual([[48.86, 48.88], [45.76, 45.78]])
+
+    rerender({ viasByDay: { 1: [via] } })
+    await waitFor(() => expect(asked()).toHaveLength(3))
+    expect(asked()[2]).toEqual([48.86, 48.95, 48.88])
+  })
+
+  it('FE-MAP-TRO-013: switching the overview back on publishes a fresh frame', async () => {
+    const { result, rerender } = render()
+    await waitFor(() => expect(result.current.loading).toBe(false))
+    const frame = result.current.focusPoints
+
+    rerender({ enabled: false, assignments: ASSIGNMENTS })
+    rerender({ enabled: true, assignments: ASSIGNMENTS })
+
+    await waitFor(() => expect(result.current.loading).toBe(false))
+    expect(result.current.focusPoints).not.toBe(frame)
+  })
+
+  it('FE-MAP-TRO-014: opening another trip with the overview on publishes a fresh frame', async () => {
+    // Same days and stops on purpose: only the trip changed, so nothing but the trip
+    // switch itself can be what asks the map to frame again.
+    const { result, rerender } = renderHook(
+      ({ tripId }: { tripId: number }) =>
+        useTripRouteOverview(tripId, DAYS, ASSIGNMENTS, [], [], 'driving', true),
+      { initialProps: { tripId: 7 } },
+    )
+    await waitFor(() => expect(result.current.loading).toBe(false))
+    const frame = result.current.focusPoints
+
+    rerender({ tripId: 8 })
+
+    await waitFor(() => expect(result.current.focusPoints).not.toBe(frame))
+    await waitFor(() => expect(result.current.loading).toBe(false))
+    expect(result.current.focusPoints).toEqual(frame)
+  })
+})

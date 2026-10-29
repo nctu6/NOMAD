@@ -1,0 +1,775 @@
+// FE-MOB-JDET-001 to FE-MOB-JDET-045
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { render, screen, fireEvent, waitFor, act } from '../../../helpers/render';
+import MJourneyDetail from '../../../../src/mobile/screens/journey/MJourneyDetail';
+import { addonsApi, journeyApi, memoriesApi } from '../../../../src/api/client';
+import { useJourneyStore } from '../../../../src/store/journeyStore';
+import { useAuthStore } from '../../../../src/store/authStore';
+import { useAddonStore } from '../../../../src/store/addonStore';
+import type { GalleryPhoto, JourneyDetail, JourneyEntry } from '../../../../src/store/journeyStore';
+
+const mocks = vi.hoisted(() => ({
+  detail: {} as Record<string, unknown>,
+  focusMarker: vi.fn(),
+  highlightMarker: vi.fn(),
+  captured: {} as Record<string, Record<string, unknown>>,
+}));
+
+vi.mock('../../../../src/pages/journeyDetail/useJourneyDetail', () => ({
+  useJourneyDetail: () => mocks.detail,
+}));
+
+
+vi.mock('../../../../src/components/Journey/JourneyMapAuto', async () => {
+  const React = await import('react');
+  const Comp = React.forwardRef((props: Record<string, unknown>, ref: React.Ref<unknown>) => {
+    React.useImperativeHandle(ref, () => ({
+      focusMarker: mocks.focusMarker,
+      highlightMarker: mocks.highlightMarker,
+      invalidateSize: vi.fn(),
+    }));
+    const entries = props.entries as { id: string }[];
+    const onMarkerClick = props.onMarkerClick as ((id: string) => void) | undefined;
+    return (
+      <div data-testid="journey-map" data-active={String(props.activeMarkerId ?? '')} data-dark={String(props.dark)}>
+        {entries.map(e => (
+          <button key={e.id} type="button" onClick={() => onMarkerClick?.(e.id)}>{`marker-${e.id}`}</button>
+        ))}
+      </div>
+    );
+  });
+  Comp.displayName = 'MockJourneyMapAuto';
+  return { __esModule: true, default: Comp };
+});
+
+vi.mock('../../../../src/components/Journey/PhotoLightbox', () => ({
+  default: (props: Record<string, unknown>) => {
+    mocks.captured.lightbox = props;
+    return <div data-testid="lightbox" />;
+  },
+}));
+
+vi.mock('../../../../src/components/Journey/ContributorInviteDialog', () => ({
+  default: (props: Record<string, unknown>) => {
+    mocks.captured.invite = props;
+    return <div data-testid="invite-dialog" />;
+  },
+}));
+
+vi.mock('../../../../src/components/Journey/JourneyDetailPageProviderPicker', () => ({
+  ProviderPicker: (props: Record<string, unknown>) => {
+    mocks.captured.picker = props;
+    return <div data-testid="provider-picker" />;
+  },
+}));
+
+vi.mock('../../../../src/mobile/screens/journey/MJourneyEntrySheet', () => ({
+  default: (props: Record<string, unknown>) => {
+    mocks.captured.entrySheet = props;
+    return <div data-testid="entry-sheet" data-quick={String(props.quickCapture)} data-readonly={String(props.readOnly)} />;
+  },
+}));
+
+vi.mock('../../../../src/components/Dawarich/DawarichSuggestionsPanel', () => ({
+  default: () => <div data-testid="dawarich-panel" />,
+}));
+
+vi.mock('../../../../src/mobile/screens/journey/MJourneySettingsSheet', () => ({
+  default: (props: Record<string, unknown>) => {
+    mocks.captured.settings = props;
+    return <div data-testid="settings-sheet" />;
+  },
+}));
+
+vi.mock('../../../../src/mobile/screens/journey/MJourneyDayImportSheet', () => ({
+  default: (props: Record<string, unknown>) => {
+    mocks.captured.dayImport = props;
+    return <div data-testid="day-import-sheet" />;
+  },
+}));
+
+// ── Fixtures ─────────────────────────────────────────────────────────────────
+
+function buildEntry(over: Partial<JourneyEntry> = {}): JourneyEntry {
+  return {
+    id: 1,
+    journey_id: 12,
+    author_id: 1,
+    type: 'entry',
+    title: 'Arrival',
+    story: null,
+    entry_date: '2026-05-01',
+    entry_time: '10:00',
+    location_name: 'Tokyo',
+    location_lat: 35.6,
+    location_lng: 139.7,
+    mood: null,
+    weather: null,
+    tags: [],
+    pros_cons: null,
+    visibility: 'private',
+    sort_order: 0,
+    photos: [],
+    created_at: 0,
+    updated_at: 0,
+    ...over,
+  };
+}
+
+function buildGalleryPhoto(over: Partial<GalleryPhoto> = {}): GalleryPhoto {
+  return {
+    id: 501,
+    journey_id: 12,
+    photo_id: 900,
+    caption: 'Shrine',
+    shared: 1,
+    sort_order: 0,
+    created_at: 0,
+    provider: 'local',
+    asset_id: null,
+    owner_id: 1,
+    file_path: null,
+    thumbnail_path: 'thumbs/900.jpg',
+    media_type: 'image',
+    ...over,
+  };
+}
+
+function buildDetail(over: Partial<JourneyDetail> = {}): JourneyDetail {
+  return {
+    id: 12,
+    user_id: 1,
+    title: 'Japan 2026',
+    subtitle: null,
+    cover_gradient: null,
+    cover_image: null,
+    status: 'active',
+    created_at: 0,
+    updated_at: 0,
+    entries: [buildEntry(), buildEntry({ id: 2, title: 'Kyoto', entry_date: '2026-05-02' })],
+    gallery: [],
+    trips: [],
+    contributors: [{ journey_id: 12, user_id: 5, role: 'owner', added_at: 0, username: 'maurice', avatar: null }],
+    stats: { entries: 2, photos: 0, places: 0 },
+    ...over,
+  };
+}
+
+const toast = { success: vi.fn(), error: vi.fn(), warning: vi.fn(), info: vi.fn() };
+
+function buildHook(over: Record<string, unknown> = {}): Record<string, unknown> {
+  const current = (over.current as JourneyDetail | null | undefined) ?? buildDetail();
+  return {
+    id: '12',
+    navigate: vi.fn(),
+    toast,
+    t: (key: string) => key,
+    locale: 'en-US',
+    current,
+    loading: false,
+    canEditEntries: true,
+    canEditJourney: true,
+    view: 'timeline',
+    setView: vi.fn(),
+    editingEntry: null,
+    setEditingEntry: vi.fn(),
+    lightbox: null,
+    setLightbox: vi.fn(),
+    deleteTarget: null,
+    setDeleteTarget: vi.fn(),
+    showInvite: false,
+    setShowInvite: vi.fn(),
+    showSettings: false,
+    setShowSettings: vi.fn(),
+    hideSkeletons: false,
+    setHideSkeletons: vi.fn(),
+    sidebarMapItems: (current?.entries ?? []).map(e => ({ id: String(e.id), lat: 1, lng: 2, title: e.title ?? '' })),
+    // The recorded days (JRN-01) and the day take-over (JRN-02): closed, their sheets have suites of their own.
+    recordings: { byDate: new Map(), dialog: null, open: vi.fn() },
+    canTakeOverRecording: false,
+    dayImport: { open: vi.fn(), dialog: null },
+    dayImportDates: [],
+    dawarichByDate: new Map(),
+    // Preparing the recorded days (JRN-03): not read, so no day is marked and the settings get no switch.
+    recordingPrep: { prep: null, dayPrep: () => null },
+    loadJourney: vi.fn(),
+    updateEntry: vi.fn(async () => {}),
+    deleteEntry: vi.fn(async () => {}),
+    uploadPhotos: vi.fn(async () => ({ succeeded: [], failed: [] })),
+    addPickedProviderPhotos: vi.fn(async () => {}),
+    addEntryProviderPhotos: vi.fn(async () => {}),
+    ...over,
+  };
+}
+
+function setup(over: Record<string, unknown> = {}, entries?: string[]) {
+  mocks.detail = buildHook(over);
+  const view = render(<MJourneyDetail />, entries ? { initialEntries: entries } : undefined);
+  return { ...view, hook: mocks.detail };
+}
+
+/**
+ * Opening the upload the way the shell does since the Gallery took over the
+ * dock's FAB: the button asks through `?create=photo`, the screen answers. The
+ * header no longer carries an upload button of its own — one screen, one upload.
+ */
+const UPLOAD_URL = ['/journey/1?create=photo'];
+
+const journeyStoreInitial = useJourneyStore.getState();
+let uploadGalleryPhotos: ReturnType<typeof vi.fn>;
+let createEntry: ReturnType<typeof vi.fn>;
+
+beforeEach(() => {
+  vi.clearAllMocks();
+  mocks.captured = {};
+  uploadGalleryPhotos = vi.fn(async () => ({ succeeded: [], failed: [] }));
+  createEntry = vi.fn(async () => buildEntry({ id: 77 }));
+  useJourneyStore.setState({ ...journeyStoreInitial, uploadGalleryPhotos, createEntry } as never, true);
+  useAuthStore.setState({ user: { id: 5, username: 'maurice' } } as never);
+  vi.spyOn(addonsApi, 'enabled').mockResolvedValue({ addons: [] });
+  vi.spyOn(memoriesApi, 'status').mockResolvedValue({ connected: false });
+  vi.stubGlobal('fetch', vi.fn(async () => new Response('{}', { status: 200 })));
+});
+
+afterEach(() => {
+  vi.restoreAllMocks();
+  vi.unstubAllGlobals();
+  useJourneyStore.setState(journeyStoreInitial, true);
+  useAddonStore.setState({ addons: [] });
+});
+
+// ── Tests ────────────────────────────────────────────────────────────────────
+
+describe('MJourneyDetail', () => {
+  it('FE-MOB-JDET-001: shows a spinner while the journey is loading', () => {
+    setup({ loading: true, current: null });
+    expect(document.querySelector('.animate-spin')).toBeInTheDocument();
+    expect(screen.queryByTestId('journey-map')).not.toBeInTheDocument();
+  });
+
+  it('FE-MOB-JDET-002: renders one timeline card per entry with the map behind it', () => {
+    setup();
+    expect(screen.getByTestId('journey-map')).toBeInTheDocument();
+    expect(screen.getByText('Arrival')).toBeInTheDocument();
+    expect(screen.getByText('Kyoto')).toBeInTheDocument();
+    expect(screen.getByTestId('journey-map')).toHaveAttribute('data-active', '1');
+  });
+
+  it('FE-MOB-JDET-003: hideSkeletons drops the trip-derived skeleton entries', () => {
+    const current = buildDetail({ entries: [buildEntry(), buildEntry({ id: 3, type: 'skeleton', title: 'Suggested' })] });
+    setup({ current, hideSkeletons: true });
+    expect(screen.getByText('Arrival')).toBeInTheDocument();
+    expect(screen.queryByText('Suggested')).not.toBeInTheDocument();
+  });
+
+  it('FE-MOB-JDET-004: tapping the centred card opens the entry sheet', () => {
+    const { hook } = setup();
+    fireEvent.click(screen.getByText('Arrival'));
+    expect(hook.setEditingEntry).toHaveBeenCalledWith(expect.objectContaining({ id: 1 }));
+  });
+
+  it('FE-MOB-JDET-005: tapping an off-centre card focuses it on the map instead of opening it', () => {
+    const { hook } = setup();
+    fireEvent.click(screen.getByText('Kyoto'));
+    expect(hook.setEditingEntry).not.toHaveBeenCalled();
+    expect(mocks.focusMarker).toHaveBeenCalledWith('2');
+    expect(screen.getByTestId('journey-map')).toHaveAttribute('data-active', '2');
+  });
+
+  it('FE-MOB-JDET-006: clicking a map marker centres the matching card', () => {
+    setup();
+    fireEvent.click(screen.getByRole('button', { name: 'marker-2' }));
+    expect(screen.getByTestId('journey-map')).toHaveAttribute('data-active', '2');
+  });
+
+  it('FE-MOB-JDET-007: a marker without a matching entry leaves the selection alone', () => {
+    const current = buildDetail();
+    setup({
+      current,
+      sidebarMapItems: [{ id: '99', lat: 1, lng: 2, title: 'orphan' }],
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'marker-99' }));
+    expect(screen.getByTestId('journey-map')).toHaveAttribute('data-active', '1');
+  });
+
+  it('FE-MOB-JDET-008: an entry with no marker clears the highlight when it is centred', () => {
+    const current = buildDetail();
+    setup({ current, sidebarMapItems: [{ id: '1', lat: 1, lng: 2, title: 'Arrival' }] });
+    fireEvent.click(screen.getByText('Kyoto'));
+    expect(mocks.highlightMarker).toHaveBeenCalledWith(null);
+  });
+
+  it('FE-MOB-JDET-009: the segment control switches between the journey and gallery tabs', () => {
+    const { hook } = setup();
+    fireEvent.click(screen.getByRole('button', { name: /journey.share.gallery/ }));
+    expect(hook.setView).toHaveBeenCalledWith('gallery');
+    fireEvent.click(screen.getByRole('button', { name: /journey.detail.journeyTab/ }));
+    expect(hook.setView).toHaveBeenCalledWith('timeline');
+  });
+
+  it('FE-MOB-JDET-010: back navigates to the journey list', () => {
+    const { hook } = setup();
+    fireEvent.click(screen.getByRole('button', { name: 'journey.detail.backToJourney' }));
+    expect(hook.navigate).toHaveBeenCalledWith('/journey');
+  });
+
+  it('FE-MOB-JDET-011: the gallery tab shows the empty state when there are no photos', () => {
+    setup({ view: 'gallery' });
+    expect(screen.getByText('journey.detail.noPhotos')).toBeInTheDocument();
+  });
+
+  it('FE-MOB-JDET-012: gallery photos open the lightbox at the tapped index', () => {
+    const gallery = [buildGalleryPhoto(), buildGalleryPhoto({ id: 502, photo_id: 901, caption: null })];
+    const { hook } = setup({ view: 'gallery', current: buildDetail({ gallery }) });
+
+    const tiles = screen.getAllByRole('button').filter(b => b.querySelector('img'));
+    fireEvent.click(tiles[1]);
+    expect(hook.setLightbox).toHaveBeenCalledWith({
+      index: 1,
+      photos: [
+        expect.objectContaining({ id: 501, src: '/api/photos/900/original', caption: 'Shrine' }),
+        expect.objectContaining({ id: 502, src: '/api/photos/901/original', caption: null }),
+      ],
+    });
+  });
+
+  it('FE-MOB-JDET-013: a video without a poster renders a placeholder tile plus the play badge', () => {
+    const gallery = [buildGalleryPhoto({ media_type: 'video', thumbnail_path: null })];
+    setup({ view: 'gallery', current: buildDetail({ gallery }) });
+    expect(document.querySelector('img')).not.toBeInTheDocument();
+    expect(document.querySelector('.absolute.inset-0.flex.items-center')).toBeInTheDocument();
+  });
+
+  it('FE-MOB-JDET-039: a provider clip shows the poster the provider serves, as the desktop gallery does', () => {
+    // A provider row never records a local thumbnail path, so the check the desktop
+    // shares (posterlessVideo) must be the one used here too (#2341 follow-up).
+    const gallery = [buildGalleryPhoto({ media_type: 'video', provider: 'immich', asset_id: 'a1', thumbnail_path: null })];
+    setup({ view: 'gallery', current: buildDetail({ gallery }) });
+    expect(document.querySelector('img[src="/api/photos/900/thumbnail"]')).toBeInTheDocument();
+    expect(document.querySelector('svg.lucide-play')).toBeInTheDocument();
+  });
+
+  it('FE-MOB-JDET-014: uploading from the device sends the picked files and reloads', async () => {
+    const { hook, container } = setup({ view: 'gallery' });
+    const input = container.ownerDocument.querySelector('input[type="file"]') as HTMLInputElement;
+    const file = new File(['x'], 'p.jpg', { type: 'image/jpeg' });
+    fireEvent.change(input, { target: { files: [file] } });
+
+    await waitFor(() => expect(uploadGalleryPhotos).toHaveBeenCalledWith(12, [file]));
+    expect(toast.success).toHaveBeenCalledWith('journey.photosUploaded');
+    expect(hook.loadJourney).toHaveBeenCalledWith(12);
+  });
+
+  it('FE-MOB-JDET-015: a partially failed upload reports the failure count', async () => {
+    const failed = new File(['x'], 'bad.jpg', { type: 'image/jpeg' });
+    uploadGalleryPhotos.mockResolvedValueOnce({ succeeded: [], failed: [failed] });
+    const { container } = setup({ view: 'gallery' });
+    const input = container.ownerDocument.querySelector('input[type="file"]') as HTMLInputElement;
+    fireEvent.change(input, { target: { files: [failed] } });
+
+    await waitFor(() => expect(toast.error).toHaveBeenCalledWith('journey.editor.uploadPartialFailed'));
+  });
+
+  it('FE-MOB-JDET-016: a rejected upload surfaces the API error', async () => {
+    uploadGalleryPhotos.mockRejectedValueOnce(new Error('disk full'));
+    const { container } = setup({ view: 'gallery' });
+    const input = container.ownerDocument.querySelector('input[type="file"]') as HTMLInputElement;
+    fireEvent.change(input, { target: { files: [new File(['x'], 'p.jpg', { type: 'image/jpeg' })] } });
+
+    await waitFor(() => expect(toast.error).toHaveBeenCalledWith('disk full'));
+  });
+
+  it('FE-MOB-JDET-017: an empty file selection does not upload', () => {
+    const { container } = setup({ view: 'gallery' });
+    const input = container.ownerDocument.querySelector('input[type="file"]') as HTMLInputElement;
+    fireEvent.change(input, { target: { files: [] } });
+    expect(uploadGalleryPhotos).not.toHaveBeenCalled();
+  });
+
+  it('FE-MOB-JDET-018: a connected photo provider turns the upload button into a source chooser', async () => {
+    vi.mocked(addonsApi.enabled).mockResolvedValue({
+      addons: [
+        { id: 'immich', name: 'Immich', type: 'photo_provider', enabled: true },
+        { id: 'legacy', name: 'Legacy', type: 'other', enabled: true },
+      ],
+    });
+    vi.mocked(memoriesApi.status).mockResolvedValue({ connected: true });
+    setup({ view: 'gallery' }, UPLOAD_URL);
+
+    expect(await screen.findByText('mobileJourney.uploadFromDevice')).toBeInTheDocument();
+    fireEvent.click(screen.getByText('mobileJourney.browseProvider'));
+    expect(await screen.findByTestId('provider-picker')).toBeInTheDocument();
+  });
+
+  it('FE-MOB-JDET-019: the picker Add goes through the shared provider hook for this journey, then closes the picker', async () => {
+    vi.mocked(addonsApi.enabled).mockResolvedValue({
+      addons: [{ id: 'immich', name: 'Immich', type: 'photo_provider', enabled: true }],
+    });
+    vi.mocked(memoriesApi.status).mockResolvedValue({ connected: true });
+    const { hook } = setup({ view: 'gallery' }, UPLOAD_URL);
+
+    fireEvent.click(await screen.findByText('mobileJourney.browseProvider'));
+    await screen.findByTestId('provider-picker');
+
+    // Counting, reloading and reporting a failure, a partial one included, are
+    // the hook's (FE-JRN-PPADD), shared with the desktop gallery.
+    const onAdd = mocks.captured.picker.onAdd as (g: { assetIds: string[] }[], entryId: number | null) => Promise<void>;
+    await act(async () => { await onAdd([{ assetIds: ['a1'] }], null); });
+    expect(hook.addPickedProviderPhotos).toHaveBeenCalledWith(12, 'immich', [{ assetIds: ['a1'] }], null);
+    await waitFor(() => expect(screen.queryByTestId('provider-picker')).not.toBeInTheDocument());
+  });
+
+  it('FE-MOB-JDET-020: an entry picked in the picker travels with the groups', async () => {
+    vi.mocked(addonsApi.enabled).mockResolvedValue({
+      addons: [{ id: 'immich', name: 'Immich', type: 'photo_provider', enabled: true }],
+    });
+    vi.mocked(memoriesApi.status).mockResolvedValue({ connected: true });
+    const { hook } = setup({ view: 'gallery' }, UPLOAD_URL);
+
+    fireEvent.click(await screen.findByText('mobileJourney.browseProvider'));
+    await screen.findByTestId('provider-picker');
+
+    const onAdd = mocks.captured.picker.onAdd as (g: { assetIds: string[] }[], entryId: number | null) => Promise<void>;
+    await act(async () => { await onAdd([{ assetIds: ['a2'] }], 1); });
+    expect(hook.addPickedProviderPhotos).toHaveBeenCalledWith(12, 'immich', [{ assetIds: ['a2'] }], 1);
+  });
+
+  it('FE-MOB-JDET-021: the entry sheet creates a new entry in quick-capture mode', async () => {
+    const { hook } = setup({ editingEntry: buildEntry({ id: 0, title: null }) });
+    const sheet = mocks.captured.entrySheet;
+    expect(screen.getByTestId('entry-sheet')).toHaveAttribute('data-quick', 'true');
+    expect(sheet.onDelete).toBeUndefined();
+
+    const onSave = sheet.onSave as (d: Record<string, unknown>) => Promise<number>;
+    await expect(onSave({ title: 'Fresh' })).resolves.toBe(77);
+    expect(createEntry).toHaveBeenCalledWith(12, { title: 'Fresh' });
+
+    (sheet.onDone as () => void)();
+    expect(hook.setEditingEntry).toHaveBeenCalledWith(null);
+    expect(hook.loadJourney).toHaveBeenCalledWith(12);
+  });
+
+  it('FE-MOB-JDET-022: editing an existing entry updates it and can hand off to the delete confirm', async () => {
+    const entry = buildEntry({ id: 4, title: 'Old' });
+    const { hook } = setup({ editingEntry: entry });
+    const sheet = mocks.captured.entrySheet;
+
+    const onSave = sheet.onSave as (d: Record<string, unknown>) => Promise<number>;
+    await expect(onSave({ title: 'New' })).resolves.toBe(4);
+    expect(hook.updateEntry).toHaveBeenCalledWith(4, { title: 'New' });
+
+    (sheet.onDelete as () => void)();
+    expect(hook.setEditingEntry).toHaveBeenCalledWith(null);
+    expect(hook.setDeleteTarget).toHaveBeenCalledWith(entry);
+  });
+
+  it('FE-MOB-JDET-023: a read-only viewer gets the sheet without a delete action', () => {
+    setup({ canEditEntries: false, editingEntry: buildEntry({ id: 4 }) });
+    expect(screen.getByTestId('entry-sheet')).toHaveAttribute('data-readonly', 'true');
+    expect(mocks.captured.entrySheet.onDelete).toBeUndefined();
+  });
+
+  it('FE-MOB-JDET-024: confirming the delete removes the entry and reloads', async () => {
+    const target = buildEntry({ id: 4, title: 'Old' });
+    const { hook } = setup({ deleteTarget: target });
+    fireEvent.click(screen.getByRole('button', { name: 'common.delete' }));
+
+    await waitFor(() => expect(hook.deleteEntry).toHaveBeenCalledWith(4));
+    expect(hook.setDeleteTarget).toHaveBeenCalledWith(null);
+    expect(hook.loadJourney).toHaveBeenCalledWith(12);
+  });
+
+  it('FE-MOB-JDET-025: settings and invite dialogs wire their callbacks back into the hook', () => {
+    const { hook } = setup({ showSettings: true, showInvite: true });
+
+    expect(screen.getByTestId('settings-sheet')).toBeInTheDocument();
+    (mocks.captured.settings.onSaved as () => void)();
+    expect(hook.setShowSettings).toHaveBeenCalledWith(false);
+    (mocks.captured.settings.onOpenInvite as () => void)();
+    expect(hook.setShowInvite).toHaveBeenCalledWith(true);
+    (mocks.captured.settings.onRefresh as () => void)();
+
+    expect(screen.getByTestId('invite-dialog')).toBeInTheDocument();
+    expect(mocks.captured.invite.existingUserIds).toEqual([5]);
+    (mocks.captured.invite.onInvited as () => void)();
+    expect(hook.setShowInvite).toHaveBeenCalledWith(false);
+    expect(hook.loadJourney).toHaveBeenCalledWith(12);
+  });
+
+  it('FE-MOB-JDET-026: the overflow sheet opens the settings for an owner only', () => {
+    const { hook, unmount } = setup();
+    fireEvent.click(screen.getByRole('button', { name: 'files.menu' }));
+    fireEvent.click(screen.getByText('journey.settings.title'));
+    expect(hook.setShowSettings).toHaveBeenCalledWith(true);
+    unmount();
+
+    setup({ canEditJourney: false });
+    fireEvent.click(screen.getByRole('button', { name: 'files.menu' }));
+    expect(screen.queryByText('journey.settings.title')).not.toBeInTheDocument();
+  });
+
+  it('FE-MOB-JDET-027: the lightbox renders the mapped photos and closes back into the hook', () => {
+    const { hook } = setup({
+      lightbox: { photos: [{ id: 501, src: '/api/photos/900/original', caption: 'Shrine', mediaType: 'image' }], index: 0 },
+    });
+    expect(screen.getByTestId('lightbox')).toBeInTheDocument();
+    expect(mocks.captured.lightbox.photos).toEqual([
+      expect.objectContaining({ id: '501', src: '/api/photos/900/original', caption: 'Shrine' }),
+    ]);
+    (mocks.captured.lightbox.onClose as () => void)();
+    expect(hook.setLightbox).toHaveBeenCalledWith(null);
+  });
+
+  it('FE-MOB-JDET-028: a settled carousel scroll re-centres the map on the nearest card', async () => {
+    setup();
+    // An unrelated render (here the photo-provider probe resolving) must not
+    // tear the scroll listener down and drop the pending settle timer.
+    fireEvent.click(screen.getByText('Kyoto'));
+    expect(screen.getByTestId('journey-map')).toHaveAttribute('data-active', '2');
+
+    const carousel = document.querySelector('.overflow-x-auto') as HTMLElement;
+    // two bursts in a row: only the last one may settle
+    fireEvent.scroll(carousel);
+    fireEvent.scroll(carousel);
+    await waitFor(() => expect(screen.getByTestId('journey-map')).toHaveAttribute('data-active', '1'));
+  });
+
+  it('FE-MOB-JDET-029: the device row of the upload chooser opens the file picker', async () => {
+    vi.mocked(addonsApi.enabled).mockResolvedValue({
+      addons: [{ id: 'immich', name: 'Immich', type: 'photo_provider', enabled: true }],
+    });
+    vi.mocked(memoriesApi.status).mockResolvedValue({ connected: true });
+    // The upload opens on mount now (the dock asks through the URL), so the spy
+    // goes on the prototype rather than on an input that does not exist yet.
+    const click = vi.spyOn(HTMLInputElement.prototype, 'click').mockImplementation(() => {});
+    setup({ view: 'gallery' }, UPLOAD_URL);
+
+    fireEvent.click(await screen.findByText('mobileJourney.uploadFromDevice'));
+    expect(click).toHaveBeenCalled();
+    await waitFor(() => expect(screen.queryByText('mobileJourney.uploadFromDevice')).not.toBeInTheDocument());
+  });
+
+  it('FE-MOB-JDET-030: a provider that reports itself as disconnected stays hidden', async () => {
+    vi.mocked(addonsApi.enabled).mockResolvedValue({
+      addons: [{ id: 'immich', name: 'Immich', type: 'photo_provider', enabled: true }],
+    });
+    vi.mocked(memoriesApi.status).mockResolvedValue({ connected: false });
+    const click = vi.spyOn(HTMLInputElement.prototype, 'click').mockImplementation(() => {});
+    setup({ view: 'gallery' }, UPLOAD_URL);
+
+    await waitFor(() => expect(click).toHaveBeenCalled());
+    expect(screen.queryByText('mobileJourney.uploadFromDevice')).not.toBeInTheDocument();
+  });
+
+  it('FE-MOB-JDET-031: closing the entry sheet, settings, invite and picker resets the hook state', async () => {
+    vi.mocked(addonsApi.enabled).mockResolvedValue({
+      addons: [{ id: 'immich', name: 'Immich', type: 'photo_provider', enabled: true }],
+    });
+    vi.mocked(memoriesApi.status).mockResolvedValue({ connected: true });
+    const gallery = [buildGalleryPhoto({ id: 601, asset_id: 'asset-1' }), buildGalleryPhoto({ id: 602, asset_id: null })];
+    const { hook } = setup({
+      view: 'gallery',
+      current: buildDetail({ gallery }),
+      editingEntry: buildEntry({ id: 4 }),
+      showSettings: true,
+      showInvite: true,
+    }, UPLOAD_URL);
+
+    (mocks.captured.entrySheet.onClose as () => void)();
+    expect(hook.setEditingEntry).toHaveBeenCalledWith(null);
+    (mocks.captured.settings.onClose as () => void)();
+    expect(hook.setShowSettings).toHaveBeenCalledWith(false);
+    (mocks.captured.invite.onClose as () => void)();
+    expect(hook.setShowInvite).toHaveBeenCalledWith(false);
+
+    fireEvent.click(await screen.findByText('mobileJourney.browseProvider'));
+    await screen.findByTestId('provider-picker');
+    expect([...(mocks.captured.picker.existingAssetIds as Set<string>)]).toEqual(['asset-1']);
+
+    (mocks.captured.picker.onClose as () => void)();
+    await waitFor(() => expect(screen.queryByTestId('provider-picker')).not.toBeInTheDocument());
+  });
+
+  // ── Suggestions on the phone (#1848) ──────────────────────────────────────
+
+  /*
+   * No book export on a phone at all. The book is a Studio document now and
+   * Studio is a desktop editor — a phone-sized PDF of something laid out for
+   * print was the old export's answer to a question nobody was asking.
+   */
+  it('FE-MOB-JDET-032: the overflow sheet offers no book export', () => {
+    setup();
+    fireEvent.click(screen.getByRole('button', { name: 'files.menu' }));
+    expect(screen.queryByText('journey.pdf.saveAsPdf')).not.toBeInTheDocument();
+  });
+
+  it('FE-MOB-JDET-033: the suggestions switch flips hide_skeletons and persists it', async () => {
+    const update = vi.spyOn(journeyApi, 'updatePreferences').mockResolvedValue({});
+    const { hook } = setup();
+    fireEvent.click(screen.getByRole('button', { name: 'files.menu' }));
+
+    const toggle = screen.getByRole('switch', { name: 'journey.skeletons.hide' });
+    expect(toggle).toHaveAttribute('aria-checked', 'false');
+    fireEvent.click(toggle);
+
+    expect(hook.setHideSkeletons).toHaveBeenCalledWith(true);
+    await waitFor(() => expect(update).toHaveBeenCalledWith(12, { hide_skeletons: true }));
+  });
+
+  it('FE-MOB-JDET-034: a failing preference write leaves the local flip standing', async () => {
+    vi.spyOn(journeyApi, 'updatePreferences').mockRejectedValue(new Error('offline'));
+    const { hook } = setup({ hideSkeletons: true });
+    fireEvent.click(screen.getByRole('button', { name: 'files.menu' }));
+
+    const toggle = screen.getByRole('switch', { name: 'journey.skeletons.hide' });
+    expect(toggle).toHaveAttribute('aria-checked', 'true');
+    fireEvent.click(toggle);
+
+    await waitFor(() => expect(hook.setHideSkeletons).toHaveBeenCalledWith(false));
+    expect(toast.error).not.toHaveBeenCalled();
+  });
+
+  // ── External photos in the phone entry editor (#1808) ─────────────────────
+
+  it('FE-MOB-JDET-035: the entry sheet gets the provider context and the shared entry add', () => {
+    const trips = [{ trip_id: 3, added_at: 0, title: 'Tokyo', start_date: '2026-05-01', end_date: '2026-05-04', cover_image: null, currency: 'EUR', place_count: 2 }];
+    const { hook } = setup({ current: buildDetail({ trips }), editingEntry: buildEntry({ id: 4 }) });
+
+    expect(mocks.captured.entrySheet.userId).toBe(5);
+    expect(mocks.captured.entrySheet.trips).toEqual(trips);
+    // The same add the desktop editor gets, so a group that fails part way is
+    // handled once for both shells.
+    expect(mocks.captured.entrySheet.onAddProviderPhotos).toBe(hook.addEntryProviderPhotos);
+  });
+
+  it('FE-MOB-JDET-036: a retried save updates the entry that was already created', async () => {
+    const { hook } = setup({ editingEntry: buildEntry({ id: 0, title: null }) });
+    const onSave = mocks.captured.entrySheet.onSave as (d: Record<string, unknown>, id?: number) => Promise<number>;
+
+    await expect(onSave({ title: 'Fresh' })).resolves.toBe(77);
+    expect(createEntry).toHaveBeenCalledTimes(1);
+
+    // Second attempt hands back the id from the first one — no second create.
+    await expect(onSave({ title: 'Fresh' }, 77)).resolves.toBe(77);
+    expect(createEntry).toHaveBeenCalledTimes(1);
+    expect(hook.updateEntry).toHaveBeenCalledWith(77, { title: 'Fresh' });
+  });
+
+  // Leaving the screen mid-probe used to leave the requests running and land a
+  // setState on a gone component. The probes are sequential, so the queue has to
+  // stop as well instead of walking the rest of the providers.
+  it('FE-MOB-JDET-038: leaving the screen stops the provider probes', async () => {
+    vi.mocked(addonsApi.enabled).mockResolvedValue({
+      addons: [
+        { id: 'immich', name: 'Immich', type: 'photo_provider', enabled: true },
+        { id: 'synology', name: 'Synology', type: 'photo_provider', enabled: true },
+      ],
+    });
+    let release: (value: { connected: boolean }) => void = () => {};
+    vi.mocked(memoriesApi.status).mockReturnValue(new Promise(resolve => { release = resolve; }));
+    const { unmount } = setup({ view: 'gallery' });
+
+    await waitFor(() => expect(memoriesApi.status).toHaveBeenCalledTimes(1));
+
+    unmount();
+    await act(async () => { release({ connected: true }); });
+    expect(memoriesApi.status).toHaveBeenCalledTimes(1);
+  });
+
+  it('FE-MOB-JDET-037: the screen measures itself, not the shell', () => {
+    // #1809: the shell scrolls with the document now and hands down no definite
+    // height. A map on a percentage of an auto-height parent collapses to zero.
+    const { container } = setup();
+    expect(container.firstElementChild).toHaveClass('h-dvh');
+  });
+  it('FE-MOB-JDET-040: an editor gets a delete button on every gallery tile, a viewer none (#2593)', () => {
+    const gallery = [buildGalleryPhoto(), buildGalleryPhoto({ id: 502, photo_id: 901 })];
+    const { unmount } = setup({ view: 'gallery', current: buildDetail({ gallery }) });
+    expect(screen.getAllByRole('button', { name: 'common.delete' })).toHaveLength(2);
+    unmount();
+
+    setup({ view: 'gallery', current: buildDetail({ gallery }), canEditEntries: false });
+    expect(screen.queryByRole('button', { name: 'common.delete' })).not.toBeInTheDocument();
+  });
+
+  it('FE-MOB-JDET-041: the tile delete asks first and only then deletes the photo', async () => {
+    const deleteGalleryPhoto = vi.fn(async () => {});
+    useJourneyStore.setState({ deleteGalleryPhoto } as never);
+    const gallery = [buildGalleryPhoto(), buildGalleryPhoto({ id: 502, photo_id: 901 })];
+    const { hook } = setup({ view: 'gallery', current: buildDetail({ gallery }) });
+
+    fireEvent.click(screen.getAllByRole('button', { name: 'common.delete' })[1]);
+    expect(hook.setLightbox).not.toHaveBeenCalled();
+    expect(deleteGalleryPhoto).not.toHaveBeenCalled();
+    expect(screen.getByText('journey.gallery.deleteMessage')).toBeInTheDocument();
+
+    const confirm = screen.getAllByRole('button', { name: 'common.delete' }).slice(-1)[0];
+    fireEvent.click(confirm);
+    await waitFor(() => expect(deleteGalleryPhoto).toHaveBeenCalledWith(12, 502));
+    expect(screen.queryByText('journey.gallery.deleteMessage')).not.toBeInTheDocument();
+  });
+
+  it('FE-MOB-JDET-042: cancelling the photo confirm deletes nothing', () => {
+    const deleteGalleryPhoto = vi.fn(async () => {});
+    useJourneyStore.setState({ deleteGalleryPhoto } as never);
+    setup({ view: 'gallery', current: buildDetail({ gallery: [buildGalleryPhoto()] }) });
+
+    fireEvent.click(screen.getByRole('button', { name: 'common.delete' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+
+    expect(screen.queryByText('journey.gallery.deleteMessage')).not.toBeInTheDocument();
+    expect(deleteGalleryPhoto).not.toHaveBeenCalled();
+  });
+
+  it('FE-MOB-JDET-043: a failed photo delete reports it and reloads the journey', async () => {
+    const deleteGalleryPhoto = vi.fn(async () => { throw new Error('nope'); });
+    useJourneyStore.setState({ deleteGalleryPhoto } as never);
+    const { hook } = setup({ view: 'gallery', current: buildDetail({ gallery: [buildGalleryPhoto()] }) });
+
+    fireEvent.click(screen.getByRole('button', { name: 'common.delete' }));
+    fireEvent.click(screen.getAllByRole('button', { name: 'common.delete' }).slice(-1)[0]);
+
+    await waitFor(() => expect(toast.error).toHaveBeenCalledWith('common.error'));
+    expect(hook.loadJourney).toHaveBeenCalledWith(12);
+  });
+
+  it('FE-MOB-JDET-044: a journey holding only stays offers each waiting day for a take-over from the stay sheet', () => {
+    useAddonStore.setState({ addons: [{ id: 'dawarich', enabled: true }] as never, loaded: true });
+    const stays = new Map([['2026-05-03', [{ id: 1 }, { id: 2 }]]]);
+    const { hook } = setup({
+      current: buildDetail({ entries: [], stats: { entries: 0, photos: 0, places: 0 } }),
+      canTakeOverRecording: true,
+      dawarichByDate: stays,
+      dayImportDates: ['2026-05-03'],
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: 'dawarich.suggestions.title' }));
+    const row = screen.getByRole('button', { name: /journey\.dayImport\.openOn/ });
+    expect(row).toHaveTextContent('2');
+    fireEvent.click(row);
+
+    expect((hook.dayImport as { open: ReturnType<typeof vi.fn> }).open).toHaveBeenCalledWith('2026-05-03');
+    expect(screen.queryByTestId('dawarich-panel')).not.toBeInTheDocument();
+  });
+
+  it('FE-MOB-JDET-045: a waiting day the journey prepares carries a dot that says why it is not final, and its sheet gets the status (JRN-03)', () => {
+    useAddonStore.setState({ addons: [{ id: 'dawarich', enabled: true }] as never, loaded: true });
+    const recordingPrep = {
+      prep: { enabled: true },
+      dayPrep: () => ({ state: 'running', failed: false, lastSuccessAt: null }),
+    };
+    setup({
+      current: buildDetail({ entries: [], stats: { entries: 0, photos: 0, places: 0 } }),
+      canTakeOverRecording: true,
+      dawarichByDate: new Map([['2026-05-03', [{ id: 1 }]]]),
+      dayImportDates: ['2026-05-03'],
+      dayImport: { open: vi.fn(), dialog: { journeyId: 1, date: '2026-05-03', dayColor: '#123456' } },
+      recordingPrep,
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: 'dawarich.suggestions.title' }));
+    expect(screen.getByRole('img', { name: 'journey.prep.dayRunning' })).toBeInTheDocument();
+    expect(screen.getByTestId('day-import-sheet')).toBeInTheDocument();
+    expect(mocks.captured.dayImport.prep).toBe(recordingPrep);
+  });
+});

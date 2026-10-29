@@ -1,0 +1,396 @@
+import { readEnv } from '../../app-config';
+import { AppSettings } from '../../db/entities/AppSettings.entity';
+import { Settings } from '../../db/entities/Settings.entity';
+import type { AppSettingsRepository } from '../../db/repositories/AppSettings.repository';
+import type { SettingsRepository } from '../../db/repositories/Settings.repository';
+import { readAppSetting, type AppSettingKey } from '../common/app-settings.registry';
+import { decrypt_api_key, maybe_encrypt_api_key } from '../common/crypto/apiKeyCrypto';
+import { UnitOfWork } from '../database/unit-of-work';
+import { TripMembershipService } from '../trip-membership/trip-membership.service';
+import { InjectRepository } from '@mikro-orm/nestjs';
+import { Injectable } from '@nestjs/common';
+import {
+  MASKED_SETTING_VALUE,
+  PLANNER_TRIP_VIEWS_KEY,
+  WEEK_START_VALUES,
+  compactPlannerTripViews,
+  normalizeAppearance,
+  plannerTripViewsSchema,
+  type PlannerTripViews,
+} from '@trek/shared';
+
+/**
+ * Exported so a caller that hands settings to somebody else can assert its own
+ * allow-list against the live values rather than a copy: a sixth key added here
+ * has to fail that assertion, which a hand-typed list would not.
+ */
+export const ENCRYPTED_SETTING_KEYS = new Set([
+  'webhook_url',
+  'ntfy_token',
+  'mapbox_access_token',
+  'carto_api_key',
+  'llm_api_key',
+]);
+// Encrypted keys that are masked (••••••••) when returned to the client.
+// Keys not in this set but in ENCRYPTED_SETTING_KEYS are decrypted and returned.
+export const MASKED_SETTING_KEYS = new Set(['webhook_url', 'ntfy_token', 'llm_api_key']);
+
+export const DEFAULTABLE_USER_SETTING_KEYS = [
+  'temperature_unit',
+  'distance_unit',
+  'dark_mode',
+  'time_format',
+  // First day of the week in every date picker (#2029).
+  'week_start',
+  // Instance-wide default currency for Costs (new users inherit it until they
+  // pick their own). Free-form ISO code, validated on the client.
+  'default_currency',
+  'blur_booking_codes',
+  'map_tile_url',
+  /**
+   * Base URL of the routing engine, when the instance runs its own (#1797).
+   *
+   * Empty means the public OSRM hosts TREK ships with, which allow roughly one request a
+   * second — enough for a day plan, not for a road trip that routes every leg of every
+   * day, and they answer nothing beyond plain routing. Defaultable rather than per-user
+   * because a routing engine is a property of the deployment, not a taste.
+   *
+   * Changing it needs a server restart: the browser's connect-src allowlist is assembled
+   * once at boot, and a router the policy does not name fails silently.
+   */
+  'routing_base_url',
+  /**
+   * The second engine, asked only what OSRM cannot answer: drive this leg without the
+   * tolls, the motorway or the ferry. The shipped OSRM hosts refuse `exclude` outright,
+   * so on a default install that question has never had an answer.
+   *
+   * Same class as the key above and for the same reason: it names an origin the BROWSER
+   * connects to, so it has to be in the boot-time connect-src, and changing it needs a
+   * restart. Empty falls back to the public Valhalla, unless routing_base_url names an
+   * own engine — an operator who chose their own router is not given a public third
+   * party they never asked for.
+   */
+  'valhalla_base_url',
+  // CARTO stamps an "API KEY REQUIRED" watermark into keyless tiles (#2054), and
+  // the key is per-instance rather than per-person: defaultable so one admin
+  // value clears the watermark for everybody at once.
+  'carto_api_key',
+  // Instance-wide GL map defaults: admins can set Mapbox token/style or
+  // tokenless MapLibre/OpenFreeMap style defaults for new users (#920).
+  'map_provider',
+  'mapbox_access_token',
+  'mapbox_style',
+  'maplibre_style',
+  'mapbox_3d_enabled',
+  'mapbox_quality_mode',
+  // Per-user LLM fallback config for booking import (used when the admin has not
+  // set instance-wide config on the llm_parsing addon). See llmConfig.ts.
+  'llm_provider',
+  'llm_model',
+  'llm_base_url',
+  'llm_multimodal',
+  'llm_api_key',
+] as const;
+
+type DefaultableKey = (typeof DEFAULTABLE_USER_SETTING_KEYS)[number];
+
+const DEFAULTABLE_USER_SETTING_KEY_SET = new Set<string>(DEFAULTABLE_USER_SETTING_KEYS);
+
+const VALID_VALUES: Partial<Record<DefaultableKey, unknown[]>> = {
+  temperature_unit: ['fahrenheit', 'celsius'],
+  distance_unit: ['metric', 'imperial'],
+  time_format: ['12h', '24h'],
+  week_start: [...WEEK_START_VALUES],
+  dark_mode: [true, false, 'light', 'dark', 'auto'],
+  map_provider: ['leaflet', 'mapbox-gl', 'maplibre-gl'],
+  llm_provider: ['local', 'openai', 'anthropic'],
+};
+
+const BOOLEAN_KEYS = new Set<DefaultableKey>([
+  'blur_booking_codes',
+  'mapbox_3d_enabled',
+  'mapbox_quality_mode',
+  'llm_multimodal',
+]);
+
+/**
+ * Per-user settings that name an address, which a non-admin must not write.
+ *
+ * #1772 for the LLM pair: both pick where this server sends its own LLM
+ * requests (provider 'local' means nothing but "an endpoint I name"), and the
+ * SSRF guard in front of those requests allows loopback and LAN on purpose so a
+ * self-hosted Ollama works. Only whoever runs the instance can judge what is
+ * reachable from it.
+ *
+ * `routing_base_url` (#1797) is the same class for a different reason: it names
+ * an origin the BROWSER connects to, so it has to appear in the CSP
+ * `connect-src` the server emits at boot — and that list is built from the admin
+ * default, which is the only place a value can take effect. A row on a personal
+ * settings record is read by the route calculator and blocked by the browser, so
+ * the whole app stops routing with no catchable error. Refusing it here means
+ * the caller finds out instead of silently breaking their own map.
+ *
+ * Clearing stays open to everyone: the Settings sections send an empty string
+ * while the field is hidden, so a row written before this rule cleans itself up
+ * on the next save instead of blocking it.
+ */
+export function isAdminOnlyEndpointSetting(key: string, value: unknown): boolean {
+  if (key === 'llm_base_url' || key === 'routing_base_url' || key === 'valhalla_base_url') {
+    return typeof value === 'string' && value.trim() !== '';
+  }
+  if (key === 'llm_provider') return value === 'local';
+  return false;
+}
+
+function parseValue(raw: string): unknown {
+  try {
+    return JSON.parse(raw);
+  } catch {
+    return raw;
+  }
+}
+
+function serializeValue(key: string, value: unknown): string {
+  // The appearance blob drives the DOM on the client — normalize it on the way
+  // in so a malformed/partial/future-versioned payload can never be stored (and
+  // thus never reach the writer). Unknown/invalid fields collapse to the default.
+  if (key === 'appearance') value = normalizeAppearance(value);
+  // null and undefined both mean "cleared" and store '' — the legacy code stored
+  // the string "null" for null, which leaked back out of getDecryptedUserSetting
+  // as a literal four-character "null" (e.g. as an LLM API key).
+  const raw =
+    value === null || value === undefined ? '' : typeof value === 'object' ? JSON.stringify(value) : String(value);
+  if (ENCRYPTED_SETTING_KEYS.has(key)) return maybe_encrypt_api_key(raw) ?? raw;
+  return raw;
+}
+
+/**
+ * Per-user key/value preferences and the admin-set instance-wide defaults
+ * (`default_user_setting_*` rows in app_settings). SQL, masking/merge behavior
+ * and secret encryption moved from the legacy services/settingsService.
+ * Post-migration fixes over the legacy code: null serializes as '' like
+ * undefined (a stored "null" leaked out of getDecryptedUserSetting as the
+ * literal string), and bulk upserts skip masked-sentinel values (mirroring the
+ * single-upsert no-op, so a bulk save echoing a masked secret can never
+ * destroy the stored secret) and return the count actually written.
+ */
+@Injectable()
+export class SettingsService {
+  constructor(
+    private readonly uow: UnitOfWork,
+    @InjectRepository(AppSettings) private readonly appSettings: AppSettingsRepository,
+    @InjectRepository(Settings) private readonly settings: SettingsRepository,
+    private readonly membership: TripMembershipService,
+  ) {}
+
+  /**
+   * The planner's remembered view switches (#2639), reduced to trips this user
+   * can still open and to switches that are on. The client only ever adds to
+   * the row, so this is where a deleted trip, or one the user was removed
+   * from, leaves it again. Anything the contract does not accept is stored as
+   * an empty row; the controller has already answered 400 for a request.
+   */
+  private async keepOpenableTripViews(userId: number, value: unknown): Promise<PlannerTripViews | null> {
+    if (value === null || value === undefined) return null;
+    const parsed = plannerTripViewsSchema.safeParse(value);
+    if (!parsed.success) return {};
+    const views = compactPlannerTripViews(parsed.data);
+    if (Object.keys(views).length === 0) return views;
+    const openable = new Set((await this.membership.listAccessibleTripIds(userId)).map(String));
+    return Object.fromEntries(Object.entries(views).filter(([tripId]) => openable.has(tripId)));
+  }
+
+  private async prepareValue(userId: number, key: string, value: unknown): Promise<unknown> {
+    return key === PLANNER_TRIP_VIEWS_KEY ? await this.keepOpenableTripViews(userId, value) : value;
+  }
+
+  async getAdminUserDefaults(): Promise<Record<string, unknown>> {
+    const rows = await this.appSettings.findByKeyPrefix('default_user_setting_');
+    const defaults: Record<string, unknown> = {};
+    for (const row of rows) {
+      const settingKey = (row.key ?? '').slice('default_user_setting_'.length);
+      if (ENCRYPTED_SETTING_KEYS.has(settingKey)) {
+        defaults[settingKey] = row.value ? (decrypt_api_key(row.value) ?? '') : '';
+      } else {
+        // Parity with the legacy `parseValue(row.value)` call this replaced:
+        // `JSON.parse(null)` coerces its argument to the string "null" and
+        // returns the JS value `null`, so a NULL-valued row parsed to `null`.
+        // `row.value ?? ''` would instead call `parseValue('')`, which throws
+        // inside JSON.parse and falls back to the empty string — a silent
+        // divergence for a case parseValue never actually threw on before.
+        defaults[settingKey] = row.value === null ? null : parseValue(row.value);
+      }
+    }
+    return defaults;
+  }
+
+  async setAdminUserDefaults(partial: Record<string, unknown>): Promise<void> {
+    await this.uow.transactional(async () => {
+      for (const [key, value] of Object.entries(partial)) {
+        if (!(DEFAULTABLE_USER_SETTING_KEYS as readonly string[]).includes(key)) {
+          throw new Error(`Invalid setting key: ${key}`);
+        }
+        const typedKey = key as DefaultableKey;
+        const appKey = `default_user_setting_${key}`;
+
+        // null/undefined means "reset to built-in default" — delete the row
+        if (value === null || value === undefined) {
+          await this.appSettings.deleteValue(appKey);
+          continue;
+        }
+
+        if (BOOLEAN_KEYS.has(typedKey) && typeof value !== 'boolean') {
+          throw new Error(`Setting ${key} must be a boolean`);
+        }
+        const allowed = VALID_VALUES[typedKey];
+        if (allowed && !allowed.includes(value)) {
+          throw new Error(`Invalid value for ${key}: ${value}`);
+        }
+
+        // Encrypt sensitive defaults (the shared Mapbox token) at rest, like the
+        // per-user equivalents; everything else is stored as plain JSON.
+        const stored = ENCRYPTED_SETTING_KEYS.has(key)
+          ? (maybe_encrypt_api_key(String(value)) ?? String(value))
+          : JSON.stringify(value);
+        await this.appSettings.setValue(appKey, stored);
+      }
+    });
+  }
+
+  async getUserSettings(userId: number): Promise<Record<string, unknown>> {
+    const adminDefaults = await this.getAdminUserDefaults();
+
+    const rows = await this.settings.getForUser(userId);
+    const userSettings: Record<string, unknown> = {};
+    for (const row of rows) {
+      if (MASKED_SETTING_KEYS.has(row.key)) {
+        userSettings[row.key] = row.value ? MASKED_SETTING_VALUE : '';
+        continue;
+      }
+      if (ENCRYPTED_SETTING_KEYS.has(row.key)) {
+        userSettings[row.key] = row.value ? (decrypt_api_key(row.value) ?? '') : '';
+        continue;
+      }
+      try {
+        userSettings[row.key] = JSON.parse(row.value);
+      } catch {
+        userSettings[row.key] = row.value;
+      }
+    }
+
+    // Admin defaults fill in for keys the user hasn't explicitly set. For a
+    // defaultable key an *empty* user value counts as "not set": the client's
+    // Settings save always writes every field (a blank Mapbox token included), so
+    // an empty string would otherwise shadow the admin/system-wide default and the
+    // user could never fall back to it — even after clearing their own value
+    // (#1634). Non-defaultable keys keep their exact stored value.
+    //
+    // Seed from the admin defaults, but mask any encrypted secret (e.g. a shared
+    // llm_api_key) exactly like the per-user path above: getUserSettings is the
+    // client-facing accessor and must never hand back a secret in cleartext — not
+    // even one inherited from an admin default (the fall-through above widened the
+    // set of users who inherit it). The server reads the real value via
+    // getAdminUserDefaults / getDecryptedUserSetting, which don't mask.
+    const merged: Record<string, unknown> = {};
+    for (const [key, value] of Object.entries(adminDefaults)) {
+      merged[key] = MASKED_SETTING_KEYS.has(key) ? (value ? MASKED_SETTING_VALUE : '') : value;
+    }
+    for (const [key, value] of Object.entries(userSettings)) {
+      if (
+        DEFAULTABLE_USER_SETTING_KEY_SET.has(key) &&
+        (value === '' || value === null || value === undefined) &&
+        key in adminDefaults
+      ) {
+        continue; // empty user value → keep the admin default
+      }
+      merged[key] = value;
+    }
+
+    // On a centrally administered install the map credential comes with the
+    // instance, so it is injected here rather than stored per user: the token is
+    // the operator's, it is a public pk.* that has to reach the browser anyway,
+    // and nobody should be able to save a different one over it. GL is the
+    // default there too, since a token is always present.
+    const managedMaps = readEnv().maps;
+    if (readEnv().managed.enabled && managedMaps.mapboxToken) {
+      merged.mapbox_access_token = managedMaps.mapboxToken;
+      if (!merged.map_provider || merged.map_provider === 'leaflet') {
+        merged.map_provider = 'mapbox-gl';
+      }
+    }
+    // Injected the same way, but without touching map_provider: a CARTO key only
+    // says whose basemap account the tiles are billed to, nothing about which
+    // renderer the user wants.
+    if (readEnv().managed.enabled && managedMaps.cartoKey) {
+      merged.carto_api_key = managedMaps.cartoKey;
+    }
+
+    return merged;
+  }
+
+  async upsertSetting(userId: number, key: string, value: unknown) {
+    const prepared = await this.prepareValue(userId, key, value);
+    await this.settings.upsertForUser(userId, key, serializeValue(key, prepared));
+  }
+
+  async bulkUpsertSettings(userId: number, settings: Record<string, unknown>) {
+    let written = 0;
+    await this.uow.transactional(async () => {
+      // The client echoes redacted secrets back unchanged — skip them so a
+      // bulk save can never overwrite a stored secret with the mask (the
+      // single-upsert route has the same no-op in the controller).
+      const entries = Object.entries(settings).filter(([, value]) => value !== MASKED_SETTING_VALUE);
+      for (const [key, prepared] of await this.prepareValues(userId, entries)) {
+        await this.settings.upsertForUser(userId, key, serializeValue(key, prepared));
+        written++;
+      }
+    });
+    return written;
+  }
+
+  /**
+   * {@link prepareValue} over the entries of a bulk save. Only the planner's
+   * view switches are read against the database, so that read happens once,
+   * before the writes, rather than once per key.
+   */
+  private async prepareValues(userId: number, entries: [string, unknown][]): Promise<[string, unknown][]> {
+    const planner = entries.find(([key]) => key === PLANNER_TRIP_VIEWS_KEY);
+    if (!planner) return entries;
+    const views = await this.prepareValue(userId, PLANNER_TRIP_VIEWS_KEY, planner[1]);
+    return entries.map(([key, value]) => [key, key === PLANNER_TRIP_VIEWS_KEY ? views : value]);
+  }
+
+  /**
+   * Read a single per-user setting, decrypting it if it's an encrypted key.
+   * Unlike getUserSettings (which MASKS encrypted keys for the client), this
+   * returns the plaintext — for server-side use only (e.g. the LLM config
+   * resolver needs the real API key). Returns null when unset.
+   */
+  async getDecryptedUserSetting(userId: number, key: string): Promise<string | null> {
+    const row = await this.settings.getOne(userId, key);
+    if (!row || row.value === '' || row.value == null) return null;
+    if (ENCRYPTED_SETTING_KEYS.has(key)) return decrypt_api_key(row.value);
+    try {
+      const parsed = JSON.parse(row.value);
+      return typeof parsed === 'string' ? parsed : row.value;
+    } catch {
+      return row.value;
+    }
+  }
+
+  /** The stored text of a registered instance setting, or null without a row, for a domain that keeps one there. */
+  async getAppSetting(key: AppSettingKey): Promise<string | null> {
+    return await readAppSetting(this.appSettings, key);
+  }
+
+  /** Registered instance settings written together: every value lands, or none does. */
+  async setAppSettings(values: Partial<Record<AppSettingKey, string>>): Promise<void> {
+    const entries = Object.entries(values).filter((entry): entry is [string, string] => entry[1] !== undefined);
+    await this.uow.transactional(() =>
+      entries.reduce<Promise<void>>(async (previous, [key, value]) => {
+        await previous;
+        await this.appSettings.setValue(key, value);
+      }, Promise.resolve()),
+    );
+  }
+}

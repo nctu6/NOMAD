@@ -1,0 +1,724 @@
+import type { Ferrata, RoadtripPreferences, TourActivity, TourDraft, TourListItem, TourObstacleCheck, TourPackingLink, TourProvenance, TourVisit, TourWaypoint } from '@trek/shared';
+import Dexie, { type Table } from 'dexie';
+import type { Trip, Day, Place, PackingItem, TodoItem, BudgetItem, Reservation, TripFile, Accommodation, TripMember, Tag, Category } from '../types';
+
+/** TripMember enriched with tripId so we can index by trip. */
+export interface CachedTripMember extends TripMember {
+  tripId: number;
+}
+
+/**
+ * A tour as the Tours list reads it, with the trip it belongs to (the list item
+ * carries none) and, once the route editor opened it online, its control
+ * points, so the tour still opens offline.
+ */
+export interface CachedTour extends TourListItem {
+  trip_id: number;
+  waypoints?: TourWaypoint[];
+  /** Where the tour came from, as its detail last said; kept across list refreshes, since it does not change. */
+  provenance?: TourProvenance;
+  /** A paddle tour's obstacle checklist as its detail last said; its revision tells whether the list's bench still matches. */
+  obstacle_check?: TourObstacleCheck;
+  /** ACT-01: the recorded tracks its detail last answered, kept while the list names the same ones. */
+  activities?: TourActivity[];
+  /** P2D-XD-01: the packing list or category the tour points at as last read, null for none; absent while never read. */
+  packing_link?: TourPackingLink | null;
+}
+
+/**
+ * The last settlement the server worked out for a trip, in the display currency
+ * it was asked for, so the Costs balances still read offline. The server nets
+ * them, so offline they stay as they were when last read.
+ */
+export interface CachedBudgetSettlement {
+  tripId: number;
+  base: string;
+  settlement: unknown;
+}
+
+/**
+ * One 0.05 degree tile of the via ferrata layer (see `ferrataGrid` in
+ * `@trek/shared`) as last loaded for a trip: the ferratas that reach into it,
+ * possibly none. Read straight from OpenStreetMap, not trip data; kept so the
+ * layer draws at once and offline, and refreshed after a week.
+ */
+interface CachedFerrataTile {
+  tripId: number;
+  /** The tile's key, `<row>:<col>`. */
+  tile: string;
+  fetchedAt: number;
+  ferratas: Ferrata[];
+}
+
+/**
+ * CW-03: a station of a city walk visited or skipped on one of its days, as the
+ * server last said, with the trip it belongs to so it drops with the trip. A
+ * mark made offline is not written here: it waits in the queue, and every read
+ * lays it over these rows (see repo/tourVisitRepo).
+ */
+export interface CachedTourStationVisit extends TourVisit {
+  trip_id: number;
+}
+
+/**
+ * The Tours planner's unsaved draft in one trip, as the account last said. A
+ * draft written offline is not written here: it waits in the queue, and every
+ * read lays the newest queued one over this row (see repo/tourDraftRepo).
+ */
+interface CachedTourDraft {
+  tripId: number;
+  draft: TourDraft;
+}
+
+/**
+ * A road route as the router answered it, kept on the device so a trip opens
+ * with its roads drawn instead of asking the router for every leg again (#2794).
+ * `key` is RouteCalculator's cache key (profile, unit, waypoints, avoided
+ * roads), `route` its answer as it came, `savedAt` when it came: an old answer
+ * is asked again, and the oldest give way first.
+ */
+interface CachedRoute {
+  key: string;
+  route: unknown;
+  savedAt: number;
+}
+
+// ── Queue + sync types ────────────────────────────────────────────────────────
+
+// 'conflict' is terminal-until-resolved: the server rejected the replay because
+// the entity changed underneath the offline edit (#1135 ask 3). It is surfaced
+// to the user for a keep-mine / keep-theirs decision rather than dropped.
+export type MutationStatus = 'pending' | 'syncing' | 'failed' | 'conflict';
+
+/**
+ * The format of a queued write as this build writes and replays it. A queued
+ * row outlives the bundle that wrote it: it can be replayed by the next build
+ * after a deploy, or by an older one when a tab still runs the previous bundle
+ * or the install is rolled back. Bump this when a row's fields or the way the
+ * replay reads them change so that an older build would send it wrongly. A
+ * build replays rows stamped with its own format or an older one, and leaves a
+ * row stamped with a newer one in the queue untouched for a build that knows
+ * it (see mutationQueue's flush). Rows queued before the stamp existed carry
+ * none and read as format 1.
+ */
+export const MUTATION_SCHEMA_VERSION = 1;
+
+export interface QueuedMutation {
+  /** UUID — also used as X-Idempotency-Key sent to the server */
+  id: string;
+  tripId: number;
+  method: 'POST' | 'PUT' | 'PATCH' | 'DELETE';
+  url: string;
+  body: unknown;
+  createdAt: number;
+  status: MutationStatus;
+  attempts: number;
+  lastError: string | null;
+  /** Dexie table name to write the server response into after flush (e.g. 'places') */
+  resource?: string;
+  /** For CREATE mutations enqueued offline: the temporary negative id written to Dexie */
+  tempId?: number;
+  /** For DELETE mutations: the entity id to remove from Dexie on flush */
+  entityId?: number;
+  /**
+   * For PUT/DELETE enqueued offline against a still-unsynced (negative-id) entity:
+   * the temp id of the target. The url carries an `{id}` placeholder that the
+   * mutation queue rewrites to the real server id once the dependent CREATE flushes.
+   */
+  tempEntityId?: number;
+  /**
+   * Optimistic-concurrency token: the entity's `updated_at` at the moment the
+   * offline edit was made. Sent as `X-Base-Updated-At` on replay so the server
+   * can reject the write (409) if someone else changed the entity in the
+   * meantime. Absent for creates and for resources without a token.
+   */
+  baseUpdatedAt?: string | null;
+  /**
+   * Set when the replay came back 409: the server's current version of the
+   * entity, kept so the conflict resolver can show "theirs" beside "mine"
+   * (which is reconstructed from `body`). Only present while status==='conflict'.
+   */
+  conflictServer?: unknown;
+  /** When the conflict was detected (for ordering / display). */
+  conflictAt?: number;
+  /**
+   * When the row was marked 'syncing'. Only meaningful while it is — the flush
+   * that set it clears the row on success or moves it off 'syncing' on failure.
+   * A stamp that outlives its flush is how a killed tab is recognised on the
+   * next one (see mutationQueue's STUCK_SYNCING_MS).
+   */
+  syncingSince?: number;
+  /**
+   * Not before this time (ms): set after the server answered with a 5xx, so a
+   * write the server keeps failing on is retried with growing gaps rather than
+   * on every trigger.
+   */
+  retryAfter?: number;
+  /**
+   * MUTATION_SCHEMA_VERSION of the build that queued the row. Optional because
+   * rows queued before it existed carry none; those read as format 1.
+   */
+  schemaVersion?: number;
+  /** The UI build that queued the row. For diagnosis only, never compared. */
+  buildVersion?: string;
+}
+
+export interface SyncMeta {
+  tripId: number;
+  lastSyncedAt: number | null;
+  status: 'idle' | 'syncing' | 'error';
+  /** Bounding box [minLng, minLat, maxLng, maxLat] of pre-downloaded map tiles */
+  tilesBbox: [number, number, number, number] | null;
+  /** Non-photo files available offline for this trip after the last sync. */
+  filesCachedCount: number;
+  /**
+   * The rounded bbox the cached area places were fetched for. Compared rather
+   * than a timestamp: adding a place inside the area the trip already covers
+   * should not re-download it, and moving the trip should.
+   *
+   * Optional so a row written before this landed still reads.
+   */
+  areaPlacesKey?: string;
+}
+
+export interface BlobCacheEntry {
+  /** Relative URL, e.g. "/api/files/42/download" */
+  url: string;
+  /**
+   * Trip this blob belongs to, so it is evicted together with the trip in
+   * clearTripData. Legacy rows cached before v3 carry the sentinel -1.
+   */
+  tripId: number;
+  blob: Blob;
+  /** Byte size captured at insert time — Blob.size is not reliably preserved
+   *  across IndexedDB round-trips, so the LRU budget reads this instead. */
+  bytes: number;
+  mime: string;
+  cachedAt: number;
+}
+
+/**
+ * A place from the TREK Places index, cached for the area of one trip.
+ *
+ * NOT a trip place — those are in `places` and belong to the user. These are
+ * candidates: the shops, restaurants and stations that happen to be near where
+ * the trip goes, taken once so search still answers on a plane. They are
+ * disposable and are re-fetched whenever the trip's area changes.
+ *
+ * The key is the GERS id, which is stable across index rebuilds; `tripId` is
+ * indexed so the whole set can be dropped with the trip.
+ */
+export interface CachedAreaPlace {
+  /** GERS id, without the `gers:` prefix the server puts on `osm_id`. */
+  gers: string;
+  tripId: number;
+  name: string;
+  /** Lowercased, diacritics folded — what an offline search actually matches on. */
+  searchName: string;
+  address: string;
+  lat: number | null;
+  lng: number | null;
+  category: string | null;
+  website: string | null;
+  phone: string | null;
+  cachedAt: number;
+}
+
+/** An uploaded booking-import source file, kept so the review flow can attach it to the
+ *  created bookings even after a page reload during the (background) parse. Keyed by job. */
+export interface ImportSourceFile {
+  jobId: string;
+  fileName: string;
+  blob: Blob;
+  createdAt: number;
+}
+
+// ── Dexie class ────────────────────────────────────────────────────────────────
+
+/**
+ * The offline DB is scoped per user so that one account can never read another
+ * account's cached data on a shared device. Anonymous (logged-out) state uses
+ * the base name; a logged-in user uses `trek-offline-u<userId>`.
+ */
+const ANON_DB_NAME = 'trek-offline';
+
+function userDbName(userId: number | string): string {
+  return `trek-offline-u${userId}`;
+}
+
+/**
+ * Best-effort read of the persisted auth snapshot so the very first DB opened on
+ * app load (before loadUser resolves) is already the correct per-user one — the
+ * PWA can render cached data offline without leaking across users.
+ */
+function initialDbName(): string {
+  try {
+    const raw = typeof localStorage !== 'undefined' ? localStorage.getItem('trek_auth_snapshot') : null;
+    if (!raw) return ANON_DB_NAME;
+    const id = JSON.parse(raw)?.state?.user?.id;
+    return id != null ? userDbName(id) : ANON_DB_NAME;
+  } catch {
+    return ANON_DB_NAME;
+  }
+}
+
+/**
+ * Exported for the upgrade tests (tests/unit/db/offlineDb.upgrade.test.ts),
+ * which open an older schema and upgrade it with this class. Every new
+ * version() needs a case there; a guard in that file fails without one.
+ * App code goes through `offlineDb`.
+ */
+export class TrekOfflineDb extends Dexie {
+  roadtripPreferences!: Table<{ tripId: number; preferences: RoadtripPreferences }, number>;
+  trips!: Table<Trip, number>;
+  days!: Table<Day, number>;
+  places!: Table<Place, number>;
+  packingItems!: Table<PackingItem, number>;
+  todoItems!: Table<TodoItem, number>;
+  budgetItems!: Table<BudgetItem, number>;
+  reservations!: Table<Reservation, number>;
+  tripFiles!: Table<TripFile, number>;
+  accommodations!: Table<Accommodation, number>;
+  tripMembers!: Table<CachedTripMember, [number, number]>;
+  tags!: Table<Tag, number>;
+  categories!: Table<Category, number>;
+  mutationQueue!: Table<QueuedMutation, string>;
+  syncMeta!: Table<SyncMeta, number>;
+  blobCache!: Table<BlobCacheEntry, string>;
+  importFiles!: Table<ImportSourceFile, [string, string]>;
+  areaPlaces!: Table<CachedAreaPlace, [string, number]>;
+  tours!: Table<CachedTour, number>;
+  budgetSettlements!: Table<CachedBudgetSettlement, number>;
+  ferrataTiles!: Table<CachedFerrataTile, [number, string]>;
+  tourStationVisits!: Table<CachedTourStationVisit, [number, string]>;
+  tourDrafts!: Table<CachedTourDraft, number>;
+  routeCache!: Table<CachedRoute, string>;
+
+  constructor(name: string = ANON_DB_NAME) {
+    super(name);
+
+    this.version(1).stores({
+      trips:        'id',
+      days:         'id, trip_id',
+      places:       'id, trip_id',
+      packingItems: 'id, trip_id',
+      todoItems:    'id, trip_id',
+      budgetItems:  'id, trip_id',
+      reservations: 'id, trip_id',
+      tripFiles:    'id, trip_id',
+      mutationQueue:'id, tripId, status, createdAt',
+      syncMeta:     'tripId',
+      blobCache:    'url, cachedAt',
+    });
+
+    this.version(2).stores({
+      accommodations: 'id, trip_id',
+      tripMembers:    '[tripId+id], tripId',
+      tags:           'id',
+      categories:     'id',
+    });
+
+    // v3: scope the blob cache by trip so it can be evicted with the trip and
+    // bounded by an LRU budget (see enforceBlobBudget).
+    this.version(3).stores({
+      blobCache: 'url, cachedAt, tripId',
+    }).upgrade(async (tx) => {
+      await tx.table('blobCache').toCollection().modify((row: Partial<BlobCacheEntry>) => {
+        if (row.tripId == null) row.tripId = -1;
+        if (row.bytes == null) row.bytes = row.blob?.size ?? 0;
+      });
+    });
+
+    // v4: durable store for booking-import source files (survives a reload mid-parse).
+    this.version(4).stores({
+      importFiles: '[jobId+fileName], jobId, createdAt',
+    });
+
+    // v5: places from the TREK Places index for the trip's area, so search
+    // answers offline. `searchName` is indexed because that is what an offline
+    // query filters on; `tripId` so the set drops with its trip.
+    this.version(6).stores({ roadtripPreferences: 'tripId' });
+    this.version(5).stores({
+      areaPlaces: 'gers, tripId, searchName',
+    });
+
+    // v7/v8: the same place near two trips is two rows now.
+    //
+    // Keyed on the GERS id alone, one row could only ever name one trip, and a
+    // bulkPut for the second trip rewrote the first trip's rows to point at it.
+    // Switching the second trip off then deleted the shared set by tripId, and
+    // the first trip's areaPlacesKey still matched its bbox, so nothing ever
+    // downloaded them again: a trip whose switch read "on" with no offline
+    // search behind it. Dexie cannot change a primary key in place, so the
+    // table is dropped and rebuilt, and every stored fingerprint is cleared so
+    // the next sync refills what the drop took.
+    this.version(7).stores({ areaPlaces: null });
+    this.version(8).stores({
+      areaPlaces: '[gers+tripId], gers, tripId, searchName',
+    }).upgrade(async (tx) => {
+      await tx.table('syncMeta').toCollection().modify((row: { areaPlacesKey?: string }) => {
+        delete row.areaPlacesKey;
+      });
+    });
+
+    // v9: the Tours facet, keyed like the place it belongs to, so a Tour still
+    // reads as one offline and can be edited there.
+    this.version(9).stores({ tours: 'place_id, trip_id' });
+
+    // v10: the Costs settlement, one per trip, so the balances read offline.
+    this.version(10).stores({ budgetSettlements: 'tripId' });
+
+    // v11: the via ferrata layer's loaded tiles, per trip, so the lines draw at
+    // once and offline; `tripId` so they drop with the trip.
+    this.version(11).stores({ ferrataTiles: '[tripId+tile], tripId, fetchedAt' });
+
+    // v12: the visits of the city walks, one row per station and day, so a
+    // walk's stops read as checked off offline; `trip_id` so they drop with the
+    // trip, `assignment_id` so one day's visits are replaced at once.
+    this.version(12).stores({ tourStationVisits: '[assignment_id+station_key], trip_id, assignment_id' });
+
+    // v13: the Tours planner's unsaved draft as the account last said it, one
+    // per trip (the database is the signed-in user's own), so it opens offline.
+    this.version(13).stores({ tourDrafts: 'tripId' });
+
+    // v14: road routes the router answered, by their cache key, so a trip with its
+    // whole route shown opens drawn instead of re-routing every leg (#2794). Not per
+    // trip: the same waypoints are the same road in any trip; `savedAt` to prune.
+    this.version(14).stores({ routeCache: 'key, savedAt' });
+  }
+}
+
+// The live instance is swapped on login/logout via reopenForUser/reopenAnonymous.
+// A Proxy keeps the exported `offlineDb` binding stable for the ~19 modules that
+// import it directly, while every access forwards to the current connection.
+let _db = new TrekOfflineDb(initialDbName());
+
+export const offlineDb = new Proxy({} as TrekOfflineDb, {
+  get(_target, prop) {
+    const value = (_db as unknown as Record<string | symbol, unknown>)[prop];
+    return typeof value === 'function' ? (value as (...args: unknown[]) => unknown).bind(_db) : value;
+  },
+  set(_target, prop, value) {
+    (_db as unknown as Record<string | symbol, unknown>)[prop] = value;
+    return true;
+  },
+}) as TrekOfflineDb;
+
+async function switchTo(name: string): Promise<void> {
+  if (_db.name === name) {
+    if (!_db.isOpen()) await _db.open();
+    return;
+  }
+  if (_db.isOpen()) _db.close();
+  _db = new TrekOfflineDb(name);
+  await _db.open();
+}
+
+/** Point the offline DB at a specific user's scoped database (call on login). */
+export async function reopenForUser(userId: number | string): Promise<void> {
+  await switchTo(userDbName(userId));
+}
+
+/** Point the offline DB at the anonymous database (call on logout). */
+export async function reopenAnonymous(): Promise<void> {
+  await switchTo(ANON_DB_NAME);
+}
+
+/**
+ * Delete the current user's scoped database entirely and return to the anonymous
+ * DB. Used on logout so no trace of the account's data remains on the device.
+ */
+export async function deleteCurrentUserDb(): Promise<void> {
+  // Already anonymous: there is nothing to delete, and opening a second
+  // connection to the same name would leak the current handle for the session.
+  if (_db.name === ANON_DB_NAME) {
+    await switchTo(ANON_DB_NAME);
+    return;
+  }
+  try { await _db.delete(); } catch { /* ignore — fall through to anon */ }
+  _db = new TrekOfflineDb(ANON_DB_NAME);
+  await _db.open();
+}
+
+// ── Bulk upsert helpers ────────────────────────────────────────────────────────
+
+export async function upsertTrip(trip: Trip): Promise<void> {
+  await offlineDb.trips.put(trip);
+}
+
+export async function upsertDays(days: Day[]): Promise<void> {
+  await offlineDb.days.bulkPut(days);
+}
+
+export async function upsertPlaces(places: Place[]): Promise<void> {
+  await offlineDb.places.bulkPut(places);
+}
+
+export async function upsertPackingItems(items: PackingItem[]): Promise<void> {
+  await offlineDb.packingItems.bulkPut(items);
+}
+
+export async function upsertTodoItems(items: TodoItem[]): Promise<void> {
+  await offlineDb.todoItems.bulkPut(items);
+}
+
+export async function upsertBudgetItems(items: BudgetItem[]): Promise<void> {
+  await offlineDb.budgetItems.bulkPut(items);
+}
+
+export async function upsertReservations(items: Reservation[]): Promise<void> {
+  await offlineDb.reservations.bulkPut(items);
+}
+
+export async function upsertTripFiles(files: TripFile[]): Promise<void> {
+  await offlineDb.tripFiles.bulkPut(files);
+}
+
+export async function upsertAccommodations(items: Accommodation[]): Promise<void> {
+  await offlineDb.accommodations.bulkPut(items);
+}
+
+type TripScopedTable = 'days' | 'places' | 'packingItems' | 'todoItems' | 'budgetItems' | 'reservations' | 'tripFiles' | 'accommodations';
+
+/**
+ * Make one trip's rows in `table` match the server's list: put every row it
+ * sent and drop the ones it no longer has, so a place a collaborator deleted
+ * while this device was offline does not come back on the next offline read.
+ * Rows with a negative (temporary) id were created offline and have not
+ * synced yet; they stay.
+ */
+export async function replaceTripRows<T extends { id: number }>(table: TripScopedTable, tripId: number, rows: T[]): Promise<void> {
+  const target = offlineDb[table] as unknown as Table<T, number>;
+  const keep = new Set(rows.map(r => r.id));
+  await offlineDb.transaction('rw', target, async () => {
+    await target
+      .where('trip_id')
+      .equals(tripId)
+      .filter(row => row.id > 0 && !keep.has(row.id))
+      .delete();
+    await target.bulkPut(rows);
+  });
+}
+
+/** The recorded tracks a cached detail holds, while the list still names the same ones (ACT-01). */
+function keptActivities(previous: CachedTour | undefined, tour: TourListItem): Pick<CachedTour, 'activities'> {
+  const refs = (item: Pick<TourListItem, 'activity_tracks'>) =>
+    (item.activity_tracks ?? []).map(ref => `${ref.id}:${ref.track_place_id}:${ref.assignment_id}`).join(',')
+  return previous?.activities && refs(previous) === refs(tour) ? { activities: previous.activities } : {}
+}
+
+/**
+ * {@link replaceTripRows} for the Tours facet, which is keyed on `place_id`.
+ * A tour's cached control points survive the refresh only while its route
+ * reads the same: the list carries no waypoints, and a route edited elsewhere
+ * must not open offline with the old ones.
+ */
+export async function replaceTripTours(tripId: number, tours: TourListItem[]): Promise<void> {
+  await offlineDb.transaction('rw', offlineDb.tours, async () => {
+    const cached = new Map((await offlineDb.tours.where('trip_id').equals(tripId).toArray()).map(t => [t.place_id, t]));
+    const keep = new Set(tours.map(t => t.place_id));
+    await offlineDb.tours
+      .where('trip_id')
+      .equals(tripId)
+      .filter(t => t.place_id > 0 && !keep.has(t.place_id))
+      .delete();
+    await offlineDb.tours.bulkPut(tours.map(tour => {
+      const previous = cached.get(tour.place_id);
+      const sameRoute = previous !== undefined
+        && previous.distance === tour.distance
+        && previous.elevation_gain === tour.elevation_gain
+        && previous.elevation_loss === tour.elevation_loss
+        && previous.has_waypoints === tour.has_waypoints;
+      return {
+        ...tour,
+        trip_id: tripId,
+        ...(sameRoute && previous.waypoints ? { waypoints: previous.waypoints } : {}),
+        ...(previous?.provenance ? { provenance: previous.provenance } : {}),
+        ...(previous?.obstacle_check ? { obstacle_check: previous.obstacle_check } : {}),
+        ...keptActivities(previous, tour),
+        // The list carries no packing link (P2D-XD-01); the one last read stays.
+        ...(previous?.packing_link !== undefined ? { packing_link: previous.packing_link } : {}),
+      };
+    }));
+  });
+}
+
+export async function upsertTripMembers(tripId: number, members: TripMember[]): Promise<void> {
+  const rows: CachedTripMember[] = members.map(m => ({ ...m, tripId }));
+  const keep = new Set(rows.map(r => r.id));
+  await offlineDb.transaction('rw', offlineDb.tripMembers, async () => {
+    // A member who left the trip leaves the cached list too.
+    await offlineDb.tripMembers.where('tripId').equals(tripId).filter(m => !keep.has(m.id)).delete();
+    await offlineDb.tripMembers.bulkPut(rows);
+  });
+}
+
+export async function upsertTags(tags: Tag[]): Promise<void> {
+  await offlineDb.tags.bulkPut(tags);
+}
+
+export async function upsertCategories(categories: Category[]): Promise<void> {
+  await offlineDb.categories.bulkPut(categories);
+}
+
+export async function upsertSyncMeta(meta: SyncMeta): Promise<void> {
+  await offlineDb.syncMeta.put(meta);
+}
+
+/**
+ * Read a pre-downloaded file blob for offline use. Returns null when the file
+ * was never cached (or on any read error). The stored MIME is reapplied so the
+ * caller's inline-vs-download decision stays correct even if the persisted Blob
+ * lost its type.
+ */
+export async function getCachedBlob(url: string): Promise<Blob | null> {
+  try {
+    const entry = await offlineDb.blobCache.get(url);
+    if (!entry) return null;
+    return entry.blob.type
+      ? entry.blob
+      : new Blob([entry.blob], { type: entry.mime || 'application/octet-stream' });
+  } catch {
+    return null;
+  }
+}
+
+// ── Booking-import source files ─────────────────────────────────────────────
+
+/** Abandoned import files (never reviewed) are pruned after this long. */
+const IMPORT_FILE_TTL_MS = 60 * 60_000;
+
+/**
+ * Persist the uploaded source files for a background import job so the per-item review can
+ * attach each document to its booking even if the page reloads during the parse. Best-effort.
+ */
+export async function saveImportFiles(jobId: string, files: File[]): Promise<void> {
+  try {
+    const now = Date.now();
+    await offlineDb.importFiles.bulkPut(files.map(f => ({ jobId, fileName: f.name, blob: f, createdAt: now })));
+    // Prune leftovers from imports that were never reviewed.
+    await offlineDb.importFiles.where('createdAt').below(now - IMPORT_FILE_TTL_MS).delete();
+  } catch { /* the in-memory copy still serves the no-reload path */ }
+}
+
+/** A job's stored source files, rebuilt as File objects (name + type preserved for upload). */
+export async function getImportFiles(jobId: string): Promise<File[]> {
+  try {
+    const rows = await offlineDb.importFiles.where('jobId').equals(jobId).toArray();
+    return rows.map(r => new File([r.blob], r.fileName, { type: r.blob.type || 'application/octet-stream' }));
+  } catch {
+    return [];
+  }
+}
+
+/** Drop a job's stored source files once they've been handed to the review flow. */
+export async function deleteImportFiles(jobId: string): Promise<void> {
+  try { await offlineDb.importFiles.where('jobId').equals(jobId).delete(); } catch { /* ignore */ }
+}
+
+// ── Blob-cache budget ───────────────────────────────────────────────────────
+
+/**
+ * Upper bounds for the offline file-blob cache. Kept conservative so trip
+ * documents never starve the map-tile cache (sized at MAX_TILES in
+ * tilePrefetcher.ts) for the origin's storage quota.
+ */
+export const BLOB_CACHE_MAX_ENTRIES = 200;
+export const BLOB_CACHE_MAX_BYTES = 100 * 1024 * 1024; // 100 MB
+
+/**
+ * Evict oldest-by-cachedAt blobs until the cache is under both the entry-count
+ * and byte budget. Call after inserting new blobs. LRU on insertion time, which
+ * is a reasonable proxy for access for write-once document blobs.
+ */
+export async function enforceBlobBudget(
+  maxCount = BLOB_CACHE_MAX_ENTRIES,
+  maxBytes = BLOB_CACHE_MAX_BYTES,
+): Promise<void> {
+  const entries = await offlineDb.blobCache.orderBy('cachedAt').toArray();
+  let count = entries.length;
+  let totalBytes = entries.reduce((sum, e) => sum + (e.bytes ?? 0), 0);
+  if (count <= maxCount && totalBytes <= maxBytes) return;
+
+  const toDelete: string[] = [];
+  for (const e of entries) {
+    if (count <= maxCount && totalBytes <= maxBytes) break;
+    toDelete.push(e.url);
+    totalBytes -= e.bytes ?? 0;
+    count -= 1;
+  }
+  if (toDelete.length) await offlineDb.blobCache.bulkDelete(toDelete);
+}
+
+// ── Eviction / cleanup ────────────────────────────────────────────────────────
+
+/**
+ * Delete one trip's cached READ data (eviction, per-trip opt-out, a trip the
+ * server no longer lists). The offline write queue is left alone entirely: a
+ * trip can be evicted for being stale, turned off in the storage settings, or
+ * deleted elsewhere while it still holds unsynced offline edits (pending/syncing),
+ * unresolved conflicts or parked 'failed' changes. Those must survive so the
+ * user's work is not silently lost (#1135); a parked change only goes when the
+ * user discards it in Settings > Offline. The replay only needs the queued REST
+ * request, not the cached entities, and a successful flush re-adds the
+ * canonical row. The full "Clear cache" wipe goes through clearAll(), which
+ * intentionally drops everything.
+ */
+export async function clearTripData(tripId: number): Promise<void> {
+  await offlineDb.transaction(
+    'rw',
+    [
+      offlineDb.days,
+      offlineDb.places,
+      offlineDb.packingItems,
+      offlineDb.todoItems,
+      offlineDb.budgetItems,
+      offlineDb.reservations,
+      offlineDb.tripFiles,
+      offlineDb.accommodations,
+      offlineDb.tripMembers,
+      offlineDb.syncMeta,
+      offlineDb.blobCache,
+      offlineDb.areaPlaces,
+      offlineDb.roadtripPreferences,
+      offlineDb.tours,
+      offlineDb.budgetSettlements,
+      offlineDb.ferrataTiles,
+      offlineDb.tourStationVisits,
+      offlineDb.tourDrafts,
+    ],
+    async () => {
+      await offlineDb.roadtripPreferences.delete(tripId);
+      await offlineDb.tourDrafts.delete(tripId);
+      await offlineDb.budgetSettlements.delete(tripId);
+      await offlineDb.days.where('trip_id').equals(tripId).delete();
+      await offlineDb.places.where('trip_id').equals(tripId).delete();
+      await offlineDb.packingItems.where('trip_id').equals(tripId).delete();
+      await offlineDb.todoItems.where('trip_id').equals(tripId).delete();
+      await offlineDb.budgetItems.where('trip_id').equals(tripId).delete();
+      await offlineDb.reservations.where('trip_id').equals(tripId).delete();
+      await offlineDb.tripFiles.where('trip_id').equals(tripId).delete();
+      await offlineDb.accommodations.where('trip_id').equals(tripId).delete();
+      await offlineDb.tours.where('trip_id').equals(tripId).delete();
+      await offlineDb.tourStationVisits.where('trip_id').equals(tripId).delete();
+      await offlineDb.tripMembers.where('tripId').equals(tripId).delete();
+      await offlineDb.syncMeta.where('tripId').equals(tripId).delete();
+      await offlineDb.blobCache.where('tripId').equals(tripId).delete();
+      // The cached places around this trip's area go with it. They are searched
+      // across every trip, so leaving them behind kept a switched-off trip
+      // answering offline searches — and nothing else ever deleted them, so they
+      // accumulated for the life of the install.
+      await offlineDb.areaPlaces.where('tripId').equals(tripId).delete();
+      await offlineDb.ferrataTiles.where('tripId').equals(tripId).delete();
+    },
+  );
+  // Remove the trip row itself outside the transaction since it's a separate table
+  await offlineDb.trips.delete(tripId);
+}
+
+/** Wipe the entire offline database (called on logout). */
+export async function clearAll(): Promise<void> {
+  await offlineDb.delete();
+  // Re-open so subsequent operations don't fail
+  await offlineDb.open();
+}

@@ -1,0 +1,1824 @@
+/**
+ * Unit tests for the DI-native OidcService — OIDC-SVC-001 through OIDC-SVC-054
+ * (moved 1:1 from the legacy tests/unit/services/oidcService.test.ts with case
+ * IDs preserved; 046–048 carry over the wrapper cases from the superseded
+ * delegation-shim suite; 049–054 pin the post-fold `fix(server)` quirk fixes —
+ * fetch timeout/validation, per-URL discovery cache, userinfo ok-check, the
+ * no_email guard and the post-insert re-select). Covers state management,
+ * auth codes, role resolution, findOrCreateUser, discover caching, and the
+ * ReDoS-sensitive issuer trailing-slash regex. Constructed directly (no
+ * TestingModule, repo convention) over a real in-memory SQLite database.
+ */
+import { db as testDb } from '../../../src/db/database';
+import { AppSettings } from '../../../src/db/entities/AppSettings.entity';
+import { InviteTokens } from '../../../src/db/entities/InviteTokens.entity';
+import { TripMembers } from '../../../src/db/entities/TripMembers.entity';
+import { UserSessions } from '../../../src/db/entities/UserSessions.entity';
+import { Users } from '../../../src/db/entities/Users.entity';
+import { MaintenanceRepository } from '../../../src/db/repositories/MaintenanceRepository';
+import { EphemeralTokenService } from '../../../src/nest/auth-core/ephemeral-token.service';
+import { AuthService } from '../../../src/nest/auth/auth.service';
+import { UserCleanupService } from '../../../src/nest/auth/user-cleanup.service';
+import { WebauthnConfigService } from '../../../src/nest/auth/webauthn-config.service';
+import { BudgetService } from '../../../src/nest/budget/budget.service';
+import { ExchangeRatesService } from '../../../src/nest/budget/exchange-rates.service';
+import { AllowedFileTypesService } from '../../../src/nest/files/allowed-file-types.service';
+import { MailerService } from '../../../src/nest/notifications/mailer/mailer.service';
+import { InMemoryOidcFlowStore } from '../../../src/nest/oidc/oidc-flow.store';
+import { OidcService } from '../../../src/nest/oidc/oidc.service';
+import { PermissionsService } from '../../../src/nest/permissions/permissions.service';
+import { RealtimeService } from '../../../src/nest/realtime/realtime.service';
+import { TripMembershipService } from '../../../src/nest/trip-membership/trip-membership.service';
+import { budgetRepoArgs } from '../../helpers/budget-repos';
+import { createTestBudgetSettlementsRepo } from '../../helpers/budget-repos';
+import { asLegacyResult } from '../../helpers/domain-error';
+import { createUser, createTrip, createAdmin } from '../../helpers/factories';
+import { deleteRows, findRow, updateRows } from '../../helpers/factories/rows';
+import { setAppSetting } from '../../helpers/factories/settings';
+import { makeInviteToken } from '../../helpers/factories/tokens';
+import { readUser } from '../../helpers/factories/users';
+import { createTestBudgetItemsRepo } from '../../helpers/files-repos';
+import {
+  createTestJourneysRepo,
+  createTestJourneyEntriesRepo,
+  createTestJourneyContributorsRepo,
+} from '../../helpers/journey-repos';
+import { createTestJourneyShareTokensRepo } from '../../helpers/journey-share-repos';
+import { createTestPushSubscriptionsRepo } from '../../helpers/notifications-repos';
+import { createTestSessionsService } from '../../helpers/sessions';
+import {
+  createTestShareTokensRepo,
+  createTestPluginsRepo,
+  createTestPluginUserErasureQueueRepo,
+} from '../../helpers/share-repos';
+import { resetTestDb } from '../../helpers/test-db';
+import {
+  createTestUnitOfWork,
+  createTestAppSettingsRepo,
+  sharedTestOrm,
+  createTestUsersRepo,
+  createTestInviteTokensRepo,
+  createTestMcpTokensRepo,
+  createTestOauthTokensRepo,
+  createTestWebauthnCredentialsRepo,
+  createTestPasswordResetTokensRepo,
+  createTestTripsRepo,
+  createTestTripMembersRepo,
+} from '../../helpers/test-uow';
+
+import { generateKeyPairSync } from 'crypto';
+import type { Request, Response } from 'express';
+import jwtLib from 'jsonwebtoken';
+import { describe, it, expect, vi, beforeAll, beforeEach, afterAll, afterEach } from 'vitest';
+
+// ── DB setup ──────────────────────────────────────────────────────────────────
+
+vi.mock('../../../src/db/database', async () => {
+  const { createSnapshotTestDb } = await import('../../helpers/db-mock');
+  const db = createSnapshotTestDb();
+  // Trip access reads through TripsRepository now; the module only hands out the handle.
+  return { db, closeDb: () => {}, reinitialize: () => {} };
+});
+
+// Construction insurance for the injected AuthService's import graph (same set
+// as auth.service.test.ts) — TripMembershipService is deliberately the real one,
+// not a stub: OIDC-SVC-045 asserts the actual trip_members row a trip-bound
+// invite creates.
+vi.mock('../../../src/nest/common/crypto/mfaCrypto', () => ({
+  encryptMfaSecret: vi.fn((s) => `enc:${s}`),
+  decryptMfaSecret: vi.fn((s: string) => s.replace('enc:', '')),
+}));
+vi.mock('../../../src/nest/common/crypto/apiKeyCrypto', () => ({
+  decrypt_api_key: vi.fn((v) => v),
+  maybe_encrypt_api_key: vi.fn((v) => v),
+  mask_stored_api_key: vi.fn((v: string | null | undefined) => (v ? '••••••••' : null)),
+  encrypt_api_key: vi.fn((v) => v),
+}));
+vi.mock('../../../src/nest/auth-core/ephemeral-tokens', () => ({ createEphemeralToken: vi.fn() }));
+vi.mock('../../../src/mcp/sessionManager', () => ({ revokeUserSessions: vi.fn() }));
+// The four provider calls go through the SSRF guard now (link-local and the
+// cloud-metadata range are refused, every redirect hop re-checked). These tests
+// exercise OIDC logic, not the guard, so the guard delegates to whatever fetch
+// the case stubbed — and OIDC-SVC-SSRF-001 below pins that it is really there.
+vi.mock('../../../src/utils/ssrfGuard', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../../src/utils/ssrfGuard')>();
+  return {
+    ...actual,
+    safeFetchAdminConfigured: vi.fn((url: string, init?: RequestInit) => fetch(url, init)),
+  };
+});
+
+const { getAppUrlMock } = vi.hoisted(() => ({ getAppUrlMock: vi.fn() }));
+vi.mock('../../../src/app-config', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../../src/app-config')>();
+  return { ...actual, getAppUrl: getAppUrlMock };
+});
+
+const { setAuthCookieMock } = vi.hoisted(() => ({ setAuthCookieMock: vi.fn() }));
+vi.mock('../../../src/nest/common/cookie', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../../src/nest/common/cookie')>();
+  return { ...actual, setAuthCookie: setAuthCookieMock };
+});
+
+const orm = () => sharedTestOrm(testDb);
+
+/** Writes columns of the user row directly, the state a login starts from. */
+async function setUserColumns(
+  userId: number,
+  data: {
+    oidc_sub?: string | null;
+    oidc_issuer?: string | null;
+    avatar?: string | null;
+    updated_at?: string;
+    email_self_asserted?: number;
+  },
+): Promise<void> {
+  await updateRows(await orm(), Users, { id: userId }, data);
+}
+
+async function userByEmail(email: string) {
+  return findRow(await orm(), Users, { email });
+}
+
+/** How often the invite was redeemed; fails the case when it is gone. */
+async function usedCount(token: string): Promise<number | null | undefined> {
+  const row = await findRow(await orm(), InviteTokens, { token });
+  if (!row) throw new Error(`no invite ${token}`);
+  return row.used_count;
+}
+
+// MailerService is injected since the notifications fold — a stub instead of a
+// module mock. sendPasswordResetEmail is the only thing auth reaches for.
+const mailerStub = { sendPasswordResetEmail: vi.fn() } as unknown as MailerService;
+
+// Positional, and previously shifted by one: an AtlasService sat in the membership
+// slot, which AuthService no longer takes at all, so webauthn/userCleanup/mailer
+// each landed one place too late and the EphemeralTokenService was missing
+// entirely. Nothing failed, because no case below reaches those collaborators.
+
+let membership: TripMembershipService;
+let auth: AuthService;
+let svc: OidcService;
+beforeAll(async () => {
+  membership = new TripMembershipService(await createTestTripsRepo(testDb), await createTestTripMembersRepo(testDb));
+  auth = new AuthService(
+    new PermissionsService(await createTestAppSettingsRepo(testDb), await createTestUnitOfWork(testDb)),
+    membership,
+    new WebauthnConfigService(await createTestAppSettingsRepo(testDb)),
+    new UserCleanupService(
+      new MaintenanceRepository((await sharedTestOrm(testDb)).em),
+      new BudgetService(
+        new PermissionsService(await createTestAppSettingsRepo(testDb), await createTestUnitOfWork(testDb)),
+        new ExchangeRatesService(),
+        new RealtimeService(),
+        await createTestUnitOfWork(testDb),
+        ...(await budgetRepoArgs(testDb)),
+      ),
+      await createTestUnitOfWork(testDb),
+      await createTestUsersRepo(testDb),
+      await createTestTripMembersRepo(testDb),
+      await createTestBudgetItemsRepo(testDb),
+      await createTestBudgetSettlementsRepo(testDb),
+      await createTestJourneyShareTokensRepo(testDb),
+      await createTestJourneysRepo(testDb),
+      await createTestJourneyEntriesRepo(testDb),
+      await createTestJourneyContributorsRepo(testDb),
+      await createTestShareTokensRepo(testDb),
+      await createTestPluginsRepo(testDb),
+      await createTestPluginUserErasureQueueRepo(testDb),
+    ),
+    mailerStub,
+    new EphemeralTokenService(),
+    new AllowedFileTypesService(await createTestAppSettingsRepo(testDb)),
+    await createTestUnitOfWork(testDb),
+    await createTestAppSettingsRepo(testDb),
+    await createTestUsersRepo(testDb),
+    await createTestInviteTokensRepo(testDb),
+    await createTestMcpTokensRepo(testDb),
+    await createTestOauthTokensRepo(testDb),
+    await createTestWebauthnCredentialsRepo(testDb),
+    await createTestPasswordResetTokensRepo(testDb),
+    await createTestPushSubscriptionsRepo(testDb),
+    await createTestSessionsService(testDb),
+  );
+  svc = new OidcService(
+    auth,
+    membership,
+    await createTestUnitOfWork(testDb),
+    await createTestUsersRepo(testDb),
+    await createTestInviteTokensRepo(testDb),
+    await createTestAppSettingsRepo(testDb),
+  );
+});
+
+const MOCK_CONFIG = {
+  issuer: 'https://oidc.example.com',
+  clientId: 'client-id',
+  clientSecret: 'client-secret',
+  displayName: 'SSO',
+  discoveryUrl: null,
+};
+
+beforeEach(() => {
+  resetTestDb(testDb);
+  delete process.env.OIDC_ADMIN_VALUE;
+  delete process.env.OIDC_ADMIN_CLAIM;
+  delete process.env.OIDC_USERNAME_CLAIM;
+  delete process.env.NODE_ENV;
+});
+
+afterAll(() => {
+  vi.unstubAllGlobals();
+  svc.onModuleDestroy();
+  testDb.close();
+});
+
+// ── createState / consumeState ────────────────────────────────────────────────
+
+describe('createState / consumeState', () => {
+  it('OIDC-SVC-001: createState returns a hex token + PKCE S256 challenge', async () => {
+    const { state, codeChallenge } = await svc.createState('https://example.com/callback');
+    expect(state).toMatch(/^[0-9a-f]{64}$/);
+    expect(codeChallenge).toMatch(/^[A-Za-z0-9_-]{43}$/); // base64url SHA-256, no padding
+  });
+
+  it('OIDC-SVC-002: consumeState returns stored data (incl. verifier) and deletes state', async () => {
+    const { state } = await svc.createState('https://example.com/callback', 'invite-abc');
+    const data = await svc.consumeState(state);
+    expect(data).not.toBeNull();
+    expect(data!.redirectUri).toBe('https://example.com/callback');
+    expect(data!.inviteToken).toBe('invite-abc');
+    expect(typeof data!.codeVerifier).toBe('string');
+    expect(data!.codeVerifier.length).toBeGreaterThan(20);
+    // State is consumed — second call returns null
+    expect(await svc.consumeState(state)).toBeNull();
+  });
+
+  it('OIDC-SVC-003: consumeState returns null for unknown state', async () => {
+    expect(await svc.consumeState('not-a-real-state')).toBeNull();
+  });
+
+  it('OIDC-SVC-055: createState stores the remember flag and consumeState returns it', async () => {
+    const { state: sTrue } = await svc.createState('https://example.com/cb', undefined, true);
+    const { state: sFalse } = await svc.createState('https://example.com/cb', undefined, false);
+    const { state: sAbsent } = await svc.createState('https://example.com/cb');
+    expect((await svc.consumeState(sTrue))!.remember).toBe(true);
+    expect((await svc.consumeState(sFalse))!.remember).toBe(false);
+    expect((await svc.consumeState(sAbsent))!.remember).toBeUndefined();
+  });
+
+  it('OIDC-SVC-004: two different states do not conflict', async () => {
+    const { state: s1 } = await svc.createState('http://a.example.com');
+    const { state: s2 } = await svc.createState('http://b.example.com');
+    expect(s1).not.toBe(s2);
+    expect((await svc.consumeState(s1))!.redirectUri).toBe('http://a.example.com');
+    expect((await svc.consumeState(s2))!.redirectUri).toBe('http://b.example.com');
+  });
+});
+
+// ── createAuthCode / consumeAuthCode ─────────────────────────────────────────
+
+describe('createAuthCode / consumeAuthCode', () => {
+  it('OIDC-SVC-005: createAuthCode returns a code and the secret that redeems it', async () => {
+    const { code, binding } = await svc.createAuthCode('my.jwt.token');
+    expect(typeof code).toBe('string');
+    expect(code.length).toBeGreaterThan(0);
+    // 32 random bytes as base64url; the code alone must never be enough.
+    expect(binding).toMatch(/^[A-Za-z0-9_-]{43}$/);
+    expect(binding).not.toBe(code);
+  });
+
+  it('OIDC-SVC-005b: every code gets its own binding secret', async () => {
+    const a = await svc.createAuthCode('t');
+    const b = await svc.createAuthCode('t');
+    expect(a.binding).not.toBe(b.binding);
+    expect(a.code).not.toBe(b.code);
+  });
+
+  it('OIDC-SVC-006: consumeAuthCode returns the stored token', async () => {
+    const { code, binding } = await svc.createAuthCode('real.jwt.here');
+    const result = await svc.consumeAuthCode(code, binding);
+    expect('token' in result).toBe(true);
+    expect((result as { token: string }).token).toBe('real.jwt.here');
+  });
+
+  it('OIDC-SVC-007: auth code is single-use (second consume returns error)', async () => {
+    const { code, binding } = await svc.createAuthCode('single.use.token');
+    await svc.consumeAuthCode(code, binding); // first use
+    const second = await svc.consumeAuthCode(code, binding);
+    expect('error' in second).toBe(true);
+  });
+
+  it('OIDC-SVC-008: consumeAuthCode returns error for unknown code', async () => {
+    const result = await svc.consumeAuthCode('not-a-real-code', 'whatever');
+    expect('error' in result).toBe(true);
+  });
+
+  it('OIDC-SVC-008b: a valid code without its binding is refused, and indistinguishable from an unknown one', async () => {
+    const { code } = await svc.createAuthCode('bound.token');
+    expect(await svc.consumeAuthCode(code, undefined)).toEqual({ error: 'Invalid or expired code' });
+    expect(await svc.consumeAuthCode('not-a-real-code', undefined)).toEqual({ error: 'Invalid or expired code' });
+  });
+
+  it('OIDC-SVC-008c: another browser binding is refused', async () => {
+    const mine = await svc.createAuthCode('mine');
+    const theirs = await svc.createAuthCode('theirs');
+    expect('error' in (await svc.consumeAuthCode(mine.code, theirs.binding))).toBe(true);
+  });
+
+  it('OIDC-SVC-008d: a wrong binding burns the code, so it cannot be retried', async () => {
+    const { code, binding } = await svc.createAuthCode('burn.me');
+    await svc.consumeAuthCode(code, 'not-the-binding');
+    expect('error' in (await svc.consumeAuthCode(code, binding))).toBe(true);
+  });
+
+  it('OIDC-SVC-008e: a binding that is not even base64 is refused instead of throwing', async () => {
+    const { code } = await svc.createAuthCode('t');
+    expect('error' in (await svc.consumeAuthCode(code, '!!!!'))).toBe(true);
+  });
+
+  it('OIDC-SVC-056: auth code round-trips the remember flag', async () => {
+    const cTrue = await svc.createAuthCode('t1', true);
+    const cFalse = await svc.createAuthCode('t2', false);
+    const cAbsent = await svc.createAuthCode('t3');
+    expect(((await svc.consumeAuthCode(cTrue.code, cTrue.binding)) as { remember?: boolean }).remember).toBe(true);
+    expect(((await svc.consumeAuthCode(cFalse.code, cFalse.binding)) as { remember?: boolean }).remember).toBe(false);
+    expect(
+      ((await svc.consumeAuthCode(cAbsent.code, cAbsent.binding)) as { remember?: boolean }).remember,
+    ).toBeUndefined();
+  });
+});
+
+// ── generateToken ─────────────────────────────────────────────────────────────
+
+describe('generateToken', () => {
+  it('OIDC-SVC-057: remember=true signs with the SESSION_DURATION_REMEMBER lifetime', async () => {
+    const { user } = createUser(testDb, { email: 'remember@example.com' });
+    const token = await svc.generateToken({ id: user.id }, true);
+    const decoded = jwtLib.decode(token) as { iat: number; exp: number };
+    expect(decoded.exp - decoded.iat).toBe(2592000);
+  });
+
+  it('OIDC-SVC-058: remember=false or absent signs with the default SESSION_DURATION lifetime', async () => {
+    const { user } = createUser(testDb, { email: 'default@example.com' });
+    for (const token of [await svc.generateToken({ id: user.id }, false), await svc.generateToken({ id: user.id })]) {
+      const decoded = jwtLib.decode(token) as { iat: number; exp: number };
+      expect(decoded.exp - decoded.iat).toBe(86400);
+    }
+  });
+
+  it('OIDC-SVC-059: an SSO session is a tracked session like a password login, with its device', async () => {
+    const { user } = createUser(testDb, { email: 'sso-session@example.com' });
+    const token = await svc.generateToken({ id: user.id }, undefined, { userAgent: 'SSO Browser' });
+    const { jti } = jwtLib.decode(token) as { jti: string };
+    const row = await findRow(await orm(), UserSessions, { id: jti });
+    expect(row && { user_id: row.user_id, user_agent: row.user_agent, revoked_at: row.revoked_at }).toEqual({
+      user_id: user.id,
+      user_agent: 'SSO Browser',
+      revoked_at: null,
+    });
+    expect((await auth.verifyJwtToken(token))?.id).toBe(user.id);
+  });
+});
+
+// ── resolveOidcRole ───────────────────────────────────────────────────────────
+
+describe('resolveOidcRole', () => {
+  it('OIDC-SVC-009: returns admin when isFirstUser is true', () => {
+    expect(svc.resolveOidcRole({ sub: 'x' }, true)).toBe('admin');
+  });
+
+  it('OIDC-SVC-010: returns user when no OIDC_ADMIN_VALUE is set', () => {
+    delete process.env.OIDC_ADMIN_VALUE;
+    expect(svc.resolveOidcRole({ sub: 'x', groups: ['admins'] }, false)).toBe('user');
+  });
+
+  it('OIDC-SVC-011: returns admin when groups array contains OIDC_ADMIN_VALUE', () => {
+    process.env.OIDC_ADMIN_VALUE = 'trek-admins';
+    expect(svc.resolveOidcRole({ sub: 'x', groups: ['trek-users', 'trek-admins'] }, false)).toBe('admin');
+  });
+
+  it('OIDC-SVC-012: returns user when groups array does not contain OIDC_ADMIN_VALUE', () => {
+    process.env.OIDC_ADMIN_VALUE = 'trek-admins';
+    expect(svc.resolveOidcRole({ sub: 'x', groups: ['trek-users'] }, false)).toBe('user');
+  });
+
+  it('OIDC-SVC-013: uses custom OIDC_ADMIN_CLAIM when set', () => {
+    process.env.OIDC_ADMIN_VALUE = 'superadmin';
+    process.env.OIDC_ADMIN_CLAIM = 'roles';
+    expect(svc.resolveOidcRole({ sub: 'x', roles: ['superadmin', 'editor'] }, false)).toBe('admin');
+  });
+
+  it('OIDC-SVC-014: handles string claim (exact match)', () => {
+    process.env.OIDC_ADMIN_VALUE = 'admin';
+    process.env.OIDC_ADMIN_CLAIM = 'role';
+    expect(svc.resolveOidcRole({ sub: 'x', role: 'admin' }, false)).toBe('admin');
+    expect(svc.resolveOidcRole({ sub: 'x', role: 'editor' }, false)).toBe('user');
+  });
+});
+
+// ── frontendUrl ───────────────────────────────────────────────────────────────
+
+describe('frontendUrl', () => {
+  it('OIDC-SVC-015: prepends localhost:5173 in non-production', () => {
+    delete process.env.NODE_ENV;
+    expect(svc.frontendUrl('/login?oidc_code=abc')).toBe('http://localhost:5173/login?oidc_code=abc');
+  });
+
+  it('OIDC-SVC-016: returns bare path in production', () => {
+    process.env.NODE_ENV = 'production';
+    expect(svc.frontendUrl('/login?oidc_code=abc')).toBe('/login?oidc_code=abc');
+    delete process.env.NODE_ENV;
+  });
+});
+
+// ── discover ──────────────────────────────────────────────────────────────────
+
+describe('discover', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it('OIDC-SVC-017: fetches and returns discovery document', async () => {
+    const doc = {
+      authorization_endpoint: 'https://oidc.example.com/auth',
+      token_endpoint: 'https://oidc.example.com/token',
+      userinfo_endpoint: 'https://oidc.example.com/userinfo',
+    };
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({
+        ok: true,
+        json: async () => doc,
+      }),
+    );
+
+    // Use unique issuer to bypass the instance-level cache from other tests
+    const result = await svc.discover('https://unique-1.example.com');
+    expect(result.authorization_endpoint).toBe(doc.authorization_endpoint);
+    expect(result.token_endpoint).toBe(doc.token_endpoint);
+  });
+
+  it('OIDC-SVC-018: throws when provider returns non-ok response', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: false }));
+    await expect(svc.discover('https://bad-issuer.example.com')).rejects.toThrow();
+  });
+
+  it('OIDC-SVC-037: accepts mismatched doc issuer when discoveryUrl is explicit', async () => {
+    const doc = {
+      issuer: 'https://auth.example.com/application/o/myapp/',
+      authorization_endpoint: 'https://auth.example.com/application/o/myapp/authorize/',
+      token_endpoint: 'https://auth.example.com/application/o/token/',
+      userinfo_endpoint: 'https://auth.example.com/application/o/userinfo/',
+    };
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, json: async () => doc }));
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+    const result = await svc.discover(
+      'https://auth.example.com',
+      'https://auth.example.com/application/o/myapp/.well-known/openid-configuration',
+    );
+
+    expect(result.issuer).toBe(doc.issuer);
+    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('differs from configured OIDC_ISSUER'));
+    warnSpy.mockRestore();
+  });
+
+  it('OIDC-SVC-038: throws on mismatched doc issuer when discoveryUrl is omitted', async () => {
+    const doc = {
+      issuer: 'https://evil.example.com',
+      authorization_endpoint: 'https://unique-2.example.com/auth',
+      token_endpoint: 'https://unique-2.example.com/token',
+      userinfo_endpoint: 'https://unique-2.example.com/userinfo',
+    };
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, json: async () => doc }));
+
+    await expect(svc.discover('https://unique-2.example.com')).rejects.toThrow('OIDC discovery issuer mismatch');
+  });
+
+  it('OIDC-SVC-049: passes an abort-signal timeout to the discovery fetch', async () => {
+    const doc = {
+      authorization_endpoint: 'https://unique-t.example.com/auth',
+      token_endpoint: 'https://unique-t.example.com/token',
+      userinfo_endpoint: 'https://unique-t.example.com/userinfo',
+    };
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, json: async () => doc }));
+
+    await svc.discover('https://unique-t.example.com');
+
+    const fetchCall = (fetch as ReturnType<typeof vi.fn>).mock.calls[0];
+    expect(fetchCall[1].signal).toBeInstanceOf(AbortSignal);
+  });
+
+  it('OIDC-SVC-050: rejects a discovery document missing the required endpoints', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, json: async () => ({ foo: 'bar' }) }));
+    await expect(svc.discover('https://unique-bad.example.com')).rejects.toThrow('Invalid OIDC discovery document');
+  });
+
+  it('OIDC-SVC-051: caches per discovery URL — two issuers do not thrash each other', async () => {
+    const docFor = (base: string) => ({
+      authorization_endpoint: `${base}/auth`,
+      token_endpoint: `${base}/token`,
+      userinfo_endpoint: `${base}/userinfo`,
+      issuer: base,
+    });
+    const fetchMock = vi.fn((url: string) => {
+      const base = url.replace('/.well-known/openid-configuration', '');
+      return Promise.resolve({ ok: true, json: async () => docFor(base) });
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    await svc.discover('https://unique-3.example.com');
+    await svc.discover('https://unique-4.example.com');
+    const again3 = await svc.discover('https://unique-3.example.com');
+    const again4 = await svc.discover('https://unique-4.example.com');
+
+    // One network round-trip per URL — the second pair served from cache.
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(again3.issuer).toBe('https://unique-3.example.com');
+    expect(again4.issuer).toBe('https://unique-4.example.com');
+  });
+
+  it('OIDC-SVC-039: trailing-slash-only mismatch with explicit discoveryUrl does not warn', async () => {
+    const doc = {
+      issuer: 'https://auth.example.com/',
+      authorization_endpoint: 'https://auth.example.com/auth',
+      token_endpoint: 'https://auth.example.com/token',
+      userinfo_endpoint: 'https://auth.example.com/userinfo',
+    };
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, json: async () => doc }));
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+    await svc.discover('https://auth.example.com', 'https://auth.example.com/.well-known/openid-configuration');
+
+    expect(warnSpy).not.toHaveBeenCalled();
+    warnSpy.mockRestore();
+  });
+});
+
+// ── issuer trailing-slash regex (ReDoS guard) ─────────────────────────────────
+
+describe('getOidcConfig issuer trailing-slash regex', () => {
+  it('OIDC-SVC-019: /\\/+$/ strips trailing slashes in < 5ms', () => {
+    // The regex /\/+$/ in getOidcConfig: issuer.replace(/\/+$/, '')
+    // Adversarial input: many trailing slashes — should not backtrack catastrophically
+    const adversarial = 'https://oidc.example.com' + '/'.repeat(10000);
+    const start = Date.now();
+    const result = adversarial.replace(/\/+$/, '');
+    const elapsed = Date.now() - start;
+    expect(result).toBe('https://oidc.example.com');
+    expect(elapsed).toBeLessThan(100);
+  });
+});
+
+// ── findOrCreateUser ──────────────────────────────────────────────────────────
+
+describe('findOrCreateUser', () => {
+  it('OIDC-SVC-020: finds existing user by oidc_sub', async () => {
+    const { user } = createUser(testDb, { email: 'alice@example.com' });
+    // Link the sub manually
+    await setUserColumns(user.id, { oidc_sub: 'sub-alice-123', oidc_issuer: MOCK_CONFIG.issuer });
+
+    const result = await svc.findOrCreateUser(
+      { sub: 'sub-alice-123', email: 'alice@example.com', name: 'Alice' },
+      MOCK_CONFIG,
+    );
+    expect('user' in result).toBe(true);
+    expect((result as { user: any }).user.id).toBe(user.id);
+  });
+
+  it('OIDC-SVC-021: finds existing user by email when no sub match', async () => {
+    const { user } = createUser(testDb, { email: 'bob@example.com' });
+
+    const result = await svc.findOrCreateUser(
+      { sub: 'sub-bob-new', email: 'bob@example.com', name: 'Bob', email_verified: true },
+      MOCK_CONFIG,
+    );
+    expect('user' in result).toBe(true);
+    expect((result as { user: any }).user.id).toBe(user.id);
+  });
+
+  it('OIDC-SVC-022: creates new user when registration is open', async () => {
+    const result = await svc.findOrCreateUser(
+      { sub: 'sub-new-1', email: 'newuser@example.com', name: 'New User' },
+      MOCK_CONFIG,
+    );
+    expect('user' in result).toBe(true);
+    expect(await userByEmail('newuser@example.com')).not.toBeNull();
+  });
+
+  it('OIDC-SVC-023: first user gets admin role', async () => {
+    // DB is empty after resetTestDb
+    const result = await svc.findOrCreateUser(
+      { sub: 'sub-first', email: 'first@example.com', name: 'First' },
+      MOCK_CONFIG,
+    );
+    expect('user' in result).toBe(true);
+    expect((result as { user: any }).user.role).toBe('admin');
+  });
+
+  it('OIDC-SVC-022b: without OIDC_USERNAME_CLAIM the username comes from name, as before (#1677)', async () => {
+    createUser(testDb, { email: 'someone@example.com' });
+    const result = await svc.findOrCreateUser(
+      { sub: 'sub-jane-1', email: 'jane@example.com', name: 'Jane Doe', preferred_username: 'jane' },
+      MOCK_CONFIG,
+    );
+    expect((result as { user: { username: string } }).user.username).toBe('JaneDoe');
+  });
+
+  it('OIDC-SVC-022c: OIDC_USERNAME_CLAIM picks the claim the username is built from (#1677)', async () => {
+    createUser(testDb, { email: 'someone@example.com' });
+    process.env.OIDC_USERNAME_CLAIM = 'preferred_username';
+    const result = await svc.findOrCreateUser(
+      { sub: 'sub-jane-2', email: 'jane2@example.com', name: 'Jane Doe', preferred_username: 'jane.d' },
+      MOCK_CONFIG,
+    );
+    expect((result as { user: { username: string } }).user.username).toBe('jane.d');
+  });
+
+  it('OIDC-SVC-022d: a named claim the provider leaves empty falls back to name, then the email (#1677)', async () => {
+    createUser(testDb, { email: 'someone@example.com' });
+    process.env.OIDC_USERNAME_CLAIM = 'nickname';
+    const withName = await svc.findOrCreateUser(
+      { sub: 'sub-jane-3', email: 'jane3@example.com', name: 'Jane Three', nickname: '  ' },
+      MOCK_CONFIG,
+    );
+    expect((withName as { user: { username: string } }).user.username).toBe('JaneThree');
+    const bare = await svc.findOrCreateUser({ sub: 'sub-jane-4', email: 'j.four@example.com' }, MOCK_CONFIG);
+    expect((bare as { user: { username: string } }).user.username).toBe('j.four');
+  });
+
+  it('OIDC-SVC-022e: a later login never renames the account to the claim', async () => {
+    const { user } = createUser(testDb, { email: 'kept@example.com', username: 'chosen' });
+    await setUserColumns(user.id, { oidc_sub: 'sub-kept', oidc_issuer: MOCK_CONFIG.issuer });
+    process.env.OIDC_USERNAME_CLAIM = 'preferred_username';
+    const result = await svc.findOrCreateUser(
+      { sub: 'sub-kept', email: 'kept@example.com', name: 'Kept', preferred_username: 'idp-name' },
+      MOCK_CONFIG,
+    );
+    expect((result as { user: { username: string } }).user.username).toBe('chosen');
+  });
+
+  it('OIDC-SVC-024: returns registration_disabled error when registration is off', async () => {
+    createUser(testDb, { email: 'existing@example.com' });
+    await setAppSetting(await orm(), 'allow_registration', 'false');
+
+    const result = await svc.findOrCreateUser(
+      { sub: 'sub-blocked', email: 'blocked@example.com', name: 'Blocked' },
+      MOCK_CONFIG,
+    );
+    expect('error' in result).toBe(true);
+    expect((result as { error: string }).error).toBe('registration_disabled');
+  });
+
+  it('OIDC-SVC-025: links oidc_sub when existing user has none (verified email)', async () => {
+    const { user } = createUser(testDb, { email: 'charlie@example.com' });
+    // Ensure no oidc_sub set
+    await setUserColumns(user.id, { oidc_sub: null, oidc_issuer: null });
+
+    await svc.findOrCreateUser(
+      { sub: 'sub-charlie-linked', email: 'charlie@example.com', name: 'Charlie', email_verified: true },
+      MOCK_CONFIG,
+    );
+
+    const updated = await readUser(await orm(), user.id);
+    expect(updated.oidc_sub).toBe('sub-charlie-linked');
+  });
+
+  it('OIDC-SVC-025b: refuses to link an unverified email to an existing local account', async () => {
+    const { user } = createUser(testDb, { email: 'dora@example.com' });
+    await setUserColumns(user.id, { oidc_sub: null, oidc_issuer: null });
+
+    // No email_verified claim — an IdP that lets users set arbitrary emails must
+    // not be able to take over a pre-existing password account.
+    const result = await svc.findOrCreateUser(
+      { sub: 'sub-dora-attacker', email: 'dora@example.com', name: 'Dora' },
+      MOCK_CONFIG,
+    );
+
+    expect('error' in result).toBe(true);
+    expect((result as { error: string }).error).toBe('email_not_verified');
+    const updated = await readUser(await orm(), user.id);
+    expect(updated.oidc_sub).toBeNull(); // account not linked / not hijacked
+  });
+
+  it('OIDC-SVC-026: existing user role is updated when OIDC claim mapping changes it', async () => {
+    const { user } = createUser(testDb, { email: 'diana@example.com', role: 'user' });
+    // Link oidc_sub manually so the user is found by sub lookup
+    await setUserColumns(user.id, { oidc_sub: 'sub-diana-role', oidc_issuer: MOCK_CONFIG.issuer });
+
+    process.env.OIDC_ADMIN_VALUE = 'admins';
+
+    const result = await svc.findOrCreateUser(
+      { sub: 'sub-diana-role', email: 'diana@example.com', name: 'Diana', groups: ['admins'] },
+      MOCK_CONFIG,
+    );
+
+    expect('user' in result).toBe(true);
+    expect((result as { user: any }).user.role).toBe('admin');
+
+    expect((await readUser(await orm(), user.id)).role).toBe('admin');
+  });
+
+  it('OIDC-SVC-027: new user with valid invite token increments used_count', async () => {
+    const { user: creator } = createUser(testDb, { email: 'creator@example.com' });
+    await makeInviteToken(await orm(), creator.id, { token: 'tok-valid', max_uses: 5, used_count: 0 });
+
+    const result = await svc.findOrCreateUser(
+      { sub: 'sub-invite-user', email: 'invitee@example.com', name: 'Invitee' },
+      MOCK_CONFIG,
+      'tok-valid',
+    );
+
+    expect('user' in result).toBe(true);
+
+    expect(await usedCount('tok-valid')).toBe(1);
+  });
+
+  it('OIDC-SVC-028: new user with expired invite token is created but invite is ignored', async () => {
+    const { user: creator } = createUser(testDb, { email: 'creator2@example.com' });
+    await makeInviteToken(await orm(), creator.id, {
+      token: 'tok-expired',
+      max_uses: 5,
+      used_count: 0,
+      expires_at: '2000-01-01T00:00:00.000Z',
+    });
+
+    const result = await svc.findOrCreateUser(
+      { sub: 'sub-expired-invite', email: 'expired-invitee@example.com', name: 'ExpiredInvitee' },
+      MOCK_CONFIG,
+      'tok-expired',
+    );
+
+    // User is still created because open registration is allowed
+    expect('user' in result).toBe(true);
+    expect(await userByEmail('expired-invitee@example.com')).not.toBeNull();
+
+    // Invite used_count must remain 0 (token was treated as invalid)
+    expect(await usedCount('tok-expired')).toBe(0);
+  });
+
+  it('OIDC-SVC-029: new user with max_uses exceeded invite token is created but invite is ignored', async () => {
+    const { user: creator } = createUser(testDb, { email: 'creator3@example.com' });
+    await makeInviteToken(await orm(), creator.id, { token: 'tok-full', max_uses: 1, used_count: 1 });
+
+    const result = await svc.findOrCreateUser(
+      { sub: 'sub-full-invite', email: 'full-invitee@example.com', name: 'FullInvitee' },
+      MOCK_CONFIG,
+      'tok-full',
+    );
+
+    // User is still created because open registration is allowed
+    expect('user' in result).toBe(true);
+    expect(await userByEmail('full-invitee@example.com')).not.toBeNull();
+
+    // Invite used_count must remain 1 (token was treated as invalid)
+    expect(await usedCount('tok-full')).toBe(1);
+  });
+
+  // ── OIDC picture claim → avatar (#1399) ──────────────────────────────────
+
+  it('OIDC-SVC-040: new user stores the https picture claim as their avatar', async () => {
+    const result = await svc.findOrCreateUser(
+      { sub: 'sub-pic-1', email: 'pic1@example.com', name: 'Pic One', picture: 'https://idp.example.com/u/pic1.png' },
+      MOCK_CONFIG,
+    );
+    expect('user' in result).toBe(true);
+    expect((await userByEmail('pic1@example.com'))?.avatar).toBe('https://idp.example.com/u/pic1.png');
+  });
+
+  it('OIDC-SVC-041: new user with a non-https picture claim stores no avatar', async () => {
+    await svc.findOrCreateUser(
+      { sub: 'sub-pic-2', email: 'pic2@example.com', name: 'Pic Two', picture: 'http://idp.example.com/u/pic2.png' },
+      MOCK_CONFIG,
+    );
+    const row = await userByEmail('pic2@example.com');
+    expect(row).not.toBeNull();
+    expect(row!.avatar).toBeNull();
+  });
+
+  it('OIDC-SVC-042: existing user with no avatar gets the OIDC picture', async () => {
+    const { user } = createUser(testDb, { email: 'pic3@example.com' });
+    await setUserColumns(user.id, { oidc_sub: 'sub-pic-3', oidc_issuer: MOCK_CONFIG.issuer, avatar: null });
+    await svc.findOrCreateUser(
+      { sub: 'sub-pic-3', email: 'pic3@example.com', name: 'Pic Three', picture: 'https://idp.example.com/u/pic3.png' },
+      MOCK_CONFIG,
+    );
+    const row = await readUser(await orm(), user.id);
+    expect(row.avatar).toBe('https://idp.example.com/u/pic3.png');
+  });
+
+  it('OIDC-SVC-043: a custom uploaded avatar is never overwritten by the OIDC picture', async () => {
+    const { user } = createUser(testDb, { email: 'pic4@example.com' });
+    await setUserColumns(user.id, {
+      oidc_sub: 'sub-pic-4',
+      oidc_issuer: MOCK_CONFIG.issuer,
+      avatar: 'uploaded-abc.jpg',
+    });
+    await svc.findOrCreateUser(
+      { sub: 'sub-pic-4', email: 'pic4@example.com', name: 'Pic Four', picture: 'https://idp.example.com/u/pic4.png' },
+      MOCK_CONFIG,
+    );
+    const row = await readUser(await orm(), user.id);
+    expect(row.avatar).toBe('uploaded-abc.jpg');
+  });
+
+  it('OIDC-SVC-044: a previously stored OIDC picture URL is refreshed on next login', async () => {
+    const { user } = createUser(testDb, { email: 'pic5@example.com' });
+    await setUserColumns(user.id, {
+      oidc_sub: 'sub-pic-5',
+      oidc_issuer: MOCK_CONFIG.issuer,
+      avatar: 'https://idp.example.com/u/old.png',
+    });
+    await svc.findOrCreateUser(
+      { sub: 'sub-pic-5', email: 'pic5@example.com', name: 'Pic Five', picture: 'https://idp.example.com/u/new.png' },
+      MOCK_CONFIG,
+    );
+    const row = await readUser(await orm(), user.id);
+    expect(row.avatar).toBe('https://idp.example.com/u/new.png');
+  });
+
+  // #2110 — the admin repoints the instance at a different IdP. The user still logs in,
+  // because the verified-email lookup finds the row, but everything the old provider put
+  // on it used to survive: an avatar URL on a host this instance no longer talks to, and
+  // a sub/issuer pair pinning the account to a provider that is gone.
+  it('OIDC-SVC-060: a provider without a picture claim clears the previous provider avatar', async () => {
+    const { user } = createUser(testDb, { email: 'switch1@example.com' });
+    await setUserColumns(user.id, {
+      oidc_sub: 'sub-old-1',
+      oidc_issuer: 'https://old-idp.example.com',
+      avatar: 'https://old-idp.example.com/u/me.png',
+    });
+
+    await svc.findOrCreateUser(
+      { sub: 'sub-new-1', email: 'switch1@example.com', name: 'Switcher', email_verified: true },
+      { ...MOCK_CONFIG, issuer: 'https://new-idp.example.com' },
+    );
+
+    const row = await readUser(await orm(), user.id);
+    expect(row.avatar).toBeNull();
+  });
+
+  it('OIDC-SVC-062: the identity switch and the avatar are one write: a failing avatar keeps the old link', async () => {
+    const { user } = createUser(testDb, { email: 'switch4@example.com' });
+    await setUserColumns(user.id, {
+      oidc_sub: 'sub-old-4',
+      oidc_issuer: 'https://old-idp.example.com',
+      avatar: 'https://old-idp.example.com/u/me.png',
+    });
+    const users = await createTestUsersRepo(testDb);
+    const spy = vi.spyOn(users, 'setAvatarRaw').mockRejectedValueOnce(new Error('disk full'));
+
+    await expect(
+      svc.findOrCreateUser(
+        { sub: 'sub-new-4', email: 'switch4@example.com', name: 'Switcher', email_verified: true },
+        { ...MOCK_CONFIG, issuer: 'https://new-idp.example.com' },
+      ),
+    ).rejects.toThrow('disk full');
+
+    const { oidc_sub, oidc_issuer } = await readUser(await orm(), user.id);
+    expect({ oidc_sub, oidc_issuer }).toEqual({ oidc_sub: 'sub-old-4', oidc_issuer: 'https://old-idp.example.com' });
+    spy.mockRestore();
+  });
+
+  it('OIDC-SVC-061: an uploaded avatar survives the same switch', async () => {
+    const { user } = createUser(testDb, { email: 'switch2@example.com' });
+    // A local upload is a bare filename, not a URL, and belongs to the user.
+    await setUserColumns(user.id, {
+      oidc_sub: 'sub-old-2',
+      oidc_issuer: 'https://old-idp.example.com',
+      avatar: 'uploaded-abc.jpg',
+    });
+
+    await svc.findOrCreateUser(
+      { sub: 'sub-new-2', email: 'switch2@example.com', name: 'Switcher', email_verified: true },
+      { ...MOCK_CONFIG, issuer: 'https://new-idp.example.com' },
+    );
+
+    const row = await readUser(await orm(), user.id);
+    expect(row.avatar).toBe('uploaded-abc.jpg');
+  });
+
+  it('OIDC-SVC-062: the account is relinked to the new provider sub and issuer', async () => {
+    const { user } = createUser(testDb, { email: 'switch3@example.com' });
+    await setUserColumns(user.id, { oidc_sub: 'sub-old-3', oidc_issuer: 'https://old-idp.example.com' });
+
+    await svc.findOrCreateUser(
+      { sub: 'sub-new-3', email: 'switch3@example.com', name: 'Switcher', email_verified: true },
+      { ...MOCK_CONFIG, issuer: 'https://new-idp.example.com' },
+    );
+
+    const row = await readUser(await orm(), user.id);
+    expect(row.oidc_sub).toBe('sub-new-3');
+    expect(row.oidc_issuer).toBe('https://new-idp.example.com');
+  });
+
+  // Plan 3b Task 6 (O5/O6, `linkOidcIdentity`) — the repository write names only
+  // `oidc_sub`/`oidc_issuer`; pinning the WHOLE row (not just those two columns,
+  // as OIDC-SVC-025/062 already do) proves no other column moved — the exact
+  // identity-map-stale-write-back shape the program's disableIdentityMap ruling
+  // exists to foreclose (task-1-fix-report.md).
+  it('OIDC-SVC-090: identity linking (O5) leaves the rest of the users row byte-identical', async () => {
+    const { user } = createUser(testDb, { email: 'linkrow@example.com', username: 'linkrowuser' });
+    await setUserColumns(user.id, { oidc_sub: null, oidc_issuer: null });
+    // Task 6 review L1 / Task 7 review, Task 6 L1: pin updated_at to a fixed
+    // past value before the snapshot so a future `linkOidcIdentity` that
+    // starts stamping updated_at (a CURRENT_TIMESTAMP drift) makes this test
+    // fail loudly, instead of the before/after snapshot racing the mutation
+    // inside the same second and passing by accident.
+    await setUserColumns(user.id, { updated_at: '2020-01-01 00:00:00' });
+    // test-sql-allow: the whole row as SELECT * returns it, every column the table has, is what must not move.
+    const before = testDb.prepare('SELECT * FROM users WHERE id = ?').get(user.id) as Record<string, unknown>;
+
+    await svc.findOrCreateUser(
+      { sub: 'sub-linkrow', email: 'linkrow@example.com', name: 'Link Row', email_verified: true },
+      MOCK_CONFIG,
+    );
+
+    // test-sql-allow: the whole row as SELECT * returns it, every column the table has, is what must not move.
+    const after = testDb.prepare('SELECT * FROM users WHERE id = ?').get(user.id) as Record<string, unknown>;
+    expect(after).toEqual({ ...before, oidc_sub: 'sub-linkrow', oidc_issuer: MOCK_CONFIG.issuer });
+  });
+
+  it('OIDC-SVC-091: the provider-switch branch (O6) leaves the rest of the users row byte-identical', async () => {
+    const { user } = createUser(testDb, { email: 'switchrow@example.com', username: 'switchrowuser' });
+    await setUserColumns(user.id, { oidc_sub: 'sub-old-row', oidc_issuer: 'https://old-idp.example.com' });
+    // Task 6 review L1 / Task 7 review, Task 6 L1: see OIDC-SVC-090's comment.
+    await setUserColumns(user.id, { updated_at: '2020-01-01 00:00:00' });
+    // test-sql-allow: the whole row as SELECT * returns it, every column the table has, is what must not move.
+    const before = testDb.prepare('SELECT * FROM users WHERE id = ?').get(user.id) as Record<string, unknown>;
+
+    await svc.findOrCreateUser(
+      { sub: 'sub-new-row', email: 'switchrow@example.com', name: 'Switch Row', email_verified: true },
+      { ...MOCK_CONFIG, issuer: 'https://new-idp-row.example.com' },
+    );
+
+    // test-sql-allow: the whole row as SELECT * returns it, every column the table has, is what must not move.
+    const after = testDb.prepare('SELECT * FROM users WHERE id = ?').get(user.id) as Record<string, unknown>;
+    expect(after).toEqual({ ...before, oidc_sub: 'sub-new-row', oidc_issuer: 'https://new-idp-row.example.com' });
+  });
+
+  // Plan 3b Task 6 (O13, `InviteTokensRepository.incrementUsedCount`) — the
+  // ruling: a `null` result inside `uow.transactional` throws the same
+  // reference-compared `inviteRaceError` sentinel the legacy `changes === 0`
+  // branch threw, mapped to the same `registration_disabled` outcome. Mirrors
+  // `WebauthnChallenges.repository.test.ts`'s `Promise.all` concurrent-claim
+  // proof (WEBAUTHN-CHAL-REPO-011) — same single-SQLite-connection
+  // serialization, one winner.
+  it('OIDC-SVC-092: two concurrent SSO registrations racing the same one-use invite — the loser gets registration_disabled, byte-identical to the legacy invite_exhausted outcome', async () => {
+    const { user: creator } = createUser(testDb, { email: 'racecreator@example.com' });
+    await makeInviteToken(await orm(), creator.id, { token: 'tok-race', max_uses: 1, used_count: 0 });
+
+    const [first, second] = await Promise.all([
+      svc.findOrCreateUser(
+        { sub: 'sub-race-1', email: 'racer1@example.com', name: 'Racer One' },
+        MOCK_CONFIG,
+        'tok-race',
+      ),
+      svc.findOrCreateUser(
+        { sub: 'sub-race-2', email: 'racer2@example.com', name: 'Racer Two' },
+        MOCK_CONFIG,
+        'tok-race',
+      ),
+    ]);
+
+    const outcomes = [first, second];
+    const winners = outcomes.filter((r) => 'user' in r);
+    const losers = outcomes.filter((r) => 'error' in r) as Array<{ error: string }>;
+    expect(winners).toHaveLength(1);
+    expect(losers).toHaveLength(1);
+    expect(losers[0]!.error).toBe('registration_disabled');
+
+    expect(await usedCount('tok-race')).toBe(1);
+  });
+
+  it('OIDC-SVC-053: returns no_email when the email claim is missing (no throw)', async () => {
+    const result = await svc.findOrCreateUser({ sub: 'sub-no-email', name: 'No Email' }, MOCK_CONFIG);
+    expect('error' in result).toBe(true);
+    expect((result as { error: string }).error).toBe('no_email');
+  });
+
+  it('OIDC-SVC-054: a new user is returned as the re-selected DB row, not a hand-built partial', async () => {
+    const result = await svc.findOrCreateUser(
+      { sub: 'sub-full-row', email: 'fullrow@example.com', name: 'Full Row' },
+      MOCK_CONFIG,
+    );
+    expect('user' in result).toBe(true);
+    const user = (result as { user: any }).user;
+    // Columns the legacy hand-built object silently lacked.
+    expect(user.password_version).toBeDefined();
+    expect(user.is_guest).toBeDefined();
+    expect(user.created_at).toBeDefined();
+    expect(user.email).toBe('fullrow@example.com');
+  });
+
+  it('OIDC-SVC-045: a trip-bound invite auto-adds the new SSO user as a trip member (#1402)', async () => {
+    const { user: admin } = createUser(testDb, { role: 'admin' });
+    const trip = createTrip(testDb, admin.id);
+    await makeInviteToken(await orm(), admin.id, {
+      token: 'inv-trip-join',
+      max_uses: 5,
+      used_count: 0,
+      expires_at: null,
+      trip: trip.id,
+    });
+
+    const result = await svc.findOrCreateUser(
+      { sub: 'sub-trip-join', email: 'joiner@example.com', name: 'Joiner' },
+      MOCK_CONFIG,
+      'inv-trip-join',
+    );
+    expect('user' in result).toBe(true);
+    const uid = (result as { user: any }).user.id;
+    expect(await findRow(await orm(), TripMembers, { trip: trip.id, user: uid })).toBeTruthy();
+  });
+});
+
+// ── claim-based role mapping on login (#2364) ────────────────────────────────
+
+// A sign-in that finds an account only through its email address. The address is
+// proof of nothing when the account typed it in itself (signup, profile settings):
+// whoever did that would otherwise get every later SSO login for that address.
+describe('findOrCreateUser linking by email', () => {
+  const SELF = { email_self_asserted: 1 };
+
+  it('OIDC-SVC-100: a verified sign-in is not linked to an account that set this email itself', async () => {
+    const { user } = createUser(testDb, { email: 'colleague@corp.test' });
+    await setUserColumns(user.id, { oidc_sub: null, oidc_issuer: null, ...SELF });
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+    try {
+      const result = await svc.findOrCreateUser(
+        { sub: 'victim-sub', email: 'colleague@corp.test', name: 'Colleague', email_verified: true },
+        MOCK_CONFIG,
+      );
+
+      expect(result).toEqual({ error: 'email_link_blocked' });
+      const row = await readUser(await orm(), user.id);
+      expect({ oidc_sub: row.oidc_sub, oidc_issuer: row.oidc_issuer }).toEqual({ oidc_sub: null, oidc_issuer: null });
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it('OIDC-SVC-101: an unverified sign-in against such an account says email_not_verified, not that the account exists', async () => {
+    const { user } = createUser(testDb, { email: 'quiet@corp.test' });
+    await setUserColumns(user.id, { oidc_sub: null, oidc_issuer: null, ...SELF });
+
+    const result = await svc.findOrCreateUser({ sub: 'other-sub', email: 'quiet@corp.test' }, MOCK_CONFIG);
+
+    expect(result).toEqual({ error: 'email_not_verified' });
+    expect((await readUser(await orm(), user.id)).oidc_sub).toBeNull();
+  });
+
+  it('OIDC-SVC-102: an account an admin created still links on its first verified sign-in', async () => {
+    const { user } = createUser(testDb, { email: 'made-by-admin@corp.test' });
+    await setUserColumns(user.id, { oidc_sub: null, oidc_issuer: null, email_self_asserted: 0 });
+
+    const result = await svc.findOrCreateUser(
+      { sub: 'sub-made-by-admin', email: 'made-by-admin@corp.test', email_verified: 'true' },
+      MOCK_CONFIG,
+    );
+
+    expect((result as { user: { id: number } }).user.id).toBe(user.id);
+    expect((await readUser(await orm(), user.id)).oidc_sub).toBe('sub-made-by-admin');
+  });
+
+  it('OIDC-SVC-103: the same provider with another subject is refused, verified or not, and the row keeps its link', async () => {
+    const { user } = createUser(testDb, { email: 'linked@corp.test' });
+    await setUserColumns(user.id, { oidc_sub: 'sub-owner', oidc_issuer: MOCK_CONFIG.issuer });
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+    try {
+      const verified = await svc.findOrCreateUser(
+        { sub: 'sub-stranger', email: 'linked@corp.test', email_verified: true },
+        MOCK_CONFIG,
+      );
+      const unverified = await svc.findOrCreateUser({ sub: 'sub-stranger', email: 'linked@corp.test' }, MOCK_CONFIG);
+
+      expect(verified).toEqual({ error: 'email_link_blocked' });
+      expect(unverified).toEqual({ error: 'email_not_verified' });
+      const row = await readUser(await orm(), user.id);
+      expect({ oidc_sub: row.oidc_sub, oidc_issuer: row.oidc_issuer }).toEqual({
+        oidc_sub: 'sub-owner',
+        oidc_issuer: MOCK_CONFIG.issuer,
+      });
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it('OIDC-SVC-104: a provider switch needs a verified email, the row stays on the old provider otherwise', async () => {
+    const { user } = createUser(testDb, { email: 'mover@corp.test' });
+    await setUserColumns(user.id, { oidc_sub: 'sub-old', oidc_issuer: 'https://old-idp.example.com' });
+
+    const result = await svc.findOrCreateUser(
+      { sub: 'sub-new', email: 'mover@corp.test' },
+      { ...MOCK_CONFIG, issuer: 'https://new-idp.example.com' },
+    );
+
+    expect(result).toEqual({ error: 'email_not_verified' });
+    const row = await readUser(await orm(), user.id);
+    expect({ oidc_sub: row.oidc_sub, oidc_issuer: row.oidc_issuer }).toEqual({
+      oidc_sub: 'sub-old',
+      oidc_issuer: 'https://old-idp.example.com',
+    });
+  });
+
+  it('OIDC-SVC-105: a provider switch onto an email the account set itself is refused', async () => {
+    const { user } = createUser(testDb, { email: 'switched-self@corp.test' });
+    await setUserColumns(user.id, { oidc_sub: 'sub-old', oidc_issuer: 'https://old-idp.example.com', ...SELF });
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+    try {
+      const result = await svc.findOrCreateUser(
+        { sub: 'sub-new', email: 'switched-self@corp.test', email_verified: true },
+        { ...MOCK_CONFIG, issuer: 'https://new-idp.example.com' },
+      );
+
+      expect(result).toEqual({ error: 'email_link_blocked' });
+      expect((await readUser(await orm(), user.id)).oidc_sub).toBe('sub-old');
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it('OIDC-SVC-106: a refused link never hands the account the role from the claims', async () => {
+    process.env.OIDC_ADMIN_VALUE = 'trek-admins';
+    const { user } = createUser(testDb, { email: 'trap@corp.test', role: 'user' });
+    await setUserColumns(user.id, { oidc_sub: null, oidc_issuer: null, ...SELF });
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+    try {
+      await svc.findOrCreateUser(
+        { sub: 'admin-sub', email: 'trap@corp.test', email_verified: true, groups: ['trek-admins'] },
+        MOCK_CONFIG,
+      );
+      expect((await readUser(await orm(), user.id)).role).toBe('user');
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it('OIDC-SVC-107: an account found by its own subject signs in, whoever set its email', async () => {
+    const { user } = createUser(testDb, { email: 'own@corp.test' });
+    await setUserColumns(user.id, { oidc_sub: 'sub-own', oidc_issuer: MOCK_CONFIG.issuer, ...SELF });
+
+    const result = await svc.findOrCreateUser({ sub: 'sub-own', email: 'own@corp.test' }, MOCK_CONFIG);
+
+    expect((result as { user: { id: number } }).user.id).toBe(user.id);
+  });
+
+  it('OIDC-SVC-108: an account the provider creates starts out with a trusted email', async () => {
+    createUser(testDb, { email: 'someone@corp.test' });
+    await svc.findOrCreateUser({ sub: 'sub-fresh', email: 'fresh@corp.test', name: 'Fresh' }, MOCK_CONFIG);
+
+    expect((await userByEmail('fresh@corp.test'))?.email_self_asserted).toBe(0);
+  });
+});
+
+describe('findOrCreateUser role mapping', () => {
+  type RoleResult = { user: any; roleChange?: { from: string; to: string; claim: string } };
+
+  async function ssoUser(email: string, sub: string, role: 'admin' | 'user') {
+    const { user } = createUser(testDb, { email, role });
+    await setUserColumns(user.id, { oidc_sub: sub, oidc_issuer: MOCK_CONFIG.issuer });
+    return user;
+  }
+  const storedRole = async (id: number) => (await readUser(await orm(), id)).role;
+
+  it('OIDC-SVC-063: an admin keeps the role when the configured claim is absent from the payload', async () => {
+    process.env.OIDC_ADMIN_VALUE = 'trek-admins';
+    process.env.OIDC_ADMIN_CLAIM = 'entitlements';
+    // A second admin row, so the #1274 last-admin guard cannot be what saves them.
+    createUser(testDb, { email: 'bootstrap@example.com', role: 'admin' });
+    const user = await ssoUser('sso-admin@example.com', 'sub-keep-admin', 'admin');
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+    try {
+      const result = (await svc.findOrCreateUser(
+        { sub: 'sub-keep-admin', email: 'sso-admin@example.com', groups: ['authentik Admins'] },
+        MOCK_CONFIG,
+      )) as RoleResult;
+
+      expect(result.user.role).toBe('admin');
+      expect(await storedRole(user.id)).toBe('admin');
+      expect(result.roleChange).toBeUndefined();
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it('OIDC-SVC-064: an absent claim does not promote a plain user either', async () => {
+    process.env.OIDC_ADMIN_VALUE = 'trek-admins';
+    process.env.OIDC_ADMIN_CLAIM = 'entitlements';
+    const user = await ssoUser('plain@example.com', 'sub-keep-user', 'user');
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+    try {
+      const result = (await svc.findOrCreateUser(
+        { sub: 'sub-keep-user', email: 'plain@example.com', groups: ['authentik Admins'] },
+        MOCK_CONFIG,
+      )) as RoleResult;
+
+      expect(result.user.role).toBe('user');
+      expect(await storedRole(user.id)).toBe('user');
+      expect(result.roleChange).toBeUndefined();
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it('OIDC-SVC-065: a custom claim that does arrive still promotes, and reports the change', async () => {
+    process.env.OIDC_ADMIN_VALUE = 'trek-admins';
+    process.env.OIDC_ADMIN_CLAIM = 'entitlements';
+    const user = await ssoUser('promote@example.com', 'sub-promote', 'user');
+
+    const result = (await svc.findOrCreateUser(
+      { sub: 'sub-promote', email: 'promote@example.com', entitlements: ['trek-users', 'trek-admins'] },
+      MOCK_CONFIG,
+    )) as RoleResult;
+
+    expect(await storedRole(user.id)).toBe('admin');
+    expect(result.roleChange).toEqual({ from: 'user', to: 'admin', claim: 'entitlements' });
+  });
+
+  it('OIDC-SVC-066: a claim that arrives without the admin value still demotes', async () => {
+    process.env.OIDC_ADMIN_VALUE = 'trek-admins';
+    process.env.OIDC_ADMIN_CLAIM = 'entitlements';
+    createUser(testDb, { email: 'bootstrap2@example.com', role: 'admin' });
+    const user = await ssoUser('demote@example.com', 'sub-demote', 'admin');
+
+    const result = (await svc.findOrCreateUser(
+      { sub: 'sub-demote', email: 'demote@example.com', entitlements: ['trek-users'] },
+      MOCK_CONFIG,
+    )) as RoleResult;
+
+    expect(await storedRole(user.id)).toBe('user');
+    expect(result.roleChange).toEqual({ from: 'admin', to: 'user', claim: 'entitlements' });
+  });
+
+  it('OIDC-SVC-067: the only admin is still kept when the claim arrives without the admin value (#1274)', async () => {
+    process.env.OIDC_ADMIN_VALUE = 'trek-admins';
+    process.env.OIDC_ADMIN_CLAIM = 'entitlements';
+    const user = await ssoUser('lonely@example.com', 'sub-lonely', 'admin');
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+    try {
+      const result = (await svc.findOrCreateUser(
+        { sub: 'sub-lonely', email: 'lonely@example.com', entitlements: ['trek-users'] },
+        MOCK_CONFIG,
+      )) as RoleResult;
+
+      expect(await storedRole(user.id)).toBe('admin');
+      expect(result.roleChange).toBeUndefined();
+      expect(warn.mock.calls[0][0]).toContain('only admin');
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it('OIDC-SVC-068: for a plain user the absent-claim warning names the claim and the keys that arrived, never their values, and fires once', async () => {
+    process.env.OIDC_ADMIN_VALUE = 'trek-admins';
+    process.env.OIDC_ADMIN_CLAIM = 'trek_roles';
+    await ssoUser('warned@example.com', 'sub-warned', 'user');
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    // The warning is deduped per claim name for the life of the process, so this
+    // case needs an instance that has not seen the claim yet.
+    const fresh = new OidcService(
+      auth,
+      membership,
+      await createTestUnitOfWork(testDb),
+      await createTestUsersRepo(testDb),
+      await createTestInviteTokensRepo(testDb),
+      await createTestAppSettingsRepo(testDb),
+    );
+
+    try {
+      const info = { sub: 'sub-warned', email: 'warned@example.com', groups: ['authentik Admins'] };
+      await fresh.findOrCreateUser(info, MOCK_CONFIG);
+      await fresh.findOrCreateUser(info, MOCK_CONFIG);
+
+      expect(warn).toHaveBeenCalledTimes(1);
+      const line = warn.mock.calls[0][0] as string;
+      expect(line).toContain('"trek_roles"');
+      expect(line).toContain('sub, email, groups');
+      expect(line).toContain('OIDC_SCOPE');
+      expect(line).not.toContain('authentik Admins');
+      expect(line).not.toContain('warned@example.com');
+    } finally {
+      fresh.onModuleDestroy();
+      warn.mockRestore();
+    }
+  });
+
+  it('OIDC-SVC-069: a new account is registered with the default role when the claim is absent', async () => {
+    process.env.OIDC_ADMIN_VALUE = 'trek-admins';
+    process.env.OIDC_ADMIN_CLAIM = 'reg_entitlements';
+    createUser(testDb, { email: 'someone@example.com' }); // not the first user any more
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+    try {
+      const result = (await svc.findOrCreateUser(
+        { sub: 'sub-fresh', email: 'fresh@example.com', name: 'Fresh', groups: ['authentik Admins'] },
+        MOCK_CONFIG,
+      )) as RoleResult;
+
+      expect(await storedRole(result.user.id)).toBe('user');
+      expect(result.roleChange).toBeUndefined();
+      expect(warn.mock.calls[0][0]).toContain('during registration');
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it('OIDC-SVC-070: a claim that already agrees with the stored role reports no change', async () => {
+    process.env.OIDC_ADMIN_VALUE = 'trek-admins';
+    process.env.OIDC_ADMIN_CLAIM = 'entitlements';
+    const user = await ssoUser('steady@example.com', 'sub-steady', 'admin');
+
+    const result = (await svc.findOrCreateUser(
+      { sub: 'sub-steady', email: 'steady@example.com', entitlements: ['trek-admins'] },
+      MOCK_CONFIG,
+    )) as RoleResult;
+
+    expect(await storedRole(user.id)).toBe('admin');
+    expect(result.roleChange).toBeUndefined();
+  });
+
+  it('OIDC-SVC-071: resolveOidcRoleDetailed only reports a missing claim where the mapping is actually consulted', () => {
+    process.env.OIDC_ADMIN_CLAIM = 'entitlements';
+    const info = { sub: 'x', groups: ['authentik Admins'] };
+
+    delete process.env.OIDC_ADMIN_VALUE;
+    expect(svc.resolveOidcRoleDetailed(info, false)).toMatchObject({
+      role: 'user',
+      claimMissing: false,
+      claimKey: 'entitlements',
+    });
+
+    process.env.OIDC_ADMIN_VALUE = 'trek-admins';
+    expect(svc.resolveOidcRoleDetailed(info, true)).toMatchObject({ role: 'admin', claimMissing: false });
+    expect(svc.resolveOidcRoleDetailed(info, false)).toMatchObject({
+      role: 'user',
+      claimMissing: true,
+      seenKeys: ['sub', 'groups'],
+    });
+    expect(svc.resolveOidcRoleDetailed({ ...info, entitlements: ['trek-admins'] }, false)).toMatchObject({
+      role: 'admin',
+      claimMissing: false,
+    });
+  });
+
+  it('OIDC-SVC-072: a stored admin whose claim never arrives is warned about on every login, by id, with the admin panel as the way out', async () => {
+    process.env.OIDC_ADMIN_VALUE = 'trek-admins';
+    process.env.OIDC_ADMIN_CLAIM = 'kept_admin_roles';
+    createUser(testDb, { email: 'bootstrap3@example.com', role: 'admin' });
+    const user = await ssoUser('kept@example.com', 'sub-kept-admin', 'admin');
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+    try {
+      const info = { sub: 'sub-kept-admin', email: 'kept@example.com', groups: ['authentik Admins'] };
+      await svc.findOrCreateUser(info, MOCK_CONFIG);
+      await svc.findOrCreateUser(info, MOCK_CONFIG);
+
+      // No dedup here: this is the login where an IdP-side revocation quietly fails.
+      expect(warn).toHaveBeenCalledTimes(2);
+      for (const call of warn.mock.calls) {
+        const line = call[0] as string;
+        expect(line).toContain(`User ${user.id} (${user.username}) is stored as an admin`);
+        expect(line).toContain('"kept_admin_roles"');
+        expect(line).toContain('admin panel');
+        expect(line).toContain('sub, email, groups');
+        expect(line).not.toContain('authentik Admins');
+        expect(line).not.toContain('kept@example.com');
+      }
+      expect(await storedRole(user.id)).toBe('admin');
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it('OIDC-SVC-073: warning about a stored admin does not use up the once-per-claim warning for everybody else', async () => {
+    process.env.OIDC_ADMIN_VALUE = 'trek-admins';
+    process.env.OIDC_ADMIN_CLAIM = 'shared_roles';
+    createUser(testDb, { email: 'bootstrap4@example.com', role: 'admin' });
+    await ssoUser('shared-admin@example.com', 'sub-shared-admin', 'admin');
+    await ssoUser('shared-plain@example.com', 'sub-shared-plain', 'user');
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const fresh = new OidcService(
+      auth,
+      membership,
+      await createTestUnitOfWork(testDb),
+      await createTestUsersRepo(testDb),
+      await createTestInviteTokensRepo(testDb),
+      await createTestAppSettingsRepo(testDb),
+    );
+
+    try {
+      await fresh.findOrCreateUser({ sub: 'sub-shared-admin', email: 'shared-admin@example.com' }, MOCK_CONFIG);
+      await fresh.findOrCreateUser({ sub: 'sub-shared-plain', email: 'shared-plain@example.com' }, MOCK_CONFIG);
+      await fresh.findOrCreateUser({ sub: 'sub-shared-plain', email: 'shared-plain@example.com' }, MOCK_CONFIG);
+
+      expect(warn).toHaveBeenCalledTimes(2);
+      expect(warn.mock.calls[0][0]).toContain('is stored as an admin');
+      expect(warn.mock.calls[1][0]).toContain('so their stored role is left unchanged');
+    } finally {
+      fresh.onModuleDestroy();
+      warn.mockRestore();
+    }
+  });
+});
+
+// ── exchangeCodeForToken ──────────────────────────────────────────────────────
+
+describe('exchangeCodeForToken', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it('OIDC-SVC-030: sends correct POST body and returns token data', async () => {
+    const mockTokenData = { access_token: 'tok', token_type: 'Bearer' };
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({
+        ok: true,
+        status: 200,
+        json: async () => mockTokenData,
+      }),
+    );
+
+    const doc = { token_endpoint: 'https://oidc.example.com/token' } as any;
+    const result = await svc.exchangeCodeForToken(
+      doc,
+      'auth-code-123',
+      'https://app/callback',
+      'client-id',
+      'client-secret',
+    );
+
+    expect(result.access_token).toBe('tok');
+    expect(result._ok).toBe(true);
+    expect(result._status).toBe(200);
+
+    const fetchCall = (fetch as ReturnType<typeof vi.fn>).mock.calls[0];
+    expect(fetchCall[0]).toBe('https://oidc.example.com/token');
+    expect(fetchCall[1].method).toBe('POST');
+  });
+
+  it('OIDC-SVC-031: reflects _ok=false when provider returns error status', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({
+        ok: false,
+        status: 400,
+        json: async () => ({ error: 'invalid_grant' }),
+      }),
+    );
+
+    const doc = { token_endpoint: 'https://oidc.example.com/token' } as any;
+    const result = await svc.exchangeCodeForToken(doc, 'bad-code', 'https://app/callback', 'c', 's');
+
+    expect(result._ok).toBe(false);
+    expect(result._status).toBe(400);
+  });
+});
+
+// ── getUserInfo ───────────────────────────────────────────────────────────────
+
+describe('getUserInfo', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it('OIDC-SVC-032: fetches userinfo with Bearer token and returns parsed JSON', async () => {
+    const userInfoData = { sub: 'user-sub', email: 'user@example.com', name: 'User Name' };
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({
+        ok: true,
+        json: async () => userInfoData,
+      }),
+    );
+
+    const result = await svc.getUserInfo('https://oidc.example.com/userinfo', 'access-token-123');
+
+    expect(result.sub).toBe('user-sub');
+    expect(result.email).toBe('user@example.com');
+
+    const fetchCall = (fetch as ReturnType<typeof vi.fn>).mock.calls[0];
+    expect(fetchCall[1].headers.Authorization).toBe('Bearer access-token-123');
+  });
+
+  it('OIDC-SVC-052: throws on a non-ok userinfo response instead of parsing the error body', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({
+        ok: false,
+        status: 401,
+        json: async () => ({ error: 'invalid_token' }),
+      }),
+    );
+
+    await expect(svc.getUserInfo('https://oidc.example.com/userinfo', 'expired-token')).rejects.toThrow(
+      'Userinfo fetch failed: HTTP 401',
+    );
+  });
+});
+
+// ── verifyIdToken ─────────────────────────────────────────────────────────────
+
+describe('verifyIdToken', () => {
+  const { privateKey, publicKey } = generateKeyPairSync('rsa', { modulusLength: 2048 });
+  const jwk = publicKey.export({ format: 'jwk' }) as Record<string, unknown>;
+  const ISSUER = 'https://auth.example.com/application/o/trek';
+  const CLIENT_ID = 'trek-client';
+  const JWKS_URI = 'https://auth.example.com/.well-known/jwks.json';
+
+  function mockJwks() {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({
+        ok: true,
+        json: async () => ({ keys: [jwk] }),
+      }),
+    );
+  }
+
+  function makeToken(iss: string, overrides: object = {}) {
+    return jwtLib.sign({ sub: 'user-sub', email: 'user@example.com', ...overrides }, privateKey, {
+      algorithm: 'RS256',
+      audience: CLIENT_ID,
+      issuer: iss,
+      expiresIn: '1h',
+    });
+  }
+
+  const doc = { jwks_uri: JWKS_URI } as any;
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it('OIDC-SVC-033: accepts token whose iss matches expectedIssuer exactly', async () => {
+    mockJwks();
+    const token = makeToken(ISSUER);
+    const result = await svc.verifyIdToken(token, doc, CLIENT_ID, ISSUER);
+    expect(result.ok).toBe(true);
+  });
+
+  it('OIDC-SVC-034: accepts token whose iss has a trailing slash (Authentik)', async () => {
+    mockJwks();
+    const token = makeToken(ISSUER + '/');
+    const result = await svc.verifyIdToken(token, doc, CLIENT_ID, ISSUER);
+    expect(result.ok).toBe(true);
+  });
+
+  it('OIDC-SVC-035: rejects token with wrong issuer', async () => {
+    mockJwks();
+    const token = makeToken('https://evil.example.com');
+    const result = await svc.verifyIdToken(token, doc, CLIENT_ID, ISSUER);
+    expect(result.ok).toBe(false);
+    expect((result as any).error).toMatch('jwt issuer invalid');
+  });
+
+  it('OIDC-SVC-036: rejects token with wrong audience', async () => {
+    mockJwks();
+    const wrongAudToken = jwtLib.sign({ sub: 'user-sub', iss: ISSUER }, privateKey, {
+      algorithm: 'RS256',
+      audience: 'wrong-client',
+      expiresIn: '1h',
+    });
+    const result = await svc.verifyIdToken(wrongAudToken, doc, CLIENT_ID, ISSUER);
+    expect(result.ok).toBe(false);
+  });
+});
+
+// ── wrapper methods (carried over from the delegation-shim suite) ────────────
+
+describe('wrapper methods', () => {
+  it('OIDC-SVC-046: oidcLoginEnabled reads the resolved auth toggle', async () => {
+    const spy = vi.spyOn(auth, 'resolveAuthToggles');
+    spy.mockResolvedValue({ oidc_login: true } as Awaited<ReturnType<AuthService['resolveAuthToggles']>>);
+    expect(await svc.oidcLoginEnabled()).toBe(true);
+    spy.mockResolvedValue({ oidc_login: false } as Awaited<ReturnType<AuthService['resolveAuthToggles']>>);
+    expect(await svc.oidcLoginEnabled()).toBe(false);
+    spy.mockRestore();
+  });
+
+  it('OIDC-SVC-047: getAppUrl delegates to app-config getAppUrl', () => {
+    getAppUrlMock.mockReturnValue('https://app');
+    expect(svc.getAppUrl()).toBe('https://app');
+  });
+
+  it('OIDC-SVC-048: setAuthCookie forwards res, token and req to the cookie helper', () => {
+    const res = {} as Response;
+    const req = {} as Request;
+    svc.setAuthCookie(res, 'jwt', req);
+    expect(setAuthCookieMock).toHaveBeenCalledWith(res, 'jwt', req, undefined);
+  });
+
+  it('OIDC-SVC-059: setAuthCookie forwards the remember option to the cookie helper', () => {
+    const res = {} as Response;
+    const req = {} as Request;
+    svc.setAuthCookie(res, 'jwt', req, true);
+    expect(setAuthCookieMock).toHaveBeenCalledWith(res, 'jwt', req, true);
+    svc.setAuthCookie(res, 'jwt', req, false);
+    expect(setAuthCookieMock).toHaveBeenCalledWith(res, 'jwt', req, false);
+  });
+});
+
+// The SSO configuration read/write moved here from AdminService, which held the SQL
+// for a domain that already had a module. Same cases, same service, new owner.
+describe('OIDC settings', () => {
+  it('ADMIN-SVC-047 — getOidcSettings returns default empty values when no OIDC configured', async () => {
+    const result = (await svc.getOidcSettings()) as any;
+    expect(result.issuer).toBe('');
+    expect(result.client_id).toBe('');
+    expect(result.oidc_only).toBe(false);
+    expect(result.client_secret_set).toBe(false);
+    expect(result.display_name).toBe('');
+    expect(result.discovery_url).toBe('');
+  });
+
+  it('ADMIN-SVC-048 — updateOidcSettings persists issuer and client_id, then getOidcSettings returns them', async () => {
+    await svc.updateOidcSettings({ issuer: 'https://auth.example.com', client_id: 'my-client' });
+    const result = (await svc.getOidcSettings()) as any;
+    expect(result.issuer).toBe('https://auth.example.com');
+    expect(result.client_id).toBe('my-client');
+  });
+
+  it('ADMIN-SVC-049 — updateOidcSettings does not write oidc_only (replaced by granular toggles)', async () => {
+    await svc.updateOidcSettings({ issuer: 'https://auth.example.com', client_id: 'my-client' });
+    const result = (await svc.getOidcSettings()) as any;
+    // oidc_only is no longer managed by updateOidcSettings; use password_login/oidc_login toggles
+    expect(result.oidc_only).toBe(false);
+  });
+
+  it('ADMIN-SVC-075 — updateOidcSettings applies all five writes atomically', async () => {
+    const result = (await svc.updateOidcSettings({
+      issuer: 'https://idp',
+      client_id: 'cid',
+      display_name: 'IdP',
+    })) as any;
+    expect(result.success).toBe(true);
+    const settings = await svc.getOidcSettings();
+    expect(settings).toMatchObject({ issuer: 'https://idp', client_id: 'cid', display_name: 'IdP' });
+  });
+});
+
+describe('OIDC settings — the lockout guard', () => {
+  it('OIDC-SETTINGS-050 refuses to clear the config while password login is off', async () => {
+    // Clearing the issuer with password login disabled locks every user out of the
+    // instance: no SSO to log in through, and no password form either.
+    const toggles = vi.spyOn(auth, 'resolveAuthToggles').mockResolvedValue({ password_login: false } as never);
+    expect(await svc.updateOidcSettings({ issuer: '', client_id: 'x' })).toMatchObject({ status: 400 });
+    expect(await svc.updateOidcSettings({ issuer: 'x', client_id: '' })).toMatchObject({ status: 400 });
+    expect(((await svc.updateOidcSettings({ issuer: '', client_id: '' })) as { error?: string }).error).toMatch(
+      /password login/i,
+    );
+    toggles.mockRestore();
+  });
+
+  it('OIDC-SETTINGS-051 allows the same clear once password login is back on', async () => {
+    const toggles = vi.spyOn(auth, 'resolveAuthToggles').mockResolvedValue({ password_login: true } as never);
+    expect(await svc.updateOidcSettings({ issuer: '', client_id: '' })).toEqual({ success: true });
+    toggles.mockRestore();
+  });
+
+  it('OIDC-SETTINGS-052 an omitted client_secret keeps the stored one, an empty string clears it', async () => {
+    const toggles = vi.spyOn(auth, 'resolveAuthToggles').mockResolvedValue({ password_login: true } as never);
+    await svc.updateOidcSettings({ issuer: 'https://idp', client_id: 'c', client_secret: 'shh' });
+    expect((await svc.getOidcSettings()).client_secret_set).toBe(true);
+    // Omitted: the write skips the column entirely rather than blanking it, which is
+    // what lets the admin panel save the form without re-typing the secret.
+    await svc.updateOidcSettings({ issuer: 'https://idp', client_id: 'c' });
+    expect((await svc.getOidcSettings()).client_secret_set).toBe(true);
+    await svc.updateOidcSettings({ issuer: 'https://idp', client_id: 'c', client_secret: '' });
+    expect((await svc.getOidcSettings()).client_secret_set).toBe(false);
+    toggles.mockRestore();
+  });
+});
+
+describe('the flow-store sweeps', () => {
+  it('OIDC-SVC-093: the interval sweeps go through the injected store, and a failed sweep is logged, not thrown', async () => {
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const flows = new InMemoryOidcFlowStore();
+    const sweepStates = vi.spyOn(flows, 'sweepStates').mockRejectedValue(new Error('store offline'));
+    const sweepCodes = vi.spyOn(flows, 'sweepCodes');
+    const fresh = new OidcService(
+      auth,
+      membership,
+      await createTestUnitOfWork(testDb),
+      await createTestUsersRepo(testDb),
+      await createTestInviteTokensRepo(testDb),
+      await createTestAppSettingsRepo(testDb),
+      flows,
+    );
+    try {
+      vi.advanceTimersByTime(60_000);
+      expect(sweepCodes).toHaveBeenCalled();
+      expect(sweepStates).toHaveBeenCalledTimes(1);
+      await vi.waitFor(() =>
+        expect(error).toHaveBeenCalledWith(expect.stringContaining('OIDC flow sweep failed: store offline')),
+      );
+    } finally {
+      fresh.onModuleDestroy();
+      error.mockRestore();
+      vi.useRealTimers();
+    }
+  });
+});
+
+// ── "Is OIDC configured?": the four places that ask, pinned ───────────────────
+//
+// Three of them live in AuthService (the legacy oidc_only fallback of the
+// login toggles, the public app config's oidc_configured flag, and the lockout
+// guard of the admin settings save) and want an issuer and a client id, each
+// from the environment first and the instance setting second, an empty string
+// counting as unset. The fourth, OidcService.getOidcConfig, is the one that
+// actually talks to the provider and also wants the client secret. These cases
+// hold all four to what they answered before the checks were shared.
+
+describe('OIDC configured — the four checks', () => {
+  const KEYS = [
+    'oidc_issuer',
+    'oidc_client_id',
+    'oidc_client_secret',
+    'oidc_only',
+    'password_login',
+    'password_registration',
+    'oidc_login',
+    'oidc_registration',
+  ];
+  afterEach(async () => {
+    vi.unstubAllEnvs();
+    await deleteRows(await orm(), AppSettings, { key: { $in: KEYS } });
+  });
+
+  type Source = { issuer?: string; clientId?: string; secret?: string };
+  async function arrange(env: Source, settings: Source) {
+    vi.stubEnv('OIDC_ISSUER', env.issuer ?? '');
+    vi.stubEnv('OIDC_CLIENT_ID', env.clientId ?? '');
+    vi.stubEnv('OIDC_CLIENT_SECRET', env.secret ?? '');
+    vi.stubEnv('OIDC_ONLY', '');
+    const o = await orm();
+    if (settings.issuer !== undefined) await setAppSetting(o, 'oidc_issuer', settings.issuer);
+    if (settings.clientId !== undefined) await setAppSetting(o, 'oidc_client_id', settings.clientId);
+    if (settings.secret !== undefined) await setAppSetting(o, 'oidc_client_secret', settings.secret);
+  }
+
+  /** What each of the four places answers right now. */
+  async function answers() {
+    const o = await orm();
+    // 1: with only the legacy oidc_only flag set, password login goes away exactly when OIDC is configured.
+    await setAppSetting(o, 'oidc_only', 'true');
+    const togglesSaySo = !(await auth.resolveAuthToggles()).password_login;
+    await deleteRows(o, AppSettings, { key: 'oidc_only' });
+    // 2: the public config.
+    const configSaysSo = (await auth.getAppConfig(null)).oidc_configured;
+    // 3: turning password login off is refused when OIDC is not configured (oidc_login is on by default).
+    const admin = createAdmin(testDb).user;
+    const save = await asLegacyResult(auth.updateAppSettings(admin.id, { password_login: false }));
+    const lockoutSaysSo = save.error === undefined;
+    await deleteRows(o, AppSettings, { key: { $in: ['password_login'] } });
+    // 4: the provider config.
+    const providerSaysSo = (await svc.getOidcConfig()) !== null;
+    return { togglesSaySo, configSaysSo, lockoutSaysSo, providerSaysSo };
+  }
+
+  const yes = { togglesSaySo: true, configSaysSo: true, lockoutSaysSo: true };
+  const no = { togglesSaySo: false, configSaysSo: false, lockoutSaysSo: false };
+
+  it('OIDC-CONF-001: nothing set anywhere: no', async () => {
+    await arrange({}, {});
+    expect(await answers()).toEqual({ ...no, providerSaysSo: false });
+  });
+
+  it('OIDC-CONF-002: issuer and client id from the environment: the auth checks say yes, the provider config wants the secret too', async () => {
+    await arrange({ issuer: 'https://idp.example', clientId: 'trek' }, {});
+    expect(await answers()).toEqual({ ...yes, providerSaysSo: false });
+    await arrange({ issuer: 'https://idp.example', clientId: 'trek', secret: 's3cret' }, {});
+    expect(await answers()).toEqual({ ...yes, providerSaysSo: true });
+  });
+
+  it('OIDC-CONF-003: the same from the instance settings', async () => {
+    await arrange({}, { issuer: 'https://idp.example', clientId: 'trek' });
+    expect(await answers()).toEqual({ ...yes, providerSaysSo: false });
+    await arrange({}, { secret: 's3cret' });
+    expect(await answers()).toEqual({ ...yes, providerSaysSo: true });
+  });
+
+  it('OIDC-CONF-004: each value may come from either side, and an empty environment value falls back to the setting', async () => {
+    await arrange({ issuer: 'https://idp.example' }, { clientId: 'trek', secret: 's3cret' });
+    expect(await answers()).toEqual({ ...yes, providerSaysSo: true });
+  });
+
+  it('OIDC-CONF-005: an issuer alone, or an empty setting, is not configured', async () => {
+    await arrange({ issuer: 'https://idp.example', secret: 's3cret' }, {});
+    expect(await answers()).toEqual({ ...no, providerSaysSo: false });
+    await arrange({}, { issuer: '', clientId: 'trek', secret: 's3cret' });
+    expect(await answers()).toEqual({ ...no, providerSaysSo: false });
+  });
+});

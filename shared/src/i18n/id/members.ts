@@ -1,0 +1,39 @@
+import type { TranslationStrings } from '../types';
+
+const members: TranslationStrings = {
+  'members.inviteUser': 'Undang Pengguna',
+  'members.selectUser': 'Pilih pengguna…',
+  'members.invite': 'Undang',
+  'members.allHaveAccess': 'Semua pengguna sudah punya akses.',
+  'members.access': 'Akses',
+  'members.persons': 'orang',
+  'members.you': 'kamu',
+  'members.owner': 'Pemilik',
+  'members.leaveTrip': 'Keluar dari perjalanan',
+  'members.removeAccess': 'Hapus akses',
+  'members.confirmLeave': 'Keluar dari perjalanan? Kamu akan kehilangan akses.',
+  'members.confirmRemove': 'Hapus akses untuk pengguna ini?',
+  'members.loadError': 'Gagal memuat anggota',
+  'members.added': 'ditambahkan',
+  'members.addError': 'Gagal menambahkan',
+  'members.removed': 'Anggota dihapus',
+  'members.removeError': 'Gagal menghapus',
+  'members.makeOwner': 'Jadikan pemilik',
+  'members.confirmTransfer': 'Alihkan kepemilikan ke {name}? Anda akan menjadi anggota biasa.',
+  'members.transferError': 'Gagal mengalihkan kepemilikan',
+  'members.guests': 'Tamu',
+  'members.guest': 'Tamu',
+  'members.guestsHint':
+    'Orang tanpa akun. Mereka dapat ditugaskan ke biaya, kemasan, dan tugas, tetapi tidak dapat masuk.',
+  'members.addGuest': 'Tambah tamu',
+  'members.guestNamePlaceholder': 'Nama tamu',
+  'members.guestAdded': 'Tamu ditambahkan',
+  'members.guestAddError': 'Gagal menambahkan tamu',
+  'members.guestRenameError': 'Gagal mengganti nama tamu',
+  'members.guestRemoved': 'Tamu dihapus',
+  'members.confirmRemoveGuest':
+    'Hapus tamu ini? Penugasannya akan dihapus dan bagiannya di setiap pengeluaran dibagi ke peserta lainnya.',
+  'members.guestHasPayments':
+    'Tamu ini telah membayar pengeluaran atau terlibat dalam pembayaran yang tercatat. Ubah pembayar atau hapus pembayaran terlebih dahulu.',
+};
+export default members;

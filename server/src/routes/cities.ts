@@ -1,7 +1,5 @@
-import express, { Request, Response } from 'express';
-import fetch from 'node-fetch';
-import { db } from '../db/database';
-import { authenticate } from '../middleware/auth';
+import { getRawConnection } from '../db/database';
+import { HttpException } from '@nestjs/common';
 import {
   ClimateInput,
   FILTERS,
@@ -17,8 +15,9 @@ import {
   scoreCity,
 } from '../services/cityScores';
 
-const router = express.Router();
-router.use(authenticate);
+function db() {
+  return getRawConnection();
+}
 
 interface CityRow {
   id: number;
@@ -145,9 +144,9 @@ function present(city: CityRow, metrics: MetricRow[], climate: ClimateRow[], now
 }
 
 function loadAll() {
-  const cities = db.prepare('SELECT * FROM cities').all() as CityRow[];
-  const metrics = db.prepare('SELECT * FROM city_metrics').all() as MetricRow[];
-  const climate = db.prepare(`
+  const cities = db().prepare('SELECT * FROM cities').all() as CityRow[];
+  const metrics = db().prepare('SELECT * FROM city_metrics').all() as MetricRow[];
+  const climate = db().prepare(`
     SELECT city_id, month, temp_mean_c, temp_min_c, temp_max_c, precip_mm, source, source_url, license, fetched_at, period
     FROM city_climate
   `).all() as ClimateRow[];
@@ -193,7 +192,7 @@ function compareCities(a: PresentedCity, b: PresentedCity, sort: string, order: 
   return order === 'asc' ? delta : -delta;
 }
 
-router.get('/', (req: Request, res: Response) => {
+export function listCities(query: Record<string, unknown>) {
   try {
     const { cities, metricsByCity, climateByCity } = loadAll();
     const now = new Date();
@@ -209,18 +208,18 @@ router.get('/', (req: Request, res: Response) => {
       for (const region of city.regions) regionSet.add(region);
     }
 
-    const search = String(req.query.q || '').trim().toLowerCase();
-    const region = String(req.query.region || '').trim();
-    const warm = req.query.warm === '1';
-    const cheap = req.query.cheap === '1';
-    const fast = req.query.fast === '1';
-    const safe = req.query.safe === '1';
-    const healthcare = req.query.healthcare === '1';
-    const english = req.query.english === 'official' ? 'official' : '';
-    const sort = SORTS.has(String(req.query.sort)) ? String(req.query.sort) : 'overall';
-    const order = req.query.order === 'asc' ? 'asc' : 'desc';
-    const limitRaw = Number.parseInt(String(req.query.limit ?? '200'), 10);
-    const offsetRaw = Number.parseInt(String(req.query.offset ?? '0'), 10);
+    const search = String(query.q || '').trim().toLowerCase();
+    const region = String(query.region || '').trim();
+    const warm = query.warm === '1';
+    const cheap = query.cheap === '1';
+    const fast = query.fast === '1';
+    const safe = query.safe === '1';
+    const healthcare = query.healthcare === '1';
+    const english = query.english === 'official' ? 'official' : '';
+    const sort = SORTS.has(String(query.sort)) ? String(query.sort) : 'overall';
+    const order = query.order === 'asc' ? 'asc' : 'desc';
+    const limitRaw = Number.parseInt(String(query.limit ?? '200'), 10);
+    const offsetRaw = Number.parseInt(String(query.offset ?? '0'), 10);
     const limit = Number.isFinite(limitRaw) ? Math.min(500, Math.max(1, limitRaw)) : 200;
     const offset = Number.isFinite(offsetRaw) ? Math.max(0, offsetRaw) : 0;
 
@@ -270,7 +269,7 @@ router.get('/', (req: Request, res: Response) => {
       best_months: city.best_months,
     }));
 
-    res.json({
+    return {
       cities: page,
       total: filtered.length,
       available: presented.length,
@@ -281,12 +280,12 @@ router.get('/', (req: Request, res: Response) => {
         weights: 'equal',
         filters: FILTERS,
       },
-    });
+    };
   } catch (err: unknown) {
     console.error('[cities] list error:', err instanceof Error ? err.message : err);
-    res.status(500).json({ error: 'Failed to load cities' });
+    throw new HttpException({ error: 'Failed to load cities' }, 500);
   }
-});
+}
 
 interface LiveWeather {
   temp_c: number;
@@ -306,7 +305,7 @@ async function fetchLiveTemp(lat: number, lng: number): Promise<LiveWeather | nu
 
   const url = `https://api.open-meteo.com/v1/forecast?latitude=${lat.toFixed(4)}&longitude=${lng.toFixed(4)}&current=temperature_2m&timezone=auto`;
   try {
-    const response = await fetch(url, { timeout: 4000 } as RequestInit & { timeout: number });
+    const response = await fetch(url, { signal: AbortSignal.timeout(4000) });
     if (!response.ok) throw new Error(`status ${response.status}`);
     const body = await response.json() as { current?: { temperature_2m?: number; time?: string } };
     const temp = body.current?.temperature_2m;
@@ -328,21 +327,18 @@ async function fetchLiveTemp(lat: number, lng: number): Promise<LiveWeather | nu
   }
 }
 
-router.get('/:slug', async (req: Request, res: Response) => {
-  const slug = String(req.params.slug || '');
+export async function getCity(slug: string) {
   if (!/^[a-z0-9-]+$/.test(slug)) {
-    res.status(404).json({ error: 'City not found' });
-    return;
+    throw new HttpException({ error: 'City not found' }, 404);
   }
 
   try {
-    const city = db.prepare('SELECT * FROM cities WHERE slug = ?').get(slug) as CityRow | undefined;
+    const city = db().prepare('SELECT * FROM cities WHERE slug = ?').get(slug) as CityRow | undefined;
     if (!city) {
-      res.status(404).json({ error: 'City not found' });
-      return;
+      throw new HttpException({ error: 'City not found' }, 404);
     }
-    const metrics = db.prepare('SELECT * FROM city_metrics WHERE city_id = ? ORDER BY metric').all(city.id) as MetricRow[];
-    const climate = db.prepare(`
+    const metrics = db().prepare('SELECT * FROM city_metrics WHERE city_id = ? ORDER BY metric').all(city.id) as MetricRow[];
+    const climate = db().prepare(`
       SELECT city_id, month, temp_mean_c, temp_min_c, temp_max_c, precip_mm, source, source_url, license, fetched_at, period
       FROM city_climate WHERE city_id = ? ORDER BY month
     `).all(city.id) as ClimateRow[];
@@ -356,7 +352,7 @@ router.get('/:slug', async (req: Request, res: Response) => {
       period: climate[0].period || null,
     } : null;
 
-    res.json({
+    return {
       city: {
         ...presented,
         geoname_id: city.geoname_id,
@@ -385,11 +381,10 @@ router.get('/:slug', async (req: Request, res: Response) => {
         weights: 'equal',
         filters: FILTERS,
       },
-    });
+    };
   } catch (err: unknown) {
+    if (err instanceof HttpException) throw err;
     console.error('[cities] detail error:', err instanceof Error ? err.message : err);
-    res.status(500).json({ error: 'Failed to load city' });
+    throw new HttpException({ error: 'Failed to load city' }, 500);
   }
-});
-
-export default router;
+}

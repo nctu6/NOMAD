@@ -1,0 +1,748 @@
+/**
+ * Unit tests for the advanced packing MCP tools (PackingMcp, DI-discovered):
+ * reorder_packing_items, list_packing_bags, create_packing_bag, update_packing_bag,
+ * delete_packing_bag, set_bag_members, get_packing_category_assignees,
+ * set_packing_category_assignees, apply_packing_template, save_packing_template,
+ * bulk_import_packing. The basic item tools + scope/addon gating + resources
+ * live in tools-packing.test.ts.
+ */
+import { db as testDb } from '../../../src/db/database';
+import { Notifications } from '../../../src/db/entities/Notifications.entity';
+import { PackingBags } from '../../../src/db/entities/PackingBags.entity';
+import { PackingCategoryAssignees } from '../../../src/db/entities/PackingCategoryAssignees.entity';
+import { PackingItems } from '../../../src/db/entities/PackingItems.entity';
+import { PackingTemplateCategories } from '../../../src/db/entities/PackingTemplateCategories.entity';
+import { PackingTemplateItems } from '../../../src/db/entities/PackingTemplateItems.entity';
+import { PackingTemplates } from '../../../src/db/entities/PackingTemplates.entity';
+import { addTripMember, createUser, createAdmin, createTrip, createPackingItem } from '../../helpers/factories';
+import { addPackingBagMembers, makePackingBag, makePackingItem } from '../../helpers/factories/packing';
+import { countRows, findRow, insertRow } from '../../helpers/factories/rows';
+import { FakeRealtimeService } from '../../helpers/fake-realtime';
+import { createMcpHarness, parseToolResult, type McpHarness } from '../../helpers/mcp-harness';
+import { resetTestDb } from '../../helpers/test-db';
+import { createTestOrm, type TestOrm } from '../../helpers/test-orm';
+
+import { describe, it, expect, vi, beforeAll, beforeEach, afterAll } from 'vitest';
+
+vi.mock('../../../src/db/database', async () => {
+  const { createSnapshotTestDb, buildDbMock } = await import('../../helpers/db-mock');
+  return buildDbMock(createSnapshotTestDb());
+});
+
+const realtime = new FakeRealtimeService();
+const broadcastMock = realtime.broadcastMock;
+
+let orm: TestOrm;
+
+beforeAll(async () => {
+  orm = await createTestOrm(testDb);
+});
+
+beforeEach(() => {
+  resetTestDb(testDb);
+  broadcastMock.mockClear();
+  delete process.env.DEMO_MODE;
+});
+
+afterAll(async () => {
+  await orm.close();
+  testDb.close();
+});
+
+async function withHarness(userId: number, fn: (h: McpHarness) => Promise<void>) {
+  const h = await createMcpHarness({ realtime, userId, withResources: false });
+  try {
+    await fn(h);
+  } finally {
+    await h.cleanup();
+  }
+}
+
+// ---------------------------------------------------------------------------
+// reorder_packing_items
+// ---------------------------------------------------------------------------
+
+describe('Tool: reorder_packing_items', () => {
+  it('reorders packing items and broadcasts', async () => {
+    const { user } = createUser(testDb);
+    const trip = createTrip(testDb, user.id);
+    const item1 = createPackingItem(testDb, trip.id, { name: 'Shirt' });
+    const item2 = createPackingItem(testDb, trip.id, { name: 'Pants' });
+    await withHarness(user.id, async (h) => {
+      const result = await h.client.callTool({
+        name: 'reorder_packing_items',
+        arguments: { tripId: trip.id, orderedIds: [item2.id, item1.id] },
+      });
+      const data = parseToolResult(result) as any;
+      expect(data.success).toBe(true);
+      expect(broadcastMock).toHaveBeenCalledWith(trip.id, 'packing:reordered', expect.any(Object));
+    });
+  });
+
+  it('returns access denied for non-member', async () => {
+    const { user } = createUser(testDb);
+    const { user: other } = createUser(testDb);
+    const trip = createTrip(testDb, other.id);
+    const item = createPackingItem(testDb, trip.id);
+    await withHarness(user.id, async (h) => {
+      const result = await h.client.callTool({
+        name: 'reorder_packing_items',
+        arguments: { tripId: trip.id, orderedIds: [item.id] },
+      });
+      expect(result.isError).toBe(true);
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// list_packing_bags
+// ---------------------------------------------------------------------------
+
+describe('Tool: list_packing_bags', () => {
+  it('returns empty array initially', async () => {
+    const { user } = createUser(testDb);
+    const trip = createTrip(testDb, user.id);
+    await withHarness(user.id, async (h) => {
+      const result = await h.client.callTool({
+        name: 'list_packing_bags',
+        arguments: { tripId: trip.id },
+      });
+      const data = parseToolResult(result) as any;
+      expect(data.bags).toEqual([]);
+    });
+  });
+
+  it('returns bags that exist', async () => {
+    const { user } = createUser(testDb);
+    const trip = createTrip(testDb, user.id);
+    await makePackingBag(orm, trip.id, { name: 'Carry-on', color: '#ff0000' });
+    await withHarness(user.id, async (h) => {
+      const result = await h.client.callTool({
+        name: 'list_packing_bags',
+        arguments: { tripId: trip.id },
+      });
+      const data = parseToolResult(result) as any;
+      expect(data.bags).toHaveLength(1);
+      expect(data.bags[0].name).toBe('Carry-on');
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// create_packing_bag
+// ---------------------------------------------------------------------------
+
+describe('Tool: create_packing_bag', () => {
+  it('creates a bag and broadcasts', async () => {
+    const { user } = createUser(testDb);
+    const trip = createTrip(testDb, user.id);
+    await withHarness(user.id, async (h) => {
+      const result = await h.client.callTool({
+        name: 'create_packing_bag',
+        arguments: { tripId: trip.id, name: 'Checked bag', color: '#3b82f6' },
+      });
+      const data = parseToolResult(result) as any;
+      expect(data.bag).toBeDefined();
+      expect(data.bag.name).toBe('Checked bag');
+      // hydrated to match listBags/schema, which always carry a members array
+      expect(data.bag.members).toEqual([]);
+      expect(broadcastMock).toHaveBeenCalledWith(trip.id, 'packing:bag-created', expect.any(Object));
+    });
+  });
+
+  it('creates a bag with a weight limit (#2154)', async () => {
+    const { user } = createUser(testDb);
+    const trip = createTrip(testDb, user.id);
+    await withHarness(user.id, async (h) => {
+      const result = await h.client.callTool({
+        name: 'create_packing_bag',
+        arguments: { tripId: trip.id, name: 'Checked bag', weight_limit_grams: 23000 },
+      });
+      const data = parseToolResult(result) as any;
+      expect(data.bag.weight_limit_grams).toBe(23000);
+      const row = (await findRow(orm, PackingBags, { id: data.bag.id }))!;
+      expect(row.weight_limit_grams).toBe(23000);
+    });
+  });
+
+  it('returns access denied for non-member', async () => {
+    const { user } = createUser(testDb);
+    const { user: other } = createUser(testDb);
+    const trip = createTrip(testDb, other.id);
+    await withHarness(user.id, async (h) => {
+      const result = await h.client.callTool({
+        name: 'create_packing_bag',
+        arguments: { tripId: trip.id, name: 'Bag' },
+      });
+      expect(result.isError).toBe(true);
+    });
+  });
+
+  it('blocks demo user', async () => {
+    process.env.DEMO_MODE = 'true';
+    const { user } = createUser(testDb, { email: 'demo@nomad.app' });
+    const trip = createTrip(testDb, user.id);
+    await withHarness(user.id, async (h) => {
+      const result = await h.client.callTool({
+        name: 'create_packing_bag',
+        arguments: { tripId: trip.id, name: 'Bag' },
+      });
+      expect(result.isError).toBe(true);
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// update_packing_bag
+// ---------------------------------------------------------------------------
+
+describe('Tool: update_packing_bag', () => {
+  it('updates bag name and broadcasts', async () => {
+    const { user } = createUser(testDb);
+    const trip = createTrip(testDb, user.id);
+    const bag = await makePackingBag(orm, trip.id, { name: 'Old Name', color: '#aabbcc' });
+    await withHarness(user.id, async (h) => {
+      const result = await h.client.callTool({
+        name: 'update_packing_bag',
+        arguments: { tripId: trip.id, bagId: bag.id, name: 'New Name' },
+      });
+      const data = parseToolResult(result) as any;
+      expect(data.bag).toBeDefined();
+      expect(data.bag.name).toBe('New Name');
+      expect(broadcastMock).toHaveBeenCalledWith(trip.id, 'packing:bag-updated', expect.any(Object));
+    });
+  });
+
+  it('returns access denied for non-member', async () => {
+    const { user } = createUser(testDb);
+    const { user: other } = createUser(testDb);
+    const trip = createTrip(testDb, other.id);
+    await withHarness(user.id, async (h) => {
+      const result = await h.client.callTool({
+        name: 'update_packing_bag',
+        arguments: { tripId: trip.id, bagId: 1, name: 'X' },
+      });
+      expect(result.isError).toBe(true);
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// delete_packing_bag
+// ---------------------------------------------------------------------------
+
+describe('Tool: delete_packing_bag', () => {
+  it('deletes a bag and broadcasts', async () => {
+    const { user } = createUser(testDb);
+    const trip = createTrip(testDb, user.id);
+    const { id: bagId } = await makePackingBag(orm, trip.id, { name: 'Delete Me', color: '#000000' });
+    await withHarness(user.id, async (h) => {
+      const result = await h.client.callTool({
+        name: 'delete_packing_bag',
+        arguments: { tripId: trip.id, bagId },
+      });
+      const data = parseToolResult(result) as any;
+      expect(data.success).toBe(true);
+      // { bagId } — aligned with the REST route and the plugin host.
+      expect(broadcastMock).toHaveBeenCalledWith(trip.id, 'packing:bag-deleted', expect.objectContaining({ bagId }));
+      expect(await findRow(orm, PackingBags, { id: bagId })).toBeNull();
+    });
+  });
+
+  it('pings the room to re-read the bag weights (#2191)', async () => {
+    const { user } = createUser(testDb);
+    const trip = createTrip(testDb, user.id);
+    const { id: bagId } = await makePackingBag(orm, trip.id, { name: 'Carry-on', color: '#000000' });
+    await makePackingItem(orm, trip.id, {
+      name: 'Tent',
+      category: 'Camping',
+      checked: 0,
+      bag: bagId,
+      weight_grams: 3000,
+    });
+    await withHarness(user.id, async (h) => {
+      await h.client.callTool({
+        name: 'delete_packing_bag',
+        arguments: { tripId: trip.id, bagId },
+      });
+      // bag_id is ON DELETE SET NULL, so the 3 kg move into the unassigned pile:
+      // both numbers change and every client has to re-read them, exactly as on
+      // the REST route and the plugin RPC.
+      expect(broadcastMock).toHaveBeenCalledWith(String(trip.id), 'packing:bag-totals', {}, undefined);
+      expect(broadcastMock).toHaveBeenCalledTimes(2);
+      expect((await findRow(orm, PackingItems, { trip: trip.id }))!.bag_id).toBeNull();
+    });
+  });
+
+  it('returns access denied for non-member', async () => {
+    const { user } = createUser(testDb);
+    const { user: other } = createUser(testDb);
+    const trip = createTrip(testDb, other.id);
+    await withHarness(user.id, async (h) => {
+      const result = await h.client.callTool({
+        name: 'delete_packing_bag',
+        arguments: { tripId: trip.id, bagId: 1 },
+      });
+      expect(result.isError).toBe(true);
+    });
+  });
+
+  // It used to report success and send both events for a bag that was not there.
+  it('answers a bag that is not on the trip as not found, like REST, and sends nothing', async () => {
+    const { user } = createUser(testDb);
+    const trip = createTrip(testDb, user.id);
+    const otherTrip = createTrip(testDb, user.id);
+    const { id: bagId } = await makePackingBag(orm, otherTrip.id, { name: 'Elsewhere', color: '#000000' });
+    await withHarness(user.id, async (h) => {
+      const result = await h.client.callTool({
+        name: 'delete_packing_bag',
+        arguments: { tripId: trip.id, bagId },
+      });
+      expect(result.isError).toBe(true);
+      expect((result.content as { text: string }[])[0].text).toBe('Bag not found.');
+      expect(broadcastMock).not.toHaveBeenCalled();
+      expect(await findRow(orm, PackingBags, { id: bagId })).not.toBeNull();
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// set_bag_members
+// ---------------------------------------------------------------------------
+
+describe('Tool: set_bag_members', () => {
+  it('sets bag members and broadcasts', async () => {
+    const { user } = createUser(testDb);
+    const trip = createTrip(testDb, user.id);
+    const { id: bagId } = await makePackingBag(orm, trip.id, { name: 'My Bag', color: '#123456' });
+    await withHarness(user.id, async (h) => {
+      const result = await h.client.callTool({
+        name: 'set_bag_members',
+        arguments: { tripId: trip.id, bagId, userIds: [user.id] },
+      });
+      const data = parseToolResult(result) as any;
+      // Returns the hydrated members list (REST parity), not { success }.
+      expect(data.members.map((m: any) => m.user_id)).toEqual([user.id]);
+      expect(broadcastMock).toHaveBeenCalledWith(
+        trip.id,
+        'packing:bag-members-updated',
+        expect.objectContaining({ members: expect.any(Array) }),
+      );
+    });
+  });
+
+  it('clears bag members when passed empty array', async () => {
+    const { user } = createUser(testDb);
+    const trip = createTrip(testDb, user.id);
+    const { id: bagId } = await makePackingBag(orm, trip.id, { name: 'My Bag', color: '#123456' });
+    await addPackingBagMembers(orm, bagId, [user.id]);
+    await withHarness(user.id, async (h) => {
+      const result = await h.client.callTool({
+        name: 'set_bag_members',
+        arguments: { tripId: trip.id, bagId, userIds: [] },
+      });
+      const data = parseToolResult(result) as any;
+      expect(data.members).toEqual([]);
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// get_packing_category_assignees
+// ---------------------------------------------------------------------------
+
+describe('Tool: get_packing_category_assignees', () => {
+  it('returns empty object initially', async () => {
+    const { user } = createUser(testDb);
+    const trip = createTrip(testDb, user.id);
+    await withHarness(user.id, async (h) => {
+      const result = await h.client.callTool({
+        name: 'get_packing_category_assignees',
+        arguments: { tripId: trip.id },
+      });
+      const data = parseToolResult(result) as any;
+      expect(data.assignees).toEqual({});
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// set_packing_category_assignees
+// ---------------------------------------------------------------------------
+
+describe('Tool: set_packing_category_assignees', () => {
+  it('sets category assignees and broadcasts', async () => {
+    const { user } = createUser(testDb);
+    const trip = createTrip(testDb, user.id);
+    await withHarness(user.id, async (h) => {
+      const result = await h.client.callTool({
+        name: 'set_packing_category_assignees',
+        arguments: { tripId: trip.id, categoryName: 'Clothing', userIds: [user.id] },
+      });
+      const data = parseToolResult(result) as any;
+      // Returns the hydrated assignees list (REST parity), not { success }.
+      expect(data.assignees.map((a: any) => a.user_id)).toEqual([user.id]);
+      expect(broadcastMock).toHaveBeenCalledWith(
+        trip.id,
+        'packing:assignees',
+        expect.objectContaining({ category: 'Clothing', assignees: expect.any(Array) }),
+      );
+    });
+  });
+
+  // The REST route always notified the tagged travellers; the tool now does too.
+  it('notifies the fellow traveller it tags, as the REST route does', async () => {
+    const { user } = createUser(testDb);
+    const { user: member } = createUser(testDb);
+    const trip = createTrip(testDb, user.id);
+    addTripMember(testDb, trip.id, member.id);
+    await withHarness(user.id, async (h) => {
+      const result = await h.client.callTool({
+        name: 'set_packing_category_assignees',
+        arguments: { tripId: trip.id, categoryName: 'Clothing', userIds: [member.id] },
+      });
+      expect(result.isError).toBeFalsy();
+      // The send is fire and forget: it lands one turn of the event loop later.
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      const sent = await findRow(orm, Notifications, { recipient: member.id });
+      expect(sent?.text_key).toBe('notif.packing_tagged.text');
+      expect(JSON.parse(String(sent?.text_params))).toMatchObject({ actor: user.username, category: 'Clothing' });
+    });
+  });
+
+  it('clears assignees when passed empty array', async () => {
+    const { user } = createUser(testDb);
+    const trip = createTrip(testDb, user.id);
+    await insertRow(orm, PackingCategoryAssignees, { trip: trip.id, category_name: 'Clothing', user: user.id });
+    await withHarness(user.id, async (h) => {
+      const result = await h.client.callTool({
+        name: 'set_packing_category_assignees',
+        arguments: { tripId: trip.id, categoryName: 'Clothing', userIds: [] },
+      });
+      const data = parseToolResult(result) as any;
+      expect(data.assignees).toEqual([]);
+    });
+  });
+
+  it('returns access denied for non-member', async () => {
+    const { user } = createUser(testDb);
+    const { user: other } = createUser(testDb);
+    const trip = createTrip(testDb, other.id);
+    await withHarness(user.id, async (h) => {
+      const result = await h.client.callTool({
+        name: 'set_packing_category_assignees',
+        arguments: { tripId: trip.id, categoryName: 'Electronics', userIds: [] },
+      });
+      expect(result.isError).toBe(true);
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// apply_packing_template
+// ---------------------------------------------------------------------------
+
+describe('Tool: apply_packing_template', () => {
+  it('applies a template and pings the bag weights once (#2191)', async () => {
+    const { user } = createUser(testDb);
+    const trip = createTrip(testDb, user.id);
+    const templateId = await insertRow(orm, PackingTemplates, { name: 'Hiking', createdByRef: user.id });
+    const categoryId = await insertRow(orm, PackingTemplateCategories, {
+      template: templateId,
+      name: 'Gear',
+      sort_order: 0,
+    });
+    await insertRow(orm, PackingTemplateItems, { category: categoryId, name: 'Boots', sort_order: 0 });
+
+    await withHarness(user.id, async (h) => {
+      const result = await h.client.callTool({
+        name: 'apply_packing_template',
+        arguments: { tripId: trip.id, templateId },
+      });
+      expect(result.isError).toBeFalsy();
+      // Applied items can carry weights, so the room has to re-read the totals.
+      expect(broadcastMock).toHaveBeenCalledWith(String(trip.id), 'packing:bag-totals', {}, undefined);
+    });
+  });
+
+  it('returns error for non-existent template', async () => {
+    const { user } = createUser(testDb);
+    const trip = createTrip(testDb, user.id);
+    await withHarness(user.id, async (h) => {
+      const result = await h.client.callTool({
+        name: 'apply_packing_template',
+        arguments: { tripId: trip.id, templateId: 99999 },
+      });
+      expect(result.isError).toBe(true);
+      expect((result.content as { text: string }[])[0].text).toBe('Template not found.');
+      expect(broadcastMock).not.toHaveBeenCalled();
+    });
+  });
+
+  // It always landed on the common list; REST has taken the visibility since #1565.
+  it("takes the visibility like REST: personal items are the caller's own and reach the caller alone", async () => {
+    const { user } = createUser(testDb);
+    const trip = createTrip(testDb, user.id);
+    const templateId = await insertRow(orm, PackingTemplates, { name: 'Diving', createdByRef: user.id });
+    const categoryId = await insertRow(orm, PackingTemplateCategories, {
+      template: templateId,
+      name: 'Gear',
+      sort_order: 0,
+    });
+    await insertRow(orm, PackingTemplateItems, { category: categoryId, name: 'Mask', sort_order: 0 });
+
+    await withHarness(user.id, async (h) => {
+      const result = await h.client.callTool({
+        name: 'apply_packing_template',
+        arguments: { tripId: trip.id, templateId, visibility: 'personal' },
+      });
+      const data = parseToolResult(result) as { items: { is_private: number; owner_id: number }[] };
+      expect(data.items).toEqual([expect.objectContaining({ is_private: 1, owner_id: user.id })]);
+      expect(broadcastMock).toHaveBeenCalledWith(
+        trip.id,
+        'packing:template-applied',
+        expect.objectContaining({ items: data.items }),
+        undefined,
+        user.id,
+      );
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// save_packing_template
+// ---------------------------------------------------------------------------
+
+describe('Tool: save_packing_template', () => {
+  it('saves the current packing list as a template for an admin', async () => {
+    const { user } = createAdmin(testDb);
+    const trip = createTrip(testDb, user.id);
+    createPackingItem(testDb, trip.id, { name: 'Toothbrush', category: 'Toiletries' });
+    await withHarness(user.id, async (h) => {
+      const result = await h.client.callTool({
+        name: 'save_packing_template',
+        arguments: { tripId: trip.id, templateName: 'Weekend Trip' },
+      });
+      const data = parseToolResult(result) as any;
+      // Save now returns the new template (with its id) instead of a bare success flag.
+      expect(data.template).toBeDefined();
+      expect(Number.isInteger(data.template.id)).toBe(true);
+      expect(data.template.name).toBe('Weekend Trip');
+    });
+  });
+
+  it('returns an error when the packing list is empty', async () => {
+    const { user } = createAdmin(testDb);
+    const trip = createTrip(testDb, user.id);
+    await withHarness(user.id, async (h) => {
+      const result = await h.client.callTool({
+        name: 'save_packing_template',
+        arguments: { tripId: trip.id, templateName: 'Empty' },
+      });
+      expect(result.isError).toBe(true);
+    });
+  });
+
+  it('denies a non-admin editor (parity with the REST admin gate)', async () => {
+    const { user } = createUser(testDb);
+    const trip = createTrip(testDb, user.id);
+    createPackingItem(testDb, trip.id, { name: 'Toothbrush', category: 'Toiletries' });
+    await withHarness(user.id, async (h) => {
+      const result = await h.client.callTool({
+        name: 'save_packing_template',
+        arguments: { tripId: trip.id, templateName: 'Weekend Trip' },
+      });
+      expect(result.isError).toBe(true);
+      expect((result.content as any)[0].text).toBe('Admin access required');
+    });
+  });
+
+  it('returns access denied for non-member', async () => {
+    const { user } = createUser(testDb);
+    const { user: other } = createUser(testDb);
+    const trip = createTrip(testDb, other.id);
+    await withHarness(user.id, async (h) => {
+      const result = await h.client.callTool({
+        name: 'save_packing_template',
+        arguments: { tripId: trip.id, templateName: 'X' },
+      });
+      expect(result.isError).toBe(true);
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// list_packing_templates / delete_packing_template
+// ---------------------------------------------------------------------------
+
+describe('Tool: list_packing_templates', () => {
+  it('lists saved templates with their ids and item counts', async () => {
+    const { user } = createAdmin(testDb);
+    const trip = createTrip(testDb, user.id);
+    createPackingItem(testDb, trip.id, { name: 'Toothbrush', category: 'Toiletries' });
+    await withHarness(user.id, async (h) => {
+      const saved = parseToolResult(
+        await h.client.callTool({
+          name: 'save_packing_template',
+          arguments: { tripId: trip.id, templateName: 'Beach' },
+        }),
+      ) as any;
+
+      const listed = parseToolResult(
+        await h.client.callTool({
+          name: 'list_packing_templates',
+          arguments: { tripId: trip.id },
+        }),
+      ) as any;
+      expect(listed.templates.some((t: any) => t.id === saved.template.id && t.name === 'Beach')).toBe(true);
+    });
+  });
+
+  it('is available to a non-admin trip member (read-only)', async () => {
+    const { user } = createUser(testDb);
+    const trip = createTrip(testDb, user.id);
+    await withHarness(user.id, async (h) => {
+      const result = await h.client.callTool({
+        name: 'list_packing_templates',
+        arguments: { tripId: trip.id },
+      });
+      expect(result.isError).toBeFalsy();
+      const data = parseToolResult(result) as any;
+      expect(Array.isArray(data.templates)).toBe(true);
+    });
+  });
+});
+
+describe('Tool: delete_packing_template', () => {
+  it('removes a template for an admin', async () => {
+    const { user } = createAdmin(testDb);
+    const trip = createTrip(testDb, user.id);
+    createPackingItem(testDb, trip.id, { name: 'Toothbrush', category: 'Toiletries' });
+    await withHarness(user.id, async (h) => {
+      const saved = parseToolResult(
+        await h.client.callTool({
+          name: 'save_packing_template',
+          arguments: { tripId: trip.id, templateName: 'Ski' },
+        }),
+      ) as any;
+      const id = saved.template.id;
+
+      const deleted = parseToolResult(
+        await h.client.callTool({
+          name: 'delete_packing_template',
+          arguments: { templateId: id },
+        }),
+      ) as any;
+      expect(deleted.success).toBe(true);
+      const remaining = await countRows(orm, PackingTemplates, { id });
+      expect(remaining).toBe(0);
+    });
+  });
+
+  it('denies a non-admin (parity with the REST admin gate)', async () => {
+    const { user } = createUser(testDb);
+    await withHarness(user.id, async (h) => {
+      const result = await h.client.callTool({
+        name: 'delete_packing_template',
+        arguments: { templateId: 1 },
+      });
+      expect(result.isError).toBe(true);
+      expect((result.content as any)[0].text).toBe('Admin access required');
+    });
+  });
+
+  it('returns an error for a missing template', async () => {
+    const { user } = createAdmin(testDb);
+    await withHarness(user.id, async (h) => {
+      const result = await h.client.callTool({
+        name: 'delete_packing_template',
+        arguments: { templateId: 99999 },
+      });
+      expect(result.isError).toBe(true);
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// bulk_import_packing
+// ---------------------------------------------------------------------------
+
+describe('Tool: bulk_import_packing', () => {
+  it('imports multiple packing items, returns them, and broadcasts per item', async () => {
+    const { user } = createUser(testDb);
+    const trip = createTrip(testDb, user.id);
+    const items = [
+      { name: 'Passport', category: 'Documents' },
+      { name: 'Charger', category: 'Electronics' },
+      { name: 'Sunscreen', category: 'Toiletries' },
+    ];
+    await withHarness(user.id, async (h) => {
+      const result = await h.client.callTool({
+        name: 'bulk_import_packing',
+        arguments: { tripId: trip.id, items },
+      });
+      const data = parseToolResult(result) as any;
+      // New contract: returns the created items (REST parity), broadcasts packing:created per item.
+      expect(data.count).toBe(items.length);
+      expect(Array.isArray(data.items)).toBe(true);
+      expect(data.items).toHaveLength(items.length);
+      expect(data.items[0].name).toBe('Passport');
+      expect(broadcastMock).toHaveBeenCalledWith(
+        trip.id,
+        'packing:created',
+        expect.objectContaining({ item: expect.any(Object) }),
+      );
+      // Plus ONE bag-totals ping for the whole import (#2191) — not one per
+      // item: it is content-free and each one costs every connected client a
+      // listBags round trip.
+      expect(broadcastMock).toHaveBeenCalledWith(String(trip.id), 'packing:bag-totals', {}, undefined);
+      expect(broadcastMock).toHaveBeenCalledTimes(items.length + 1);
+    });
+  });
+
+  it('honors the widened fields (bag, weight_grams, checked)', async () => {
+    const { user } = createUser(testDb);
+    const trip = createTrip(testDb, user.id);
+    await withHarness(user.id, async (h) => {
+      const result = await h.client.callTool({
+        name: 'bulk_import_packing',
+        arguments: {
+          tripId: trip.id,
+          items: [{ name: 'Tent', category: 'Camping', bag: 'Backpack', weight_grams: 2500, checked: true }],
+        },
+      });
+      const data = parseToolResult(result) as any;
+      expect(data.count).toBe(1);
+      const item = data.items[0];
+      expect(item.weight_grams).toBe(2500);
+      expect(item.checked).toBe(1);
+      expect(item.bag_id).toBeTruthy(); // "Backpack" bag was created and assigned
+    });
+  });
+
+  it('returns access denied for non-member', async () => {
+    const { user } = createUser(testDb);
+    const { user: other } = createUser(testDb);
+    const trip = createTrip(testDb, other.id);
+    await withHarness(user.id, async (h) => {
+      const result = await h.client.callTool({
+        name: 'bulk_import_packing',
+        arguments: { tripId: trip.id, items: [{ name: 'Item' }] },
+      });
+      expect(result.isError).toBe(true);
+    });
+  });
+
+  it('blocks demo user', async () => {
+    process.env.DEMO_MODE = 'true';
+    const { user } = createUser(testDb, { email: 'demo@nomad.app' });
+    const trip = createTrip(testDb, user.id);
+    await withHarness(user.id, async (h) => {
+      const result = await h.client.callTool({
+        name: 'bulk_import_packing',
+        arguments: { tripId: trip.id, items: [{ name: 'Item' }] },
+      });
+      expect(result.isError).toBe(true);
+    });
+  });
+});

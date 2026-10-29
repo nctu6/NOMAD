@@ -1,0 +1,189 @@
+import { useEffect, useState, useRef } from 'react'
+import { RefreshCw, Camera, X, Play } from 'lucide-react'
+import { useJourneyStore } from '../../store/journeyStore'
+import { useTranslation } from '../../i18n'
+import { useToast } from '../shared/Toast'
+import type { JourneyEntry, GalleryPhoto, JourneyTrip } from '../../store/journeyStore'
+import { photoUrl, posterlessVideo } from '../../pages/journeyDetail/JourneyDetailPage.helpers'
+import { ProviderPicker, type ProviderPhotoGroup } from './JourneyDetailPageProviderPicker'
+import { useConnectedPhotoProviders } from './useConnectedPhotoProviders'
+import { useGalleryUpload } from './useGalleryUpload'
+import { ScrollTrigger } from './JourneyDetailPageScrollTrigger'
+import EmptyState from '../shared/EmptyState'
+import ConfirmDialog from '../shared/ConfirmDialog'
+
+export function GalleryView({ entries, gallery, journeyId, userId, trips, canEdit, onPhotoClick, onRefresh, onAddProviderPhotos, onRegisterUpload, onRegisterProviders, onUploadProgress }: {
+  entries: JourneyEntry[]
+  gallery: GalleryPhoto[]
+  journeyId: number
+  userId: number
+  trips: JourneyTrip[]
+  /** Owner or editor: only they get the delete on a tile, the server refuses everyone else. */
+  canEdit: boolean
+  onPhotoClick: (photos: GalleryPhoto[], index: number) => void
+  onRefresh: () => void
+  /** What the picker's Add does: the host's useProviderPhotoAdds, shared with the phone screen. */
+  onAddProviderPhotos: (journeyId: number, provider: string, groups: ProviderPhotoGroup[], entryId: number | null) => Promise<unknown>
+  onRegisterUpload?: (fn: () => void) => void
+  /** The upload's file count while it runs, null once it is through: the page's Upload button shows it. */
+  onUploadProgress?: (progress: { done: number; total: number } | null) => void
+  onRegisterProviders?: (providers: { id: string; name: string }[], browse: (provider: string) => void) => void
+}) {
+  const { t } = useTranslation()
+  const [showPicker, setShowPicker] = useState(false)
+  const [pickerProvider, setPickerProvider] = useState<string | null>(null)
+  const { progress: galleryProgress, handleGalleryUpload } =
+    useGalleryUpload({ journeyId, onUploaded: onRefresh, trackProgress: true })
+  useEffect(() => { onUploadProgress?.(galleryProgress) }, [galleryProgress, onUploadProgress])
+  const toast = useToast()
+
+  // The providers enabled AND connected for the current user, handed up: the page
+  // header renders the provider buttons next to Upload.
+  const connectedProviders = useConnectedPhotoProviders()
+  useEffect(() => {
+    onRegisterProviders?.(connectedProviders, browseProvider)
+    // browseProvider only sets state; registering on the list alone is the old behaviour.
+  }, [connectedProviders])
+
+  const allPhotos = gallery
+  // A long trip's gallery is hundreds of tiles, and rendering them all at once is
+  // what makes scrolling it a chore (#1614). The provider picker has grown its own
+  // way in for the same reason; this reuses it rather than inventing a second one.
+  const GALLERY_PAGE = 60
+  const [visibleCount, setVisibleCount] = useState(GALLERY_PAGE)
+  const shownPhotos = allPhotos.slice(0, visibleCount)
+  // Deleting or adding photos must not leave the window stranded past the end.
+  useEffect(() => { setVisibleCount(c => Math.min(Math.max(c, GALLERY_PAGE), Math.max(allPhotos.length, GALLERY_PAGE))) }, [allPhotos.length])
+
+  const entriesWithContent = entries.filter(e => e.type !== 'skeleton' || e.title)
+
+  const browseProvider = (provider: string) => {
+    setPickerProvider(provider)
+    setShowPicker(true)
+  }
+
+  const galleryFileRef = useRef<HTMLInputElement>(null)
+  useEffect(() => { onRegisterUpload?.(() => galleryFileRef.current?.click()) }, [onRegisterUpload])
+
+  // Deleting is final on the server and takes the photo out of every entry that
+  // uses it too, so the tile only asks; the dialog does the deleting (#2593).
+  const [deleteTarget, setDeleteTarget] = useState<GalleryPhoto | null>(null)
+
+  const handleDeletePhoto = async (galleryPhotoId: number) => {
+    const store = useJourneyStore.getState()
+    if (!store.current) return
+    try {
+      await store.deleteGalleryPhoto(journeyId, galleryPhotoId)
+    } catch {
+      toast.error(t('common.error'))
+      onRefresh()
+    }
+  }
+
+  return (
+    <div>
+      <input ref={galleryFileRef} type="file" accept="image/*,video/*" multiple onChange={handleGalleryUpload} className="hidden" />
+
+      {/* Header — the provider buttons live in the page header next to Upload */}
+      <div className="flex items-center justify-between mb-4 flex-wrap gap-2">
+        <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[10px] font-bold uppercase tracking-[0.07em]" style={{ background: 'var(--vg-surf2)', color: 'var(--vg-ink3)' }}>
+          <Camera size={11} /> {allPhotos.length} {t('journey.detail.photos', { count: allPhotos.length })}
+        </span>
+      </div>
+
+      {allPhotos.length === 0 ? (
+        <EmptyState scene="journey" title={t('journey.detail.noPhotos')} />
+      ) : (
+        <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-1.5 pb-24 md:pb-6">
+          {shownPhotos.map((photo, i) => (
+            <div
+              key={photo.id}
+              role="button"
+              // No press-scale on the tile: shrinking it mid-click slides the corner
+              // delete button out from under the pointer, so the click retargets onto
+              // the tile and opens the lightbox instead (#2158).
+              data-no-press
+              tabIndex={0}
+              className="relative aspect-square rounded-lg overflow-hidden cursor-pointer group"
+              onClick={() => onPhotoClick(allPhotos, i)}
+              onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onPhotoClick(allPhotos, i) } }}
+            >
+              {posterlessVideo(photo) ? (
+                // Poster-less local video: show a neutral tile.
+                <div className="w-full h-full bg-zinc-200 dark:bg-zinc-800" />
+              ) : (
+                <img
+                  src={photoUrl(photo, 'thumbnail')}
+                  alt={photo.caption || ''}
+                  className="w-full h-full object-cover transition-transform group-hover:scale-105"
+                  loading="lazy"
+                />
+              )}
+              <div className="absolute inset-0 bg-black/0 group-hover:bg-black/20 transition-colors" />
+              {photo.media_type === 'video' && (
+                <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
+                  <span className="w-9 h-9 rounded-full bg-black/55 backdrop-blur flex items-center justify-center text-white">
+                    <Play size={16} className="ml-0.5" fill="currentColor" />
+                  </span>
+                </div>
+              )}
+              {/* Delete: revealed on hover, always there where there is no hover (#2593) */}
+              {canEdit && (
+                <button type="button"
+                  onClick={(e) => { e.stopPropagation(); setDeleteTarget(photo) }}
+                  onKeyDown={e => e.stopPropagation()}
+                  aria-label={t('common.delete')}
+                  className="absolute top-1.5 end-1.5 w-6 h-6 rounded-full bg-black/60 backdrop-blur text-white flex items-center justify-center opacity-0 group-hover:opacity-100 focus-visible:opacity-100 [@media(hover:none)]:w-8 [@media(hover:none)]:h-8 [@media(hover:none)]:opacity-100 transition-opacity z-10"
+                >
+                  <X size={12} />
+                </button>
+              )}
+              {photo.provider && photo.provider !== 'local' && (
+                <div className="absolute top-1.5 start-1.5">
+                  <span className="text-[8px] font-medium px-1.5 py-0.5 rounded-full bg-black/70 backdrop-blur text-white flex items-center gap-1">
+                    <RefreshCw size={7} />
+                    {photo.provider === 'immich' ? 'Immich' : photo.provider === 'synologyphotos' ? 'Synology Photos' : photo.provider}
+                  </span>
+                </div>
+              )}
+              {photo.caption && (
+                <div className="absolute bottom-0 inset-x-0 p-2 bg-gradient-to-t from-black/60 to-transparent opacity-0 group-hover:opacity-100 [@media(hover:none)]:opacity-100 transition-opacity">
+                  <p className="text-[10px] text-white truncate">{photo.caption}</p>
+                </div>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+      {visibleCount < allPhotos.length && (
+        <ScrollTrigger onVisible={() => setVisibleCount(c => c + GALLERY_PAGE)} loading={false} />
+      )}
+
+      <ConfirmDialog
+        isOpen={!!deleteTarget}
+        onClose={() => setDeleteTarget(null)}
+        onConfirm={() => { if (deleteTarget) void handleDeletePhoto(deleteTarget.id) }}
+        title={t('journey.gallery.deleteTitle')}
+        message={t('journey.gallery.deleteMessage')}
+        confirmLabel={t('common.delete')}
+        danger
+      />
+
+      {/* Provider Photo Picker Modal */}
+      {showPicker && (
+        <ProviderPicker
+          provider={pickerProvider!}
+          userId={userId}
+          entries={entriesWithContent}
+          trips={trips}
+          existingAssetIds={new Set(gallery.filter(p => p.asset_id).map(p => p.asset_id!))}
+          onClose={() => setShowPicker(false)}
+          onAdd={async (groups, entryId) => {
+            await onAddProviderPhotos(journeyId, pickerProvider!, groups, entryId)
+            setShowPicker(false)
+          }}
+        />
+      )}
+    </div>
+  )
+}

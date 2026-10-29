@@ -1,33 +1,66 @@
 import { create } from 'zustand'
 import type { StoreApi } from 'zustand'
-import { tripsApi, daysApi, placesApi, packingApi, tagsApi, categoriesApi } from '../api/client'
+import { tagsApi, categoriesApi } from '../api/client'
+import { offlineDb } from '../db/offlineDb'
+import { tripRepo, TripNeedsConnectionError } from '../repo/tripRepo'
+import { dayRepo } from '../repo/dayRepo'
+import { placeRepo } from '../repo/placeRepo'
+import { packingRepo } from '../repo/packingRepo'
+import { todoRepo } from '../repo/todoRepo'
+import { budgetRepo } from '../repo/budgetRepo'
+import { reservationRepo } from '../repo/reservationRepo'
+import { fileRepo } from '../repo/fileRepo'
+import { isEffectivelyOnline } from '../sync/networkMode'
 import { createPlacesSlice } from './slices/placesSlice'
 import { createAssignmentsSlice } from './slices/assignmentsSlice'
+import { createDaysSlice } from './slices/daysSlice'
 import { createDayNotesSlice } from './slices/dayNotesSlice'
 import { createPackingSlice } from './slices/packingSlice'
+import { createTodoSlice } from './slices/todoSlice'
 import { createBudgetSlice } from './slices/budgetSlice'
 import { createReservationsSlice } from './slices/reservationsSlice'
 import { createFilesSlice } from './slices/filesSlice'
 import { handleRemoteEvent } from './slices/remoteEventHandler'
 import type {
-  Trip, Day, Place, Assignment, DayNote, PackingItem,
+  Trip, Day, Place, Assignment, DayNote, PackingItem, TodoItem,
   Tag, Category, BudgetItem, TripFile, Reservation,
   AssignmentsMap, DayNotesMap, WebSocketEvent,
 } from '../types'
 import { getApiErrorMessage } from '../types'
 import type { PlacesSlice } from './slices/placesSlice'
 import type { AssignmentsSlice } from './slices/assignmentsSlice'
+import type { DaysSlice } from './slices/daysSlice'
 import type { DayNotesSlice } from './slices/dayNotesSlice'
 import type { PackingSlice } from './slices/packingSlice'
+import type { TodoSlice } from './slices/todoSlice'
 import type { BudgetSlice } from './slices/budgetSlice'
 import type { ReservationsSlice } from './slices/reservationsSlice'
 import type { FilesSlice } from './slices/filesSlice'
+import type { PlacesRatingFloor } from '../utils/placesFilter'
+
+/** The part of the world the trip's plan map shows, as its last move left it. */
+export interface PlanMapViewport {
+  tripId: number
+  south: number
+  west: number
+  north: number
+  east: number
+}
+
+/** The open trip went away under this tab, and why. */
+export interface TripGone {
+  tripId: number
+  /** Deleted by someone else, or this user is no longer one of its members. */
+  reason: 'deleted' | 'removed'
+}
 
 export interface TripStoreState
   extends PlacesSlice,
     AssignmentsSlice,
+    DaysSlice,
     DayNotesSlice,
     PackingSlice,
+    TodoSlice,
     BudgetSlice,
     ReservationsSlice,
     FilesSlice {
@@ -37,22 +70,53 @@ export interface TripStoreState
   assignments: AssignmentsMap
   dayNotes: DayNotesMap
   packingItems: PackingItem[]
+  todoItems: TodoItem[]
   tags: Tag[]
   categories: Category[]
   budgetItems: BudgetItem[]
   files: TripFile[]
   reservations: Reservation[]
   selectedDayId: number | null
+  // Places filter (list + map markers). Lives here, not in the sidebar, so the
+  // applied filter and the filter UI can never drift apart when the Plan tab
+  // unmounts and remounts (#1541).
+  placesFilter: string
+  placesCategoryFilter: Set<string>
+  // Minimum average stars. Shared for the same reason: the map markers and the
+  // phone's list follow the floor the desktop list sets, and back (#1435).
+  placesRatingFilter: PlacesRatingFloor
+  // Where the plan map is looking, so the place search can look there too
+  // (#2620). Null while no plan map is on screen.
+  planMapViewport: PlanMapViewport | null
   isLoading: boolean
   error: string | null
+  /**
+   * Set by the remote handler when the open trip was deleted elsewhere or this
+   * user was taken off it (or left it in another tab). The planner says so and
+   * goes back to the trip list; nothing else reads it.
+   */
+  tripGone: TripGone | null
 
   setSelectedDay: (dayId: number | null) => void
+  setPlacesFilter: (filter: string) => void
+  setPlacesCategoryFilter: (categoryIds: Set<string>) => void
+  setPlacesRatingFilter: (floor: PlacesRatingFloor) => void
+  setPlanMapViewport: (viewport: PlanMapViewport | null) => void
+  /** Lifts the pool, category and rating filters at once. */
+  resetPlacesFilters: () => void
   handleRemoteEvent: (event: WebSocketEvent) => void
+  resetTrip: () => void
   loadTrip: (tripId: number | string) => Promise<void>
+  hydrateActiveTrip: (tripId: number | string) => Promise<void>
   refreshDays: (tripId: number | string) => Promise<void>
-  updateTrip: (tripId: number | string, data: Partial<Trip>) => Promise<Trip>
-  addTag: (data: Partial<Tag>) => Promise<Tag>
-  addCategory: (data: Partial<Category>) => Promise<Category>
+  updateTrip: (tripId: number | string, data: Partial<Trip> & { date_shift_mode?: 'keep_bookings' | 'shift_all' }) => Promise<Trip>
+  addTag: (data: Partial<Tag> & { name: string }) => Promise<Tag>
+  addCategory: (data: Partial<Category> & { name: string }) => Promise<Category>
+  /** Reads the user's tags again after they changed elsewhere (`tags:changed`). */
+  reloadTags: () => Promise<void>
+  /** Reads the packing list again, for a change no item event describes (a template applied). */
+  reloadPackingItems: (tripId: number | string) => Promise<void>
+  clearTripGone: () => void
 }
 
 export const useTripStore = create<TripStoreState>((set, get) => ({
@@ -62,29 +126,77 @@ export const useTripStore = create<TripStoreState>((set, get) => ({
   assignments: {},
   dayNotes: {},
   packingItems: [],
+  todoItems: [],
   tags: [],
   categories: [],
   budgetItems: [],
   files: [],
   reservations: [],
   selectedDayId: null,
+  placesFilter: 'all',
+  placesCategoryFilter: new Set<string>(),
+  placesRatingFilter: 'all',
+  planMapViewport: null,
   isLoading: false,
   error: null,
+  tripGone: null,
 
   setSelectedDay: (dayId: number | null) => set({ selectedDayId: dayId }),
+  setPlacesFilter: (filter: string) => set({ placesFilter: filter }),
+  setPlacesCategoryFilter: (categoryIds: Set<string>) => set({ placesCategoryFilter: categoryIds }),
+  setPlacesRatingFilter: (floor: PlacesRatingFloor) => set({ placesRatingFilter: floor }),
+  setPlanMapViewport: (viewport: PlanMapViewport | null) => set({ planMapViewport: viewport }),
+  resetPlacesFilters: () => set({ placesFilter: 'all', placesCategoryFilter: new Set<string>(), placesRatingFilter: 'all' }),
 
-  handleRemoteEvent: (event: WebSocketEvent) => handleRemoteEvent(set, event),
+  handleRemoteEvent: (event: WebSocketEvent) => handleRemoteEvent(set, get, event),
+
+  // Clear every trip-scoped slice so switching trips (or losing access to one)
+  // can never leave a previous trip's data visible. Global tags/categories are
+  // left intact. Called at the top of loadTrip.
+  resetTrip: () => set({
+    trip: null,
+    days: [],
+    places: [],
+    assignments: {},
+    dayNotes: {},
+    packingItems: [],
+    todoItems: [],
+    budgetItems: [],
+    files: [],
+    reservations: [],
+    selectedDayId: null,
+    placesFilter: 'all',
+    placesCategoryFilter: new Set<string>(),
+    placesRatingFilter: 'all',
+    planMapViewport: null,
+    error: null,
+    tripGone: null,
+  }),
+
+  clearTripGone: () => set({ tripGone: null }),
 
   loadTrip: async (tripId: number | string) => {
+    get().resetTrip()
     set({ isLoading: true, error: null })
     try {
-      const [tripData, daysData, placesData, packingData, tagsData, categoriesData] = await Promise.all([
-        tripsApi.get(tripId),
-        daysApi.list(tripId),
-        placesApi.list(tripId),
-        packingApi.list(tripId),
-        tagsApi.list(),
-        categoriesApi.list(),
+      const [tripData, daysData, placesData, packingData, todoData, budgetData, reservationsData, filesData, tagsData, categoriesData] = await Promise.all([
+        tripRepo.get(tripId),
+        dayRepo.list(tripId),
+        placeRepo.list(tripId),
+        packingRepo.list(tripId),
+        todoRepo.list(tripId),
+        // Budget / reservations / files are hydrated here too so the offline
+        // path is uniform (no separate tab-gated effects). Non-fatal: a failure
+        // in any of these must not blank the whole trip.
+        budgetRepo.list(tripId).catch(() => ({ items: [] as BudgetItem[] })),
+        reservationRepo.list(tripId).catch(() => ({ reservations: [] as Reservation[] })),
+        fileRepo.list(tripId).catch(() => ({ files: [] as TripFile[] })),
+        isEffectivelyOnline()
+          ? tagsApi.list().catch(() => offlineDb.tags.toArray().then(tags => ({ tags })))
+          : offlineDb.tags.toArray().then(tags => ({ tags })),
+        isEffectivelyOnline()
+          ? categoriesApi.list().catch(() => offlineDb.categories.toArray().then(categories => ({ categories })))
+          : offlineDb.categories.toArray().then(categories => ({ categories })),
       ])
 
       const assignmentsMap: AssignmentsMap = {}
@@ -101,6 +213,10 @@ export const useTripStore = create<TripStoreState>((set, get) => ({
         assignments: assignmentsMap,
         dayNotes: dayNotesMap,
         packingItems: packingData.items,
+        todoItems: todoData.items,
+        budgetItems: budgetData.items,
+        reservations: reservationsData.reservations,
+        files: filesData.files,
         tags: tagsData.tags,
         categories: categoriesData.categories,
         isLoading: false,
@@ -112,9 +228,28 @@ export const useTripStore = create<TripStoreState>((set, get) => ({
     }
   },
 
+  // Silently re-fetch the active trip's collaborative state into the store after
+  // the network comes back (WS reconnect or `online` event) so edits missed while
+  // offline appear in place — no splash, no resetTrip. Each resource is
+  // best-effort; a failure on one must not wipe the others.
+  hydrateActiveTrip: async (tripId: number | string) => {
+    await Promise.all([
+      get().refreshDays(tripId),
+      placeRepo.list(tripId).then(d => set({ places: d.places })).catch(() => {}),
+      packingRepo.list(tripId).then(d => set({ packingItems: d.items })).catch(() => {}),
+      todoRepo.list(tripId).then(d => set({ todoItems: d.items })).catch(() => {}),
+      get().loadBudgetItems(tripId),
+      get().loadReservations(tripId),
+      get().loadFiles(tripId),
+    ])
+    // Accommodations live in planner-local state, not this store — nudge the
+    // planner to reload them too (e.g. a trip date change made while offline).
+    window.dispatchEvent(new CustomEvent('accommodations:refresh'))
+  },
+
   refreshDays: async (tripId: number | string) => {
     try {
-      const daysData = await daysApi.list(tripId)
+      const daysData = await dayRepo.list(tripId)
       const assignmentsMap: AssignmentsMap = {}
       const dayNotesMap: DayNotesMap = {}
       for (const day of daysData.days) {
@@ -127,11 +262,20 @@ export const useTripStore = create<TripStoreState>((set, get) => ({
     }
   },
 
-  updateTrip: async (tripId: number | string, data: Partial<Trip>) => {
+  updateTrip: async (tripId: number | string, data: Partial<Trip> & { date_shift_mode?: 'keep_bookings' | 'shift_all' }) => {
     try {
-      const result = await tripsApi.update(tripId, data)
+      const before = get().trip
+      const result = await tripRepo.update(tripId, data)
       set({ trip: result.trip })
-      const daysData = await daysApi.list(tripId)
+      // New dates rebuild the day rows, and a stay on a day that went is gone
+      // with it. Stays live in the planner, not here, so every caller of this
+      // action (the phone's trip dialog too) nudges the planner to reload them,
+      // through the existing legacy accommodations:refresh window event rather
+      // than a second channel; a store slice for stays would retire both.
+      if (before?.start_date !== result.trip?.start_date || before?.end_date !== result.trip?.end_date) {
+        window.dispatchEvent(new CustomEvent('accommodations:refresh'))
+      }
+      const daysData = await dayRepo.list(tripId)
       const assignmentsMap: AssignmentsMap = {}
       const dayNotesMap: DayNotesMap = {}
       for (const day of daysData.days) {
@@ -139,13 +283,17 @@ export const useTripStore = create<TripStoreState>((set, get) => ({
         dayNotesMap[String(day.id)] = day.notes_items || []
       }
       set({ days: daysData.days, assignments: assignmentsMap, dayNotes: dayNotesMap })
+      // A date change re-anchors bookings server-side (#1288); the socket echo is
+      // suppressed for this client, so pull the fresh reservations here.
+      await get().loadReservations(tripId)
       return result.trip
     } catch (err: unknown) {
+      if (err instanceof TripNeedsConnectionError) throw err
       throw new Error(getApiErrorMessage(err, 'Error updating trip'))
     }
   },
 
-  addTag: async (data: Partial<Tag>) => {
+  addTag: async (data: Partial<Tag> & { name: string }) => {
     try {
       const result = await tagsApi.create(data)
       set((state) => ({ tags: [...state.tags, result.tag] }))
@@ -155,7 +303,29 @@ export const useTripStore = create<TripStoreState>((set, get) => ({
     }
   },
 
-  addCategory: async (data: Partial<Category>) => {
+  // Online only: offline the cached tags are all there is, and the change that
+  // pinged us is not readable anyway. A failed read keeps the tags on screen.
+  reloadTags: async () => {
+    if (!isEffectivelyOnline()) return
+    try {
+      const { tags } = await tagsApi.list()
+      set({ tags })
+    } catch {
+      // The next trip load reads them again.
+    }
+  },
+
+  // Through the repo like loadTrip, so the offline cache follows the new list.
+  reloadPackingItems: async (tripId: number | string) => {
+    try {
+      const { items } = await packingRepo.list(tripId)
+      if (String(get().trip?.id) === String(tripId)) set({ packingItems: items })
+    } catch {
+      // The list on screen stays; the next reload or reconnect catches up.
+    }
+  },
+
+  addCategory: async (data: Partial<Category> & { name: string }) => {
     try {
       const result = await categoriesApi.create(data)
       set((state) => ({ categories: [...state.categories, result.category] }))
@@ -167,8 +337,10 @@ export const useTripStore = create<TripStoreState>((set, get) => ({
 
   ...createPlacesSlice(set, get),
   ...createAssignmentsSlice(set, get),
+  ...createDaysSlice(set, get),
   ...createDayNotesSlice(set, get),
   ...createPackingSlice(set, get),
+  ...createTodoSlice(set, get),
   ...createBudgetSlice(set, get),
   ...createReservationsSlice(set, get),
   ...createFilesSlice(set, get),

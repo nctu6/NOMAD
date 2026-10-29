@@ -1,0 +1,108 @@
+/**
+ * Help integration tests — /api/help served from the bundled `wiki/` directory.
+ *
+ * These run against the real repo wiki (no TREK_WIKI_DIR override) on purpose: the
+ * point is to prove the shipped docs are reachable through the HTTP layer, which is
+ * what a broken path or a wiki missing from the image would silently cost us.
+ */
+import { buildApp } from '../../src/bootstrap';
+import { db as testDb } from '../../src/db/database';
+import type { INestApplication } from '@nestjs/common';
+
+import type { Application } from 'express';
+import request from 'supertest';
+import { describe, it, expect, vi, beforeAll, afterAll } from 'vitest';
+
+vi.mock('../../src/db/database', async () => {
+  const { createSnapshotTestDb, buildDbMock } = await import('../helpers/db-mock');
+  return buildDbMock(createSnapshotTestDb());
+});
+
+let nestApp: INestApplication;
+let app: Application;
+const fetchSpy = vi.fn(async () => new Response('{}', { status: 200 }));
+
+beforeAll(async () => {
+  // Any outbound fetch here is a bug: help must be served from disk.
+  vi.stubGlobal('fetch', fetchSpy);
+  nestApp = await buildApp();
+  app = nestApp.getHttpAdapter().getInstance();
+});
+
+afterAll(async () => {
+  vi.unstubAllGlobals();
+  await nestApp?.close();
+});
+
+describe('GET /api/help', () => {
+  it('returns the sidebar without authentication', async () => {
+    const res = await request(app).get('/api/help/index').expect(200);
+
+    expect(res.body.sections.length).toBeGreaterThan(0);
+    expect(res.body.sections[0].pages[0]).toEqual({ title: expect.any(String), slug: expect.any(String) });
+  });
+
+  it('renders a real wiki page', async () => {
+    const res = await request(app).get('/api/help/page/Home').expect(200);
+
+    expect(res.body.slug).toBe('Home');
+    expect(res.body.title.length).toBeGreaterThan(0);
+    expect(res.body.markdown.length).toBeGreaterThan(0);
+  });
+
+  it('404s an unknown page', async () => {
+    await request(app).get('/api/help/page/DefinitelyNotAPage').expect(404);
+  });
+
+  it('serves a wiki image from disk', async () => {
+    const res = await request(app).get('/api/help/asset/assets/TripPlanner.png').expect(200);
+
+    expect(res.headers['content-type']).toBe('image/png');
+    expect(res.headers['cache-control']).toContain('max-age=86400');
+    expect(res.body.length).toBeGreaterThan(0);
+  });
+
+  it('refuses to serve files outside the wiki directory', async () => {
+    // Percent-encoded, because Express normalises a literal `../` away before the
+    // controller sees it — this is the form that actually reaches the guard, since
+    // the handler decodes the path itself off req.originalUrl.
+    await request(app).get('/api/help/asset/assets/%2e%2e%2f%2e%2e%2fpackage.json').expect(404);
+    await request(app).get('/api/help/asset/%2e%2e%2fserver%2f.env').expect(404);
+  });
+
+  it('searches the shipped pages and lands on the section that carries the words', async () => {
+    const res = await request(app).get('/api/help/search').query({ q: 'cover image' }).expect(200);
+
+    expect(res.body.hits.length).toBeGreaterThan(0);
+    const hit = res.body.hits[0];
+    expect(hit).toEqual({
+      slug: expect.any(String),
+      title: expect.any(String),
+      section: expect.any(String),
+      anchor: expect.anything(),
+      heading: expect.anything(),
+      snippet: expect.any(String),
+      score: expect.any(Number),
+    });
+    expect(hit.snippet.toLowerCase()).toContain('cover');
+  });
+
+  it('clamps the hit count to the requested limit', async () => {
+    const res = await request(app).get('/api/help/search').query({ q: 'trip', limit: 2 }).expect(200);
+    expect(res.body.hits).toHaveLength(2);
+  });
+
+  it('400s a missing, blank, overlong or non-integer-limited query', async () => {
+    await request(app).get('/api/help/search').expect(400);
+    await request(app).get('/api/help/search').query({ q: '   ' }).expect(400);
+    await request(app)
+      .get('/api/help/search')
+      .query({ q: 'x'.repeat(121) })
+      .expect(400);
+    await request(app).get('/api/help/search').query({ q: 'trip', limit: 'many' }).expect(400);
+  });
+
+  it('never calls out to GitHub', () => {
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+});

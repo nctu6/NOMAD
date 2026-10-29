@@ -1,0 +1,15 @@
+import type { TranslationStrings } from '../types';
+
+const pdf: TranslationStrings = {
+  'pdf.travelPlan': 'Reiseplan',
+  'pdf.planned': 'Eingeplant',
+  'pdf.costLabel': 'Kosten',
+  'pdf.preview': 'PDF Vorschau',
+  'pdf.saveAsPdf': 'Als PDF speichern',
+  'pdf.pageBreakPerDay': 'Seitenumbruch pro Tag',
+  'pdf.transportNotes': 'Notizen zu Transporten',
+  'pdf.mapTitle': 'Routenübersicht',
+  'pdf.distanceLabel': 'Strecke',
+  'pdf.mapCredit': 'Ländergrenzen: geoBoundaries (CC BY 4.0)',
+};
+export default pdf;

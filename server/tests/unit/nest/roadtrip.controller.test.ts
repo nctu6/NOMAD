@@ -1,0 +1,243 @@
+/**
+ * ROADTRIP-CTL-001..016 — the seven via routes.
+ *
+ * What is worth pinning here is not the happy path, which the service tests
+ * already cover, but the checks a later change could delete without anything
+ * noticing: the guard chain, the day-belongs-to-this-trip test on every route,
+ * the track-belongs-to-this-trip test on the batch route, and the exact 404
+ * bodies the client reads.
+ *
+ * The guard chain is asserted through the decorator metadata rather than by
+ * booting Nest: the controller's own comment calls the ORDER load-bearing, and
+ * a class-level assertion is the only thing that fails when somebody removes
+ * AddonGuard again. `@RequireAddon` is metadata and does nothing on its own, so
+ * dropping the guard from the list is a silent regression that opens all seven
+ * routes on an instance that switched the addon off.
+ *
+ * What a write tells the trip is the service's (RoadtripService.addVia and its
+ * siblings, pinned in roadtrip.service.test.ts); here only that every write
+ * hands it the REST writer of this trip, user and socket.
+ */
+import { AddonGuard } from '../../../src/nest/addons/addon.guard';
+import { JwtAuthGuard } from '../../../src/nest/auth-core/jwt-auth.guard';
+import type { TripWriter } from '../../../src/nest/common/trip-writer';
+import { TripAccessGuard } from '../../../src/nest/permissions/trip-access.guard';
+import { RoadtripController } from '../../../src/nest/roadtrip/roadtrip.controller';
+import type { RoadtripService } from '../../../src/nest/roadtrip/roadtrip.service';
+import type { User } from '../../../src/types';
+import { HttpException } from '@nestjs/common';
+import { GUARDS_METADATA } from '@nestjs/common/constants';
+
+import { describe, it, expect, vi } from 'vitest';
+
+const VIA = { id: 5, day_id: 4, after_order_index: 0, sequence: 0, lat: 53, lng: 10 };
+const USER = { id: 3, role: 'user' } as User;
+/** The writer restWriter hands back, as the use cases receive it. */
+const WRITER = { userId: 3, role: 'user', surface: 'rest' } as TripWriter;
+
+function svc(o: Partial<RoadtripService> = {}): RoadtripService {
+  return {
+    dayExists: vi.fn().mockReturnValue(true),
+    trackExists: vi.fn().mockReturnValue(true),
+    listForDay: vi.fn().mockReturnValue([VIA]),
+    listForTrip: vi.fn().mockReturnValue([VIA]),
+    tracksForTrip: vi.fn().mockReturnValue([]),
+    restWriter: vi.fn().mockReturnValue(WRITER),
+    addVia: vi.fn().mockReturnValue(VIA),
+    addVias: vi.fn().mockReturnValue([VIA]),
+    reanchorVias: vi.fn().mockReturnValue([VIA]),
+    moveVia: vi.fn().mockReturnValue(VIA),
+    removeVia: vi.fn().mockReturnValue(true),
+    ...o,
+  } as unknown as RoadtripService;
+}
+
+async function thrown(fn: () => unknown): Promise<{ status: number; body: unknown }> {
+  try {
+    await fn();
+  } catch (err) {
+    expect(err).toBeInstanceOf(HttpException);
+    const e = err as HttpException;
+    return { status: e.getStatus(), body: e.getResponse() };
+  }
+  throw new Error('expected throw');
+}
+
+describe('RoadtripController — the guard chain', () => {
+  it('ROADTRIP-CTL-001: the addon gate leads, and the auth and trip guards follow', () => {
+    const guards = Reflect.getMetadata(GUARDS_METADATA, RoadtripController) as unknown[];
+
+    // AddonGuard first, and present at all: @RequireAddon is metadata and inert
+    // without it, and the guard is not registered globally either. Without this
+    // line all seven routes answered on an instance that had the addon off,
+    // which is the bug this branch fixed once already.
+    expect(guards).toEqual([AddonGuard, JwtAuthGuard, TripAccessGuard]);
+    // It leads because a disabled addon owes an anonymous caller a 404 rather
+    // than a 401 that tells them the route exists.
+    expect(guards[0]).toBe(AddonGuard);
+  });
+});
+
+describe('RoadtripController — reads', () => {
+  it('ROADTRIP-CTL-002: the trip read hands back vias and tracks in one answer', async () => {
+    const s = svc();
+    expect(await new RoadtripController(s).listAll('7')).toEqual({ vias: [VIA], tracks: [] });
+    expect(s.listForTrip).toHaveBeenCalledWith('7');
+    expect(s.tracksForTrip).toHaveBeenCalledWith('7');
+  });
+
+  it('ROADTRIP-CTL-003: the day read checks the day belongs to this trip', async () => {
+    const s = svc();
+    expect(await new RoadtripController(s).list('7', '4')).toEqual({ vias: [VIA] });
+    expect(s.dayExists).toHaveBeenCalledWith('4', '7');
+  });
+
+  it('ROADTRIP-CTL-004: a day from another trip is not readable through this one', async () => {
+    // The guard proves the caller may reach the trip; this proves the day is
+    // part of it. Without the check a valid day id from somebody else's trip is
+    // reachable by way of a trip the caller does have access to.
+    const s = svc({ dayExists: vi.fn().mockReturnValue(false) });
+    expect(await thrown(() => new RoadtripController(s).list('7', '999'))).toEqual({
+      status: 404,
+      body: { error: 'Day not found' },
+    });
+  });
+});
+
+describe('RoadtripController — writes', () => {
+  const body = { after_order_index: 0, lat: 53, lng: 10 };
+
+  it('ROADTRIP-CTL-005: creating one checks the day first', async () => {
+    const s = svc();
+    expect(await new RoadtripController(s).create(USER, '7', '4', body)).toEqual({ via: VIA });
+    expect(s.dayExists).toHaveBeenCalledWith('4', '7');
+    expect(s.addVia).toHaveBeenCalledWith('4', body, WRITER);
+  });
+
+  it('ROADTRIP-CTL-006: every write refuses a day from another trip', async () => {
+    const s = svc({ dayExists: vi.fn().mockReturnValue(false) });
+    const c = new RoadtripController(s);
+    const notFound = { status: 404, body: { error: 'Day not found' } };
+
+    expect(await thrown(() => c.create(USER, '7', '999', body))).toEqual(notFound);
+    expect(await thrown(() => c.createMany(USER, '7', '999', { vias: [body] }))).toEqual(notFound);
+    expect(await thrown(() => c.reanchor(USER, '7', '999', { vias: [] }))).toEqual(notFound);
+    expect(await thrown(() => c.update(USER, '7', '999', '5', { lat: 1, lng: 2 }))).toEqual(notFound);
+    expect(await thrown(() => c.remove(USER, '7', '999', '5'))).toEqual(notFound);
+
+    // None of them reached the service.
+    expect(s.addVia).not.toHaveBeenCalled();
+    expect(s.addVias).not.toHaveBeenCalled();
+    expect(s.reanchorVias).not.toHaveBeenCalled();
+    expect(s.moveVia).not.toHaveBeenCalled();
+    expect(s.removeVia).not.toHaveBeenCalled();
+  });
+
+  it('ROADTRIP-CTL-007: a batch lays the whole chain in one call', async () => {
+    const s = svc();
+    const batch = { vias: [body, body], replace_legs: [0] };
+    expect(await new RoadtripController(s).createMany(USER, '7', '4', batch)).toEqual({ vias: [VIA] });
+    expect(s.addVias).toHaveBeenCalledWith('7', '4', batch, WRITER);
+  });
+
+  it('ROADTRIP-CTL-008: a track from another trip cannot become this day label', async () => {
+    // Permission is not enough on its own: a place id from somebody else's trip
+    // would otherwise become this day's label, and a place that is not a track
+    // would become a label that can never be drawn.
+    const s = svc({ trackExists: vi.fn().mockReturnValue(false) });
+    expect(
+      await thrown(() =>
+        new RoadtripController(s).createMany(USER, '7', '4', { vias: [body], track: { place_id: 3 } }),
+      ),
+    ).toEqual({ status: 404, body: { error: 'Track not found' } });
+    expect(s.addVias).not.toHaveBeenCalled();
+  });
+
+  it('ROADTRIP-CTL-009: the track check runs against the trip, not the day', async () => {
+    const s = svc();
+    await new RoadtripController(s).createMany(USER, '7', '4', { vias: [body], track: { place_id: 3 } });
+    expect(s.trackExists).toHaveBeenCalledWith(3, '7');
+  });
+
+  it('ROADTRIP-CTL-010: clearing a day track is not a track to look up', async () => {
+    // `null` says the day follows nothing any more, so there is no place id to
+    // check the existence of. Treating it as one would refuse the only way to
+    // detach a track.
+    const s = svc({ trackExists: vi.fn().mockReturnValue(false) });
+    expect(await new RoadtripController(s).createMany(USER, '7', '4', { vias: [body], track: null })).toEqual({
+      vias: [VIA],
+    });
+    expect(s.trackExists).not.toHaveBeenCalled();
+  });
+
+  it('ROADTRIP-CTL-011: re-anchoring goes through as one batch', async () => {
+    const s = svc();
+    const plan = { vias: [{ id: 5, after_order_index: 1 }], remove: [6] };
+    expect(await new RoadtripController(s).reanchor(USER, '7', '4', plan)).toEqual({ vias: [VIA] });
+    expect(s.reanchorVias).toHaveBeenCalledWith('4', plan, WRITER);
+  });
+
+  it('ROADTRIP-CTL-012: moving a via reports where it went', async () => {
+    const s = svc();
+    expect(await new RoadtripController(s).update(USER, '7', '4', '5', { lat: 54, lng: 11 })).toEqual({ via: VIA });
+    // No anchor, explicitly: a drag that stayed between the same two stops sends no new
+    // one, and the service must leave the existing pin alone rather than clear it.
+    expect(s.moveVia).toHaveBeenCalledWith('4', '5', { lat: 54, lng: 11 }, WRITER);
+  });
+
+  it('ROADTRIP-CTL-015: a new anchor is passed on, so a via dragged past a stop is re-pinned', async () => {
+    const s = svc();
+    await new RoadtripController(s).update(USER, '7', '4', '5', { lat: 54, lng: 11, after_order_index: 2 });
+    expect(s.moveVia).toHaveBeenCalledWith('4', '5', { lat: 54, lng: 11, after_order_index: 2 }, WRITER);
+  });
+
+  it('ROADTRIP-CTL-013: a via that is not on this day is a 404, not a silent no-op', async () => {
+    const s = svc({ moveVia: vi.fn().mockReturnValue(null) });
+    expect(await thrown(() => new RoadtripController(s).update(USER, '7', '4', '999', { lat: 1, lng: 2 }))).toEqual({
+      status: 404,
+      body: { error: 'Via not found' },
+    });
+  });
+
+  it('ROADTRIP-CTL-014: removing one reports success', async () => {
+    const s = svc();
+    expect(await new RoadtripController(s).remove(USER, '7', '4', '5')).toEqual({ success: true });
+    expect(s.removeVia).toHaveBeenCalledWith('4', '5', WRITER);
+  });
+
+  it('ROADTRIP-CTL-016: removing a via that is not there is a 404', async () => {
+    const s = svc({ removeVia: vi.fn().mockReturnValue(false) });
+    expect(await thrown(() => new RoadtripController(s).remove(USER, '7', '4', '999'))).toEqual({
+      status: 404,
+      body: { error: 'Via not found' },
+    });
+  });
+
+  /**
+   * Two people planning one road trip look at the same line on the same map, and a
+   * reshaped drive moves every arrival time after it. These routes used to write in
+   * silence, which left the other side reading a route nobody could see change. What
+   * each write sends is the service's; the route decides who sends it.
+   */
+  describe('telling the trip', () => {
+    it('SRV-ROADTRIP-020: every write hands its use case the writer of this trip, user and socket', async () => {
+      const cases: [string, keyof RoadtripService, (c: RoadtripController) => unknown][] = [
+        ['create', 'addVia', (c) => c.create(USER, '7', '4', { after_order_index: 0, lat: 1, lng: 2 }, 'sock')],
+        [
+          'createMany',
+          'addVias',
+          (c) => c.createMany(USER, '7', '4', { vias: [{ after_order_index: 0, lat: 1, lng: 2 }] }, 'sock'),
+        ],
+        ['reanchor', 'reanchorVias', (c) => c.reanchor(USER, '7', '4', { vias: [] }, 'sock')],
+        ['update', 'moveVia', (c) => c.update(USER, '7', '4', '9', { lat: 1, lng: 2 }, 'sock')],
+        ['remove', 'removeVia', (c) => c.remove(USER, '7', '4', '9', 'sock')],
+      ];
+      for (const [name, useCase, run] of cases) {
+        const s = svc();
+        await run(new RoadtripController(s));
+        expect(s.restWriter, name).toHaveBeenCalledWith('7', USER, 'sock');
+        expect(vi.mocked(s[useCase]).mock.lastCall?.at(-1), name).toBe(WRITER);
+      }
+    });
+  });
+});

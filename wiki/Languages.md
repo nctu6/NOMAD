@@ -1,0 +1,71 @@
+# Languages
+
+TREK ships with translations for 27 languages, the [Help Center](Help-Center) guides included. You can change your language at any time without logging out.
+
+## Supported languages
+
+| Code | Language |
+|------|----------|
+| `de` | Deutsch |
+| `en` | English |
+| `es` | Español |
+| `et` | Eesti |
+| `fr` | Français |
+| `hu` | Magyar |
+| `nl` | Nederlands |
+| `br` | Português (Brasil) |
+| `cs` | Česky |
+| `sk` | Slovenčina |
+| `pl` | Polski |
+| `ru` | Русский |
+| `zh` | 简体中文 |
+| `zh-TW` | 繁體中文 |
+| `it` | Italiano |
+| `tr` | Türkçe |
+| `ar` | العربية |
+| `az` | Azərbaycanca |
+| `id` | Bahasa Indonesia |
+| `ja` | 日本語 |
+| `ko` | 한국어 |
+| `th` | ไทย |
+| `uk` | Українська |
+| `gr` | Ελληνικά |
+| `sv` | Svenska |
+| `vi` | Tiếng Việt |
+| `ca` | Català |
+
+## Place names in another language
+
+Place search, suggestions, place details and addresses follow the app language by default. **Settings → General → Language & region → Place names** lets them answer in another language while the interface stays in yours, for example English place names in a German app. Where a place has no name in the chosen language, its local name is shown. See [Display-Settings](Display-Settings#place-names).
+
+## RTL support
+
+Arabic (`ar`) uses a right-to-left layout. All other languages use left-to-right. In Arabic, spacing, indents, alignment and the corners of cards and menus follow the reading direction; maps, timelines and other things placed by position stay as they are.
+
+## Counts
+
+Texts that count something use the forms each language has for numbers: one place and five places in English, and the separate forms Russian, Polish, Czech, Ukrainian and Arabic use for 2, 5 or 21 of something. Languages without plural forms, such as Japanese or Chinese, use one form for every number.
+
+## How language is detected
+
+TREK resolves the display language in this order:
+
+1. **User preference** — the language saved to your account (set in Settings → General).
+2. **Browser language** — `navigator.languages` (and `navigator.language`) reported by your browser.
+3. **Server default** — the `DEFAULT_LANGUAGE` environment variable set by the admin.
+4. **Fallback** — English (`en`).
+
+## Where the language picker appears
+
+- **Login / Register page** — before you are signed in.
+- **Settings → General** — after you are signed in. See [Display-Settings](Display-Settings).
+- **Public share pages** — trip share links.
+- **Public journey pages** — public-facing journey views.
+
+> **Admin:** The `DEFAULT_LANGUAGE` environment variable sets the fallback language shown on the login page and for unauthenticated users. See [Environment-Variables](Environment-Variables).
+
+## See also
+
+- [Display-Settings](Display-Settings)
+- [Environment-Variables](Environment-Variables)
+- [User-Settings](User-Settings)

@@ -1,0 +1,102 @@
+import type { NotificationLocale } from '../externalNotifications/types';
+import { pluralForm } from '../plural';
+
+const br: NotificationLocale = {
+  email: {
+    footer: 'Você recebeu isso porque tem as notificações ativadas no TREK.',
+    manage: 'Gerenciar preferências nas configurações',
+    madeWith: 'Made with',
+    openTrek: 'Abrir TREK',
+  },
+  events: {
+    trip_invite: (p) => ({
+      title: `Convite para "${p.trip}"`,
+      body: `${p.actor} convidou ${p.invitee || 'um membro'} para a viagem "${p.trip}".`,
+    }),
+    booking_change: (p) => ({
+      title: `Nova reserva: ${p.booking}`,
+      body: `${p.actor} adicionou uma reserva "${p.booking}" (${p.type}) em "${p.trip}".`,
+    }),
+    trip_reminder: (p) => ({
+      title: `Lembrete: ${p.trip}`,
+      body: `Sua viagem "${p.trip}" está chegando!`,
+    }),
+    todo_due: (p) => ({
+      title: `Tarefa com vencimento: ${p.todo}`,
+      body: `"${p.todo}" em "${p.trip}" vence em ${p.due}.`,
+    }),
+    vacay_invite: (p) => ({
+      title: 'Convite Vacay Fusion',
+      body: `${p.actor} convidou você para fundir planos de férias. Abra o TREK para aceitar ou recusar.`,
+    }),
+    vacay_share: (p) => ({
+      title: 'Calendário Vacay compartilhado',
+      body: `${p.actor} compartilhou o calendário de férias com você. Abra o TREK para visualizar.`,
+    }),
+    collection_invite: (p) => ({
+      title: 'Convite para coleção',
+      body: `${p.actor} convidou você para compartilhar uma coleção. Abra o TREK para aceitar ou recusar.`,
+    }),
+    photos_shared: (p) => ({
+      title: pluralForm(p.count, 'pt-BR', {
+        one: `${p.count} foto compartilhada`,
+        other: `${p.count} fotos compartilhadas`,
+      }),
+      body: pluralForm(p.count, 'pt-BR', {
+        one: `${p.actor} compartilhou ${p.count} foto em "${p.trip}".`,
+        other: `${p.actor} compartilhou ${p.count} fotos em "${p.trip}".`,
+      }),
+    }),
+    collab_message: (p) => ({
+      title: `Nova mensagem em "${p.trip}"`,
+      body: `${p.actor}: ${p.preview}`,
+    }),
+    packing_tagged: (p) => ({
+      title: `Bagagem: ${p.category}`,
+      body: `${p.actor} atribuiu você à categoria "${p.category}" em "${p.trip}".`,
+    }),
+    version_available: (p) => ({
+      title: 'Nova versão do TREK disponível',
+      body: `O TREK ${p.version} está disponível. Acesse o painel de administração para atualizar.`,
+    }),
+    replica_failure: (p) => ({
+      title: 'Falha na réplica de armazenamento',
+      body:
+        `Falha ao gravar na réplica '${p.backend}': ${p.op} de ${p.key} — ${p.error}.` +
+        (p.suppressed !== '0'
+          ? pluralForm(p.suppressed, 'pt-BR', {
+              one: ` Mais ${p.suppressed} falha foi suprimida desde a última notificação.`,
+              other: ` Mais ${p.suppressed} falhas foram suprimidas desde a última notificação.`,
+            })
+          : ''),
+    }),
+    paddle_region_requested: (p) => ({
+      title: 'Região de remo pedida',
+      body: `${p.actor} está planejando um passeio de remo em ${p.region}. Carregue ou recuse os dados de água na administração, em Complementos.`,
+    }),
+    synology_session_cleared: () => ({
+      title: 'Sessão Synology encerrada',
+      body: 'Sua conta ou URL do Synology foi alterada. Você foi desconectado do Synology Photos.',
+    }),
+    wanderer_source_hint: (p) => ({
+      title: `Trilha do wanderer: ${p.tour}`,
+      body:
+        p.state === 'changed'
+          ? `“${p.tour}” em “${p.trip}” foi alterada no wanderer. Abra o passeio e verifique a fonte para ver todas as mudanças. Nada na viagem muda sozinho.`
+          : p.state === 'unverifiable'
+            ? `“${p.tour}” em “${p.trip}” não pode mais ser verificada no wanderer. O passeio da sua viagem continua como está.`
+            : `“${p.tour}” em “${p.trip}” pode ter mudado no wanderer. Abra o passeio e verifique a fonte para saber. Nada na viagem muda sozinho.`,
+    }),
+    plugin_notification: (p) => ({ title: p.title ?? '', body: p.body ?? '' }),
+  },
+  passwordReset: {
+    subject: 'Redefinir sua senha',
+    greeting: 'Olá',
+    body: 'Recebemos um pedido para redefinir a senha da sua conta TREK. Clique no botão abaixo para definir uma nova senha.',
+    ctaIntro: 'Redefinir senha',
+    expiry: 'Este link expira em 60 minutos.',
+    ignore: 'Se você não solicitou isto, pode ignorar este e-mail — sua senha não será alterada.',
+  },
+};
+
+export default br;

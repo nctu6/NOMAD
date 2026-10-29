@@ -1,0 +1,176 @@
+import type { User } from '../../types';
+import { CurrentUser } from '../auth-core/current-user.decorator';
+import { JwtAuthGuard } from '../auth-core/jwt-auth.guard';
+import { RequirePermission, TripAccessGuard } from '../permissions/trip-access.guard';
+import { ReservationWritesService } from './reservation-writes.service';
+import {
+  ReservationCreateDto,
+  ReservationUpdateDto,
+  ReservationPositionsDto,
+  ReservationTravelersDto,
+} from './reservations.dto';
+import { ReservationsService } from './reservations.service';
+import { Body, Controller, Delete, Get, Headers, HttpException, Param, Post, Put, UseGuards } from '@nestjs/common';
+
+type ReservationBody = Record<string, unknown> & {
+  title?: string;
+  type?: string;
+  create_budget_entry?: { total_price?: number; category?: string; currency?: string | null };
+};
+
+/**
+ * /api/trips/:tripId/reservations — trip-scoped bookings.
+ *
+ * Byte-identical to the legacy Express route (server/src/routes/reservations.ts):
+ * trip access (404), 'reservation_edit' permission (403), create 201 / rest 200,
+ * the bespoke 404 bodies, the accommodation + budget side effects, the booking
+ * notifications, and all WebSocket broadcasts with the forwarded X-Socket-Id.
+ * Create, edit, delete and reorder run the use cases of ReservationWritesService,
+ * which the MCP tools share, so both surfaces send the same events.
+ * Invalid bodies (missing title, non-array positions/user_ids) now 400 through
+ * the global ZodValidationPipe envelope instead of the bespoke strings.
+ * /positions is declared before /:id so it wins over the param.
+ */
+@Controller('api/trips/:tripId/reservations')
+// TripAccessGuard resolves :tripId and 404s a trip the user cannot reach; mutations
+// add @RequirePermission('reservation_edit'), the same action string the service's canEdit
+// passes, so the HTTP and MCP paths cannot demand different rights.
+@UseGuards(JwtAuthGuard, TripAccessGuard)
+export class ReservationsController {
+  constructor(
+    private readonly reservations: ReservationsService,
+    private readonly writes: ReservationWritesService,
+  ) {}
+
+  @Get()
+  async list(@CurrentUser() user: User, @Param('tripId') tripId: string) {
+    return { reservations: await this.reservations.list(tripId) };
+  }
+
+  @RequirePermission('reservation_edit')
+  @Post()
+  async create(
+    @CurrentUser() user: User,
+    @Param('tripId') tripId: string,
+    @Body() rawBody: ReservationCreateDto,
+    @Headers('x-socket-id') socketId?: string,
+  ) {
+    const body = rawBody as ReservationBody & { title: string };
+    await this.rejectForeignReferences(tripId, body);
+    // Before the writes: the price keeps the currency it was quoted in,
+    // at a rate frozen now (#2525).
+    const budgetEntry = await this.reservations.withFrozenRate(tripId, body.create_budget_entry);
+    // The booking and its linked cost are one write.
+    return this.writes.createBooking(
+      tripId,
+      body as never,
+      budgetEntry,
+      this.writes.restWriter(tripId, user, socketId),
+    );
+  }
+
+  @RequirePermission('reservation_edit')
+  @Put('positions')
+  async updatePositions(
+    @CurrentUser() user: User,
+    @Param('tripId') tripId: string,
+    @Body() body: ReservationPositionsDto,
+    @Headers('x-socket-id') socketId?: string,
+  ) {
+    // The legacy signature declares day_plan_position required, but the wire
+    // contract tolerates absent values (bind NULL) — see the shared schema.
+    await this.writes.reorderBookings(
+      tripId,
+      body.positions as { id: number; day_plan_position: number }[],
+      body.day_id,
+      this.writes.restWriter(tripId, user, socketId),
+    );
+    return { success: true };
+  }
+
+  @RequirePermission('reservation_edit')
+  @Put(':id')
+  async update(
+    @CurrentUser() user: User,
+    @Param('tripId') tripId: string,
+    @Param('id') id: string,
+    @Body() rawBody: ReservationUpdateDto,
+    @Headers('x-socket-id') socketId?: string,
+  ) {
+    const body = rawBody as ReservationBody;
+    const current = await this.reservations.getReservation(id, tripId);
+    if (!current) {
+      throw new HttpException({ error: 'Reservation not found' }, 404);
+    }
+    await this.rejectForeignReferences(tripId, body);
+    // The booking and its linked cost are one write; a linked AirTrail flight is pushed back after it.
+    return this.writes.updateBooking(
+      id,
+      tripId,
+      body as never,
+      current,
+      body.create_budget_entry,
+      this.writes.restWriter(tripId, user, socketId),
+    );
+  }
+
+  @RequirePermission('reservation_edit')
+  @Put(':id/travelers')
+  async updateTravelers(
+    @CurrentUser() user: User,
+    @Param('tripId') tripId: string,
+    @Param('id') id: string,
+    @Body() body: ReservationTravelersDto,
+    @Headers('x-socket-id') socketId?: string,
+  ) {
+    const result = await this.reservations.setTravelers(id, tripId, body.user_ids);
+    if (!result) {
+      throw new HttpException({ error: 'Reservation not found' }, 404);
+    }
+    this.reservations.broadcast(
+      tripId,
+      'reservation:travelers-updated',
+      { reservationId: Number(id), travelers: result.travelers },
+      socketId,
+    );
+    return { travelers: result.travelers, reservation: result.reservation };
+  }
+
+  @RequirePermission('reservation_edit')
+  @Delete(':id')
+  async remove(
+    @CurrentUser() user: User,
+    @Param('tripId') tripId: string,
+    @Param('id') id: string,
+    @Headers('x-socket-id') socketId?: string,
+  ) {
+    // A missing booking answers { error: 'Reservation not found' } with 404.
+    return this.writes.deleteBooking(id, tripId, this.writes.restWriter(tripId, user, socketId));
+  }
+
+  /**
+   * The write contracts are open records, so day_id, place_id, assignment_id and
+   * accommodation_id arrive unvalidated. reservation_edit on :tripId says the
+   * caller may write HERE — it says nothing about the ids they put in the body,
+   * and a foreign accommodation_id used to be stored verbatim and deleted with
+   * the reservation. The MCP tools have refused foreign ids since they were
+   * written; this is the REST half of the same rule.
+   *
+   * Two questions, two answers. Reaching into another trip is the older one and
+   * keeps its wording. An id that resolves to nothing at all is the other half
+   * of the same rule — it used to reach the statement and come back as the bare
+   * 500 SQLite's foreign keys produce (#2355) — and saying "not part of this
+   * trip" about an id that is part of nothing would send the caller looking in
+   * the wrong place.
+   */
+  private async rejectForeignReferences(tripId: string, body: ReservationBody): Promise<void> {
+    const offenders = await this.reservations.referencesOutsideTrip(tripId, body as never);
+    if (offenders.length > 0) {
+      throw new HttpException({ error: `Not part of this trip: ${offenders.join(', ')}` }, 400);
+    }
+    const unknown = await this.reservations.unresolvedReferences(tripId, body as never);
+    if (unknown.length > 0) {
+      throw new HttpException({ error: `Unknown reference: ${unknown.join(', ')}` }, 400);
+    }
+  }
+}

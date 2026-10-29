@@ -1,8 +1,15 @@
-import React, { useMemo } from 'react'
+import React, { useEffect, useMemo } from 'react'
+import { avatarSrc } from '../../utils/avatarSrc'
 import { useTripStore } from '../../store/tripStore'
 import { useSettingsStore } from '../../store/settingsStore'
 import { useTranslation } from '../../i18n'
-import { MapPin, Clock, Calendar, Users, Sparkles } from 'lucide-react'
+import { MapPin, Sparkles } from 'lucide-react'
+import { fs } from '../shared/DialogShell'
+import CollabPanelHead from './CollabPanelHead'
+import EmptyState from '../shared/EmptyState'
+import { localToday } from '../Planner/today'
+import { useTripStays } from '../Planner/useTripStays'
+import { stayStartingOn } from '../../utils/dayMerge'
 
 function formatTime(timeStr, is12h) {
   if (!timeStr) return ''
@@ -16,19 +23,22 @@ function formatTime(timeStr, is12h) {
 }
 
 function formatDayLabel(date, t, locale) {
-  const d = new Date(date + 'T00:00:00')
   const now = new Date()
-  const tomorrow = new Date(); tomorrow.setDate(now.getDate() + 1)
+  // Day dates are plain calendar strings, so "today"/"tomorrow" have to be
+  // compared against the local calendar day, not the UTC one.
+  const nowDate = localToday(now)
+  const tomorrowDate = localToday(new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1))
 
-  if (d.toDateString() === now.toDateString()) return t('collab.whatsNext.today') || 'Today'
-  if (d.toDateString() === tomorrow.toDateString()) return t('collab.whatsNext.tomorrow') || 'Tomorrow'
+  if (date === nowDate) return t('collab.whatsNext.today') || 'Today'
+  if (date === tomorrowDate) return t('collab.whatsNext.tomorrow') || 'Tomorrow'
 
-  return d.toLocaleDateString(locale || undefined, { weekday: 'short', day: 'numeric', month: 'short' })
+  return new Date(date + 'T00:00:00Z').toLocaleDateString(locale || undefined, { weekday: 'short', day: 'numeric', month: 'short', timeZone: 'UTC' })
 }
 
 interface TripMember {
   id: number
   username: string
+  avatar?: string | null
   avatar_url?: string | null
 }
 
@@ -40,10 +50,14 @@ export default function WhatsNextWidget({ tripMembers = [] }: WhatsNextWidgetPro
   const { days, assignments } = useTripStore()
   const { t, locale } = useTranslation()
   const is12h = useSettingsStore(s => s.settings.time_format) === '12h'
+  // A hotel on the day its stay begins is timed by the check-in when the stop has no time of its own.
+  const tripId = useTripStore(s => s.trip?.id ?? 0)
+  const { tripAccommodations, loadAccommodations } = useTripStays(tripId)
+  useEffect(() => { loadAccommodations() }, [loadAccommodations])
 
   const upcoming = useMemo(() => {
     const now = new Date()
-    const nowDate = now.toISOString().split('T')[0]
+    const nowDate = localToday(now)
     const nowTime = `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`
     const items = []
 
@@ -52,14 +66,15 @@ export default function WhatsNextWidget({ tripMembers = [] }: WhatsNextWidgetPro
       const dayAssignments = assignments[String(day.id)] || []
       for (const a of dayAssignments) {
         if (!a.place) continue
-        // Include: today (future times) + all future days
+        const time = a.place.place_time || stayStartingOn(tripAccommodations, a.place.id, day.id)?.check_in || null
+        // Include: today (not started yet, or still running) + all future days
         const isFutureDay = day.date > nowDate
-        const isTodayFuture = day.date === nowDate && (!a.place.place_time || a.place.place_time >= nowTime)
+        const isTodayFuture = day.date === nowDate && (!time || time >= nowTime || (!!a.place.end_time && a.place.end_time >= nowTime))
         if (isFutureDay || isTodayFuture) {
           items.push({
             id: a.id,
             name: a.place.name,
-            time: a.place.place_time,
+            time,
             endTime: a.place.end_time,
             date: day.date,
             dayTitle: day.title,
@@ -80,30 +95,19 @@ export default function WhatsNextWidget({ tripMembers = [] }: WhatsNextWidgetPro
     })
 
     return items.slice(0, 8)
-  }, [days, assignments, tripMembers])
+  }, [days, assignments, tripMembers, tripAccommodations])
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%', overflow: 'hidden' }}>
       {/* Header */}
-      <div style={{
-        padding: '10px 14px', display: 'flex', alignItems: 'center', gap: 7, flexShrink: 0,
-      }}>
-        <Sparkles size={14} color="var(--text-faint)" />
-        <span style={{ fontSize: 12, fontWeight: 600, color: 'var(--text-muted)', letterSpacing: 0.3, textTransform: 'uppercase' }}>
-          {t('collab.whatsNext.title') || "What's Next"}
-        </span>
-      </div>
+      <CollabPanelHead icon={Sparkles} title={t('collab.whatsNext.title') || "What's Next"} count={upcoming.length} />
 
-      {/* List */}
-      <div className="chat-scroll" style={{ flex: 1, overflowY: 'auto', padding: '8px 10px' }}>
+      {/* List: one card per stop, grouped under its day like the planner's days */}
+      <div className="chat-scroll" style={{ flex: 1, overflowY: 'auto', padding: 12 }}>
         {upcoming.length === 0 ? (
-          <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', height: '100%', padding: '48px 20px', textAlign: 'center' }}>
-            <Calendar size={36} color="var(--text-faint)" strokeWidth={1.3} style={{ marginBottom: 12 }} />
-            <div style={{ fontSize: 14, fontWeight: 600, color: 'var(--text-secondary)', marginBottom: 4 }}>{t('collab.whatsNext.empty')}</div>
-            <div style={{ fontSize: 12, color: 'var(--text-faint)' }}>{t('collab.whatsNext.emptyHint')}</div>
-          </div>
+          <EmptyState scene="guide" title={t('collab.whatsNext.empty')} />
         ) : (
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+          <div className="flex flex-col gap-1.5">
             {upcoming.map((item, idx) => {
               const prevItem = upcoming[idx - 1]
               const showDayHeader = !prevItem || prevItem.date !== item.date
@@ -111,34 +115,26 @@ export default function WhatsNextWidget({ tripMembers = [] }: WhatsNextWidgetPro
               return (
                 <React.Fragment key={item.id}>
                   {showDayHeader && (
-                    <div style={{
-                      fontSize: 10, fontWeight: 500, color: 'var(--text-faint)',
-                      textTransform: 'uppercase', letterSpacing: 0.5,
-                      padding: idx === 0 ? '0 4px 4px' : '8px 4px 4px',
-                    }}>
-                      {formatDayLabel(item.date, t, locale)}
-                      {item.dayTitle ? ` — ${item.dayTitle}` : ''}
+                    <div className={`flex min-w-0 items-center gap-2 px-1 pb-0.5 ${idx === 0 ? '' : 'pt-2.5'}`}>
+                      <span className="flex-none font-geist font-bold uppercase tracking-[.08em] text-content-faint" style={fs(9.5)}>
+                        {formatDayLabel(item.date, t, locale)}
+                      </span>
+                      {item.dayTitle && <span className="truncate font-semibold text-content-muted" style={fs(11)}>{item.dayTitle}</span>}
                     </div>
                   )}
 
-                  <div style={{
-                    display: 'flex', gap: 10, padding: '8px 10px', borderRadius: 10,
-                    background: 'var(--bg-secondary)', transition: 'background 0.1s',
-                  }}
-                    onMouseEnter={e => e.currentTarget.style.background = 'var(--bg-hover)'}
-                    onMouseLeave={e => e.currentTarget.style.background = 'var(--bg-secondary)'}
-                  >
+                  <div className="flex gap-3 rounded-[14px] border border-edge-faint bg-surface-card px-3 py-2.5 transition-shadow hover:shadow-md">
                     {/* Time column */}
-                    <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', minWidth: 44, flexShrink: 0 }}>
-                      <span style={{ fontSize: 11, fontWeight: 700, color: 'var(--text-primary)', whiteSpace: 'nowrap', lineHeight: 1 }}>
+                    <div className="flex min-w-[44px] flex-none flex-col items-center justify-center font-geist tabular-nums">
+                      <span className="whitespace-nowrap font-bold leading-none text-content" style={fs(12, 'body')}>
                         {item.time ? formatTime(item.time, is12h) : 'TBD'}
                       </span>
                       {item.endTime && (
                         <>
-                          <span style={{ fontSize: 7, color: 'var(--text-faint)', fontWeight: 600, letterSpacing: 0.3, margin: '2px 0', textTransform: 'uppercase' }}>
+                          <span className="my-[3px] font-bold uppercase tracking-[.06em] text-content-faint" style={fs(7.5)}>
                             {t('collab.whatsNext.until') || 'bis'}
                           </span>
-                          <span style={{ fontSize: 11, fontWeight: 700, color: 'var(--text-primary)', whiteSpace: 'nowrap', lineHeight: 1 }}>
+                          <span className="whitespace-nowrap font-bold leading-none text-content" style={fs(12, 'body')}>
                             {formatTime(item.endTime, is12h)}
                           </span>
                         </>
@@ -146,43 +142,33 @@ export default function WhatsNextWidget({ tripMembers = [] }: WhatsNextWidgetPro
                     </div>
 
                     {/* Divider */}
-                    <div style={{ width: 1, alignSelf: 'stretch', background: 'var(--border-faint)', flexShrink: 0, margin: '2px 0' }} />
+                    <div className="my-0.5 w-px flex-none self-stretch bg-edge-faint" />
 
                     {/* Details */}
-                    <div style={{ flex: 1, minWidth: 0 }}>
-                      <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--text-primary)', lineHeight: 1.3, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                    <div className="min-w-0 flex-1">
+                      <div className="truncate font-bold leading-snug text-content" style={fs(13, 'body')}>
                         {item.name}
                       </div>
                       {item.address && (
-                        <div style={{ display: 'flex', alignItems: 'center', gap: 3, marginTop: 2 }}>
-                          <MapPin size={9} color="var(--text-faint)" style={{ flexShrink: 0 }} />
-                          <span style={{ fontSize: 10, color: 'var(--text-faint)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                            {item.address}
-                          </span>
+                        <div className="mt-0.5 flex items-center gap-1">
+                          <MapPin size={10} className="flex-none text-content-faint" />
+                          <span className="truncate text-content-faint" style={fs(10.5)}>{item.address}</span>
                         </div>
                       )}
 
                       {/* Participants */}
                       {item.participants.length > 0 && (
-                        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4, marginTop: 5 }}>
+                        <div className="mt-1.5 flex flex-wrap gap-1">
                           {item.participants.map(p => (
-                            <div key={p.user_id} style={{
-                              display: 'flex', alignItems: 'center', gap: 4, padding: '2px 8px 2px 3px',
-                              borderRadius: 99, background: 'var(--bg-tertiary)', border: '1px solid var(--border-faint)',
-                            }}>
-                              <div style={{
-                                width: 16, height: 16, borderRadius: '50%', background: 'var(--bg-secondary)',
-                                display: 'flex', alignItems: 'center', justifyContent: 'center',
-                                fontSize: 7, fontWeight: 700, color: 'var(--text-muted)',
-                                overflow: 'hidden', flexShrink: 0,
-                              }}>
+                            <span key={p.user_id} className="flex items-center gap-1 rounded-full border border-edge-faint bg-surface-secondary py-[2px] ps-[2px] pe-2">
+                              <span className="grid h-4 w-4 flex-none place-items-center overflow-hidden rounded-full bg-surface-tertiary font-bold text-content-muted" style={fs(7)}>
                                 {p.avatar
-                                  ? <img src={`/uploads/avatars/${p.avatar}`} style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
+                                  ? <img src={avatarSrc(p.avatar)!} alt="" className="h-full w-full object-cover" />
                                   : p.username?.[0]?.toUpperCase()
                                 }
-                              </div>
-                              <span style={{ fontSize: 10, fontWeight: 500, color: 'var(--text-muted)' }}>{p.username}</span>
-                            </div>
+                              </span>
+                              <span className="font-semibold text-content-muted" style={fs(10.5)}>{p.username}</span>
+                            </span>
                           ))}
                         </div>
                       )}

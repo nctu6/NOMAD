@@ -1,0 +1,127 @@
+# Currencies
+
+TREK has **three** currency settings, and they answer three different questions. Most confusion about the Costs tab comes from mixing them up, so this page is the one place they are defined together.
+
+| Setting | Where | Question it answers | Affects |
+|---|---|---|---|
+| **Trip currency** | My Trips → pencil on the trip card (**Edit Trip**) | *What is this trip's money?* | Stored data: the base every balance is calculated in |
+| **Expense currency** | Costs → expense modal | *What currency did I actually pay in?* | Stored data: that one expense |
+| **Display currency** | Settings → General → Language & region | *What currency do I want to read?* | Presentation only, never the stored data |
+
+The short version: **the trip currency is the accounting base, the expense currency is the receipt, and the display currency is your reading glasses.**
+
+## Trip currency
+
+Every trip has exactly one currency. It is set when you create the trip and can be changed later in the same dialog: on **My Trips**, click the pencil on the trip card (**Edit Trip**). This needs the `trip_edit` permission. The **Trip settings** pill beside the trip name in the planner does not hold the currency; it only holds People, Sharing and Journal. The new-trip dialog pre-fills it with **your display currency**, falling back to **EUR** when you have left that on *Trip currency*. A trip created through MCP or by a plugin without a currency gets the same value. This is the one moment the display currency touches stored data: it seeds the field, and from then on the trip's currency is its own.
+
+This is the trip's **accounting base**. It is not a cosmetic label:
+
+- Every balance, debt and settle-up suggestion is calculated in it.
+- Every expense in another currency is converted **into it** and stored with the rate it was converted at.
+- It is what the Costs tab falls back to when nobody has expressed a display preference.
+
+Pick the currency of the place you are travelling to (or the one you will actually settle up in), and you will rarely think about currencies again.
+
+### Changing the trip currency
+
+Changing it is **not** a relabelling: it is a re-basing, and TREK does the work for you so that no money moves:
+
+- Expenses that had no currency of their own (they simply inherited the trip's) are **pinned to the old currency** first. A 9 000 ₽ expense on a trip switching from RUB to EUR stays *9 000 ₽*; it does not silently become 9 000 €.
+- Every frozen exchange rate is **re-anchored** to the new base, because a frozen rate is stored relative to the trip currency (see below).
+- **Place prices** are pinned the same way. A place price also inherits the trip's currency unless you gave it one of its own, so a €15 museum on a trip switching to JPY is stamped EUR rather than starting to read as ¥15.
+
+The numbers you typed are never rewritten. Each expense keeps its original amount, in its original currency, and its real-world value survives the switch. Only the base the balances are expressed in changes.
+
+## Expense currency
+
+Each expense in the Costs tab carries **its own currency**, chosen in the expense modal. Enter what the receipt says: a $100 dinner on a rouble trip is entered as **100 USD**, not as its rouble equivalent.
+
+When an expense's currency differs from the trip currency, TREK looks up the live rate **once, at the moment you save it**, and freezes it on the expense. That frozen rate is what converts the expense into the trip currency forever after.
+
+> **Why freeze it?** Because a debt settled today shouldn't reopen tomorrow. If balances were recomputed at live rates, a settled-up trip would drift back into a few cents of debt every time the FX market moved. The rate you booked at is the rate you owe at.
+
+Rates come from [Frankfurter](https://frankfurter.dev) (European Central Bank data, no API key needed). **165 currencies** are supported. If the server cannot look the rate up (the instance is offline, or the upstream is down), your browser lends the rate it already holds when you save, and the server freezes that one. When no rate is known at all, the expense is stored without a frozen rate, and TREK never invents one: until a rate is pinned, the expense is **left out** of the balances, the settle-up suggestions, the final budgets and the totals instead of being counted 1:1 in the trip currency. As soon as someone who may edit costs opens the Costs tab, TREK pins the missing rates for those rows, and they count from then on.
+
+> **AI / MCP:** `get_settlement_summary` lists such rows under `unconverted`, and `freeze_budget_rates` pins the server's current rate on them. See [MCP-Tools-and-Resources](MCP-Tools-and-Resources).
+
+### Settle-up payments
+
+A payment recorded in **Settle Up** also carries its own currency, for the same reason: settling a rouble debt with a euro transfer is perfectly normal. Its rate is frozen at the moment you record it, exactly like an expense's, so the payment keeps cancelling the debt it was meant to cancel. A payment counts on the local day you give it, not on the day of the server.
+
+## Decimals and formats
+
+Every currency is shown with its own number of decimals. Most use two. The Japanese yen, Korean won, Vietnamese dong, Chilean peso, Icelandic krona and Hungarian forint have none, and the Bahraini, Iraqi, Jordanian, Kuwaiti, Libyan, Omani and Tunisian currencies have three. Amounts you type follow the same rule, and the suggested transfers in **Settle up** for won and yen are whole units, so the balances add up and settling clears them.
+
+## Display currency
+
+**Settings → General → Language & region → Display currency** is a **per-user, presentation-only** preference. It converts what you *read* in the Costs tab (totals, the category chart, balances, the settle-up amounts) into a single currency, so a trip with dollars, yen and roubles in it still adds up to one number you understand.
+
+![Settings, General tab: the Language & region card with Display currency set to Trip currency above the language, place names, units, time format and week start](assets/DisplayCurrency.png)
+
+It never changes what is stored. Two people looking at the same trip can read it in different currencies and both see correct, consistent balances.
+
+It has two modes:
+
+| Value | Behaviour |
+|---|---|
+| **Trip currency** (the default) | Each trip is shown in **its own** currency. A Tokyo trip reads in yen, a Moscow trip in roubles. |
+| A specific currency (e.g. `USD`) | **Every** trip is converted into that currency for you, whatever its own currency is. |
+
+Leave it on **Trip currency** unless you specifically want everything in your home currency regardless of where you are going.
+
+An administrator can set an instance-wide default (Admin → User Defaults), and it interacts with **Trip currency**: picking **Trip currency** stores an *empty* value, and an empty value on a defaultable setting counts as "not set", so the admin's currency is applied again (#1634). While an instance-wide default currency is configured, there is no way back to per-trip currencies from the Settings page; the admin has to clear it.
+
+> The **Currency** converter widget on the dashboard is a separate tool. It converts an amount between two currencies and has no effect on trips or stored costs. See [Dashboard-Widgets](Dashboard-Widgets).
+
+> Display conversion uses **live** rates, not the frozen ones: it is a view, and a view should reflect today. This is why a converted total can shift slightly day to day while the underlying balances stay rock steady.
+
+An expense you enter in your display currency reads back exactly as you typed it on the day you enter it, on its row, in the totals and in the final budget, and paying the amount settle-up offers for it leaves both balances at zero. When the rate has moved since, the row shows the value the totals count, with what was entered and the trip-currency amount it was booked at underneath (`$801.76 → 685,26 €`).
+
+## How they fit together
+
+An expense flows through all three:
+
+```
+    100 USD                  ≈ 7 668 ₽                    ≈ 87 €
+  ┌───────────┐   frozen   ┌───────────────┐    live    ┌───────────────┐
+  │  expense  │ ─────────► │     trip      │ ─────────► │    display    │
+  │ currency  │    rate    │   currency    │    rate    │   currency    │
+  └───────────┘  (at entry)└───────────────┘  (at read) └───────────────┘
+     what you              what the trip is             what you read,
+     actually paid         settled in  ← balances       if you asked for
+                                          live here     a display currency
+```
+
+Balances are always netted in the **trip currency** and converted to your display currency **once, at the end**, never per expense. That ordering is deliberate: netting in a moving display currency would let rounding drift shuffle a settled trip into phantom one-cent debts.
+
+## The public share link
+
+A public share page has no logged-in viewer, so it cannot use "your" display currency. It uses **the sharer's display currency, falling back to the trip's own currency**, so a guest sees the trip the way the person who shared it sees it. If the sharer left their display currency on **Trip currency**, guests read the trip in the trip's currency.
+
+## Relationship with the Costs addon
+
+The **trip currency lives on the trip itself**, not in the Costs addon. It is set in the trip's create and edit dialog and remains set even if Costs is disabled. Expense currencies, frozen rates and settle-up all belong to **Costs** (addon id `budget`), which an admin can toggle in [Admin-Addons](Admin-Addons). Turning Costs off hides the money features; it does not clear the trip's currency.
+
+Changing the trip currency requires `trip_edit`. Adding or editing expenses (and their currencies) requires `budget_edit`. See [Admin-Permissions](Admin-Permissions).
+
+## Troubleshooting
+
+**"My balances are huge / nonsense on a trip with a foreign expense."**
+Fixed in v3.4.0 (#1543). The settlement was reading the trip currency incorrectly and treating every trip as EUR, which inflated balances on any non-EUR trip that had a foreign-currency expense. Upgrade; no data was damaged and nothing needs fixing by hand.
+
+**"The totals move slightly from day to day."**
+Expected, if your display currency differs from the trip currency: the *display* conversion uses live rates. The underlying balances and debts do not move.
+
+**"A foreign expense does not count in the balances or the total."**
+No exchange rate was known for its currency when it was saved, so TREK leaves it out rather than guess. Open the Costs tab as a member who may edit costs while the instance can reach the rate service; the missing rate is pinned and the expense counts again.
+
+**"An expense shows an odd converted value."**
+Its rate was frozen when it was entered, and the market has moved since. That is by design; see the note above.
+
+## See also
+
+- [Budget-Tracking](Budget-Tracking), the Costs tab
+- [Creating-a-Trip](Creating-a-Trip), where the trip currency is set
+- [Display-Settings](Display-Settings), where the display currency is set
+- [Public-Share-Links](Public-Share-Links)
+- [Admin-Addons](Admin-Addons)

@@ -1,0 +1,159 @@
+import { Plugins } from '../../db/entities/Plugins.entity';
+import type { PluginsRepository } from '../../db/repositories/Plugins.repository';
+import { JwtAuthGuard } from '../auth-core/jwt-auth.guard';
+import { pluginsEnabled } from './kill-switch';
+import { POI_CATEGORY_PERMISSION, poiCategoriesOf } from './poi-categories';
+import { InjectRepository } from '@mikro-orm/nestjs';
+import { Controller, Get, UseGuards } from '@nestjs/common';
+import type { PluginPoiCategory } from '@trek/shared';
+
+/**
+ * GET /api/plugins — the authenticated feed of ACTIVE plugins the client renders
+ * (#plugins, M3): page plugins become nav entries, widget plugins become
+ * dashboard widgets. Empty when the runtime is disabled. Distinct from the
+ * admin surface (/api/admin/plugins) and the per-plugin proxy
+ * (/api/plugins/:id/*) — this is the exact /api/plugins path.
+ */
+interface ActivePlugin {
+  id: string;
+  name: string;
+  type: string;
+  icon: string | null;
+  slot: 'sidebar' | 'hero' | 'place-detail' | 'day-detail' | 'reservation-detail';
+  /** How a trip-page plugin sits in the planner tab bar (replaced core tabs + position). */
+  tripPage?: { replaces?: string[]; position?: number };
+  /** The plugin ships a settings.html the user-settings page frames. */
+  settingsUi?: true;
+  /** Routing profiles the planner's route toggle offers (routeProvider hook, granted only). */
+  routeProfiles?: Array<{ id: string; label: string; icon?: string }>;
+  /** Categories the explore pill offers (poiCategoryProvider hook, granted only, #1781). */
+  poiCategories?: PluginPoiCategory[];
+  /**
+   * The plugin holds hook:search-provider, so the place search asks the plugin routes
+   * while it is typed too (#2221). Read off the grant rather than the running child, so
+   * a feed loaded while plugins are still starting says the same; the suggest route
+   * itself only asks the providers whose build implements `suggest`.
+   */
+  searchProvider?: true;
+  /** The plugin holds the geolocation:read grant — its frames may request the
+   * browser position over the host bridge (the browser prompt still applies). */
+  geolocation?: true;
+}
+
+@Controller('api/plugins')
+@UseGuards(JwtAuthGuard)
+export class PluginsFeedController {
+  constructor(@InjectRepository(Plugins) private readonly plugins: PluginsRepository) {}
+
+  @Get()
+  async list(): Promise<{ plugins: ActivePlugin[] }> {
+    if (!pluginsEnabled()) return { plugins: [] };
+    // PFC1 — Plan 3j: this row goes to the CLIENT, not a plugin process — stays
+    // exactly snake_case, R-facade's wrapper is never applied here.
+    const rows = await this.plugins.findActiveFeedRows();
+    const plugins = rows.map(({ capabilities, granted_permissions, ...p }) => {
+      const tripPage = p.type === 'trip-page' ? tripPageOf(capabilities) : undefined;
+      const routeProfiles = routeProfilesOf(capabilities, granted_permissions);
+      const poiCategories = hasGrant(granted_permissions, POI_CATEGORY_PERMISSION) ? poiCategoriesOf(capabilities) : [];
+      return {
+        ...p,
+        slot: slotOf(capabilities),
+        ...(tripPage ? { tripPage } : {}),
+        ...(settingsUiOf(capabilities) ? { settingsUi: true as const } : {}),
+        ...(routeProfiles ? { routeProfiles } : {}),
+        ...(poiCategories.length ? { poiCategories } : {}),
+        ...(hasGrant(granted_permissions, 'hook:search-provider') ? { searchProvider: true as const } : {}),
+        ...(hasGrant(granted_permissions, 'geolocation:read') ? { geolocation: true as const } : {}),
+      };
+    });
+    return { plugins };
+  }
+}
+
+function slotOf(capabilities: string): ActivePlugin['slot'] {
+  try {
+    const c = JSON.parse(capabilities || '{}') as { widget?: { slot?: string } };
+    const slot = c.widget?.slot;
+    return slot === 'hero' || slot === 'place-detail' || slot === 'day-detail' || slot === 'reservation-detail'
+      ? slot
+      : 'sidebar';
+  } catch {
+    return 'sidebar';
+  }
+}
+
+// Re-validated here even though the manifest parser already gated the values —
+// the capabilities column is a JSON blob, and the tab list the client hides
+// must never be steerable by a hand-edited row ('plan' stays unhideable).
+const REPLACEABLE_TABS: ReadonlySet<string> = new Set([
+  'transports',
+  'buchungen',
+  'listen',
+  'finanzplan',
+  'dateien',
+  'collab',
+]);
+
+function settingsUiOf(capabilities: string): boolean {
+  try {
+    const c = JSON.parse(capabilities || '{}') as { settingsUi?: unknown };
+    return c.settingsUi === true;
+  } catch {
+    return false;
+  }
+}
+
+function hasGrant(granted: string, permission: string): boolean {
+  try {
+    return (JSON.parse(granted || '[]') as unknown[]).includes(permission);
+  } catch {
+    return false;
+  }
+}
+
+// Same re-validation rationale as the tab list: the profiles the client offers in
+// the route picker must never be steerable by a hand-edited capabilities row, and
+// an un-granted routeProvider must not surface profiles it can never serve.
+const PROFILE_RE = /^[a-z][a-z0-9-]{0,23}$/;
+
+function routeProfilesOf(capabilities: string, granted: string): ActivePlugin['routeProfiles'] {
+  try {
+    if (!(JSON.parse(granted || '[]') as unknown[]).includes('hook:route-provider')) return undefined;
+    const c = JSON.parse(capabilities || '{}') as { routeProfiles?: unknown };
+    if (!Array.isArray(c.routeProfiles)) return undefined;
+    const out: NonNullable<ActivePlugin['routeProfiles']> = [];
+    for (const v of c.routeProfiles.slice(0, 3)) {
+      if (!v || typeof v !== 'object') continue;
+      const p = v as { id?: unknown; label?: unknown; icon?: unknown };
+      if (typeof p.id !== 'string' || !PROFILE_RE.test(p.id) || typeof p.label !== 'string' || !p.label.trim())
+        continue;
+      out.push({
+        id: p.id,
+        label: p.label.trim().slice(0, 40),
+        ...(typeof p.icon === 'string' && p.icon ? { icon: p.icon.slice(0, 40) } : {}),
+      });
+    }
+    return out.length ? out : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function tripPageOf(capabilities: string): ActivePlugin['tripPage'] {
+  try {
+    const c = JSON.parse(capabilities || '{}') as { tripPage?: { replaces?: unknown; position?: unknown } };
+    const tp = c.tripPage;
+    if (!tp || typeof tp !== 'object') return undefined;
+    const replaces = Array.isArray(tp.replaces)
+      ? tp.replaces.filter((t): t is string => typeof t === 'string' && REPLACEABLE_TABS.has(t))
+      : [];
+    const position =
+      typeof tp.position === 'number' && Number.isInteger(tp.position) && tp.position >= 0 && tp.position <= 50
+        ? tp.position
+        : undefined;
+    if (!replaces.length && position === undefined) return undefined;
+    return { ...(replaces.length ? { replaces } : {}), ...(position !== undefined ? { position } : {}) };
+  } catch {
+    return undefined;
+  }
+}

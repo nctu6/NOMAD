@@ -1,0 +1,209 @@
+import type { TranslationFn } from '../../../types'
+import type { useAdmin } from '../../../pages/admin/useAdmin'
+import { SWITCH_ONLY_CHANNELS, useNotificationChannels } from '../../../components/Admin/useNotificationChannels'
+import { useAdminNotificationSettings } from '../../../components/Admin/useAdminNotificationSettings'
+import MToggle from '../../components/MToggle'
+import MAdminNotifyMatrix from './MAdminNotifyMatrix'
+import { MAdminButton, MAdminCard, MAdminCardHead, MAdminField, MAdminInput, MAdminRow } from './MAdminUi'
+
+interface MAdminNotificationsSectionProps {
+  admin: ReturnType<typeof useAdmin>
+  t: TranslationFn
+}
+
+const SMTP_FIELDS = [
+  { key: 'smtp_host', label: 'SMTP Host', placeholder: 'mail.example.com' },
+  { key: 'smtp_port', label: 'SMTP Port', placeholder: '587' },
+  { key: 'smtp_user', label: 'SMTP User', placeholder: 'trek@example.com' },
+  { key: 'smtp_pass', label: 'SMTP Password', placeholder: '••••••••', type: 'password' },
+  { key: 'smtp_from', label: 'From Address', placeholder: 'trek@example.com' },
+]
+
+// Notifications section: channel toggles (email/webhook/ntfy/web push/in-app),
+// SMTP credentials, trip reminders, admin webhook + ntfy targets and the
+// per-event preference matrix: the desktop notifications tab in mobile cards.
+// The channel switches come from useNotificationChannels, shared with desktop.
+export default function MAdminNotificationsSection({ admin, t }: MAdminNotificationsSectionProps) {
+  const { toast, smtpValues, setSmtpValues, smtpLoaded } = admin
+
+  const channels = useNotificationChannels(admin, t)
+  const emailActive = channels.isActive('email')
+  const {
+    tripRemindersActive, smtpConfigured, saveSmtp, testSmtp, toggleTripReminders, saveAdminWebhook, testAdminWebhook,
+    clearNtfyToken, saveAdminNtfy, testAdminNtfy,
+  } = useAdminNotificationSettings(admin, t)
+
+  return (
+    <div className="space-y-3">
+      {/* Email (SMTP) */}
+      <MAdminCard>
+        <MAdminCardHead
+          title={t('admin.notifications.emailPanel.title')}
+          hint={t('admin.smtp.hint')}
+          trailing={
+            <MToggle
+              checked={emailActive}
+              ariaLabel={t('admin.notifications.emailPanel.title')}
+              onChange={() => channels.toggle('email')}
+            />
+          }
+        />
+        <div className={`space-y-3 ${!emailActive ? 'pointer-events-none opacity-50' : ''}`}>
+          {smtpLoaded &&
+            SMTP_FIELDS.map((field) => (
+              <MAdminField key={field.key} label={field.label}>
+                {/* A stored password comes back masked. Showing the mask as the VALUE meant
+                    typing a new one appended it to eight bullet characters and saved that,
+                    so the same treatment as the webhook URL below: mask as placeholder. */}
+                <MAdminInput
+                  type={field.type || 'text'}
+                  value={smtpValues[field.key] === '••••••••' ? '' : smtpValues[field.key] || ''}
+                  onChange={(e) => setSmtpValues((prev) => ({ ...prev, [field.key]: e.target.value }))}
+                  placeholder={field.placeholder}
+                />
+              </MAdminField>
+            ))}
+          <MAdminRow
+            first
+            title={t('admin.smtp.skipTls')}
+            hint={t('admin.smtp.skipTlsHint')}
+            trailing={
+              <MToggle
+                checked={smtpValues.smtp_skip_tls_verify === 'true'}
+                ariaLabel={t('admin.smtp.skipTls')}
+                onChange={(v) => setSmtpValues((prev) => ({ ...prev, smtp_skip_tls_verify: v ? 'true' : 'false' }))}
+              />
+            }
+          />
+        </div>
+        <div className="mt-2 flex items-center gap-2 border-t border-[color:var(--m-rowbr)] pt-3">
+          <MAdminButton onClick={saveSmtp}>{t('common.save')}</MAdminButton>
+          <MAdminButton variant="ghost" disabled={!smtpConfigured} onClick={testSmtp}>
+            {t('admin.smtp.testButton')}
+          </MAdminButton>
+        </div>
+      </MAdminCard>
+
+      {/* Webhook, Ntfy and Web Push: a title, a hint and the switch each */}
+      {SWITCH_ONLY_CHANNELS.map((ch) => (
+        <MAdminCard key={ch.id}>
+          <MAdminCardHead
+            title={t(ch.titleKey)}
+            hint={t(ch.hintKey)}
+            trailing={
+              <MToggle
+                checked={channels.isActive(ch.id)}
+                ariaLabel={t(ch.titleKey)}
+                onChange={() => channels.toggle(ch.id)}
+              />
+            }
+          />
+        </MAdminCard>
+      ))}
+
+      {/* In-App (always on) */}
+      <MAdminCard>
+        <MAdminCardHead
+          title={t('admin.notifications.inappPanel.title')}
+          hint={t('admin.notifications.inappPanel.hint')}
+          trailing={<MToggle checked disabled ariaLabel={t('admin.notifications.inappPanel.title')} onChange={() => {}} />}
+        />
+      </MAdminCard>
+
+      {/* Trip reminders */}
+      <MAdminCard>
+        <MAdminCardHead
+          title={t('admin.notifications.tripReminders.title')}
+          hint={t('admin.notifications.tripReminders.hint')}
+          trailing={
+            <MToggle
+              checked={tripRemindersActive}
+              ariaLabel={t('admin.notifications.tripReminders.title')}
+              onChange={toggleTripReminders}
+            />
+          }
+        />
+      </MAdminCard>
+
+      {/* Admin webhook */}
+      <MAdminCard>
+        <MAdminCardHead
+          title={t('admin.notifications.adminWebhookPanel.title')}
+          hint={t('admin.notifications.adminWebhookPanel.hint')}
+        />
+        {smtpLoaded && (
+          <div className="mb-3">
+            <MAdminInput
+              type="text"
+              value={smtpValues.admin_webhook_url === '••••••••' ? '' : smtpValues.admin_webhook_url || ''}
+              onChange={(e) => setSmtpValues((prev) => ({ ...prev, admin_webhook_url: e.target.value }))}
+              placeholder={smtpValues.admin_webhook_url === '••••••••' ? '••••••••' : 'https://discord.com/api/webhooks/...'}
+            />
+          </div>
+        )}
+        <div className="flex items-center gap-2 border-t border-[color:var(--m-rowbr)] pt-3">
+          <MAdminButton onClick={saveAdminWebhook}>{t('common.save')}</MAdminButton>
+          <MAdminButton variant="ghost" disabled={!smtpValues.admin_webhook_url?.trim()} onClick={testAdminWebhook}>
+            {t('admin.notifications.testWebhook')}
+          </MAdminButton>
+        </div>
+      </MAdminCard>
+
+      {/* Admin ntfy */}
+      <MAdminCard>
+        <MAdminCardHead
+          title={t('admin.notifications.adminNtfyPanel.title')}
+          hint={t('admin.notifications.adminNtfyPanel.hint')}
+        />
+        {smtpLoaded && (
+          <div className="mb-3 space-y-3">
+            <MAdminField
+              label={t('admin.notifications.adminNtfyPanel.serverLabel')}
+              hint={t('admin.notifications.adminNtfyPanel.serverHint')}
+            >
+              <MAdminInput
+                type="text"
+                value={smtpValues.admin_ntfy_server || ''}
+                onChange={(e) => setSmtpValues((prev) => ({ ...prev, admin_ntfy_server: e.target.value }))}
+                placeholder={t('admin.notifications.adminNtfyPanel.serverPlaceholder')}
+              />
+            </MAdminField>
+            <MAdminField label={t('admin.notifications.adminNtfyPanel.topicLabel')}>
+              <MAdminInput
+                type="text"
+                value={smtpValues.admin_ntfy_topic || ''}
+                onChange={(e) => setSmtpValues((prev) => ({ ...prev, admin_ntfy_topic: e.target.value }))}
+                placeholder={t('admin.notifications.adminNtfyPanel.topicPlaceholder')}
+              />
+            </MAdminField>
+            <MAdminField label={t('admin.notifications.adminNtfyPanel.tokenLabel')}>
+              <div className="flex gap-2">
+                <div className="min-w-0 flex-1">
+                  <MAdminInput
+                    type="password"
+                    value={smtpValues.admin_ntfy_token === '••••••••' ? '' : smtpValues.admin_ntfy_token || ''}
+                    onChange={(e) => setSmtpValues((prev) => ({ ...prev, admin_ntfy_token: e.target.value }))}
+                    placeholder={smtpValues.admin_ntfy_token === '••••••••' ? '••••••••' : ''}
+                  />
+                </div>
+                {smtpValues.admin_ntfy_token === '••••••••' && (
+                  <MAdminButton variant="danger" className="h-[42px]" onClick={clearNtfyToken}>
+                    {t('common.clear')}
+                  </MAdminButton>
+                )}
+              </div>
+            </MAdminField>
+          </div>
+        )}
+        <div className="flex items-center gap-2 border-t border-[color:var(--m-rowbr)] pt-3">
+          <MAdminButton onClick={saveAdminNtfy}>{t('common.save')}</MAdminButton>
+          <MAdminButton variant="ghost" disabled={!smtpValues.admin_ntfy_topic?.trim()} onClick={testAdminNtfy}>
+            {t('admin.notifications.adminNtfyPanel.test')}
+          </MAdminButton>
+        </div>
+      </MAdminCard>
+
+      <MAdminNotifyMatrix t={t} toast={toast} />
+    </div>
+  )
+}

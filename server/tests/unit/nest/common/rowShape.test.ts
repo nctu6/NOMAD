@@ -1,0 +1,149 @@
+import type { AssignmentWithPlaceRow } from '../../../../src/db/repositories/day-assignment-rows';
+import { formatAssignmentWithPlace, ratingAggregate } from '../../../../src/nest/common/rowShape';
+import type { Tag, Participant } from '../../../../src/types';
+
+import { describe, it, expect } from 'vitest';
+
+/**
+ * Plan 3c Task 2 review (task-2-review.md, "For Task 3" §6.3): `formatAssignmentWithPlace`
+ * is typed on `DayAssignmentsRepository`'s own `AssignmentWithPlaceRow` (the
+ * honestly-nullable projection row, rule 16) rather than the legacy,
+ * narrower `types.ts#AssignmentRow` — this fixture now builds that shape
+ * directly, every field required, none defaulted away by a bare `as` cast.
+ */
+function makeRow(overrides: Partial<AssignmentWithPlaceRow> = {}): AssignmentWithPlaceRow {
+  return {
+    id: 1,
+    day_id: 10,
+    place_id: 100,
+    order_index: 0,
+    notes: 'assignment note',
+    reservation_status: 'none',
+    reservation_notes: null,
+    reservation_datetime: null,
+    assignment_time: null,
+    assignment_end_time: null,
+    end_day: 0,
+    leg_transport_mode: null,
+    incoming_leg_transport_mode: null,
+    accommodation_id: null,
+    route_excluded: 0,
+    created_at: '2024-01-01T00:00:00Z',
+    place_name: 'Eiffel Tower',
+    place_description: 'Famous landmark',
+    lat: 48.8584,
+    lng: 2.2945,
+    address: 'Champ de Mars, Paris',
+    category_id: 5,
+    category_name: 'Sightseeing',
+    category_color: '#3b82f6',
+    category_icon: 'landmark',
+    price: 25.0,
+    place_currency: 'EUR',
+    place_time: '10:00',
+    end_time: '12:00',
+    duration_minutes: 120,
+    place_notes: 'Bring tickets',
+    image_url: 'https://example.com/img.jpg',
+    transport_mode: 'walk',
+    google_place_id: 'ChIJLU7jZClu5kcR4PcOOO6p3I0',
+    google_ftid: '0x47e66e2c94e34e2d:0x8ddca9ee380ef7e0',
+    osm_id: null,
+    amap_poi_id: null,
+    website: 'https://eiffel-tower.com',
+    phone: '+33 1 2345 6789',
+    stop_type: null,
+    fill_percent: null,
+    tour_place_id: null,
+    tour_route_geometry: null,
+    tour_stage_key: null,
+    ...overrides,
+  };
+}
+
+const sampleTags: Partial<Tag>[] = [{ id: 1, name: 'Must-see', color: '#ef4444' }];
+
+const sampleParticipants: Participant[] = [{ user_id: 42, username: 'alice', avatar: null }];
+
+describe('formatAssignmentWithPlace', () => {
+  it('nests place fields correctly from flat row', () => {
+    const result = formatAssignmentWithPlace(makeRow(), [], []);
+    const { place } = result;
+    expect(place.id).toBe(100);
+    expect(place.name).toBe('Eiffel Tower');
+    expect(place.description).toBe('Famous landmark');
+    expect(place.lat).toBe(48.8584);
+    expect(place.lng).toBe(2.2945);
+    expect(place.address).toBe('Champ de Mars, Paris');
+    expect(place.price).toBe(25.0);
+    expect(place.currency).toBe('EUR');
+    expect(place.place_time).toBe('10:00');
+    expect(place.end_time).toBe('12:00');
+    expect(place.duration_minutes).toBe(120);
+    expect(place.notes).toBe('Bring tickets');
+    expect(place.image_url).toBe('https://example.com/img.jpg');
+    expect(place.transport_mode).toBe('walk');
+    expect(place.google_place_id).toBe('ChIJLU7jZClu5kcR4PcOOO6p3I0');
+    expect(place.google_ftid).toBe('0x47e66e2c94e34e2d:0x8ddca9ee380ef7e0');
+    expect(place.website).toBe('https://eiffel-tower.com');
+    expect(place.phone).toBe('+33 1 2345 6789');
+  });
+
+  it('constructs place.category object when category_id is present', () => {
+    const result = formatAssignmentWithPlace(makeRow(), [], []);
+    expect(result.place.category).toEqual({
+      id: 5,
+      name: 'Sightseeing',
+      color: '#3b82f6',
+      icon: 'landmark',
+    });
+  });
+
+  it('sets place.category to null when category_id is null', () => {
+    const result = formatAssignmentWithPlace(makeRow({ category_id: null }), [], []);
+    expect(result.place.category).toBeNull();
+  });
+
+  it('sets place.category to null when category_id is 0 (falsy)', () => {
+    const result = formatAssignmentWithPlace(makeRow({ category_id: 0 }), [], []);
+    expect(result.place.category).toBeNull();
+  });
+
+  it('keeps the Tour facet fields at the assignment level, null for an ordinary place', () => {
+    expect(formatAssignmentWithPlace(makeRow(), [], [])).toMatchObject({
+      tour_place_id: null,
+      tour_route_geometry: null,
+    });
+    const geometry = '[[48.1,11.5],[48.2,11.6]]';
+    const tour = formatAssignmentWithPlace(makeRow({ tour_place_id: 100, tour_route_geometry: geometry }), [], []);
+    expect(tour).toMatchObject({ tour_place_id: 100, tour_route_geometry: geometry });
+  });
+
+  it('MDT-SHAPE-001: carries the stage of a multi-day tour a day holds, null for the whole tour', () => {
+    expect(formatAssignmentWithPlace(makeRow(), [], []).tour_stage_key).toBeNull();
+    const stage = formatAssignmentWithPlace(makeRow({ tour_place_id: 100, tour_stage_key: 'stop-hut' }), [], []);
+    expect(stage.tour_stage_key).toBe('stop-hut');
+  });
+
+  it('passes tags and participants through untouched', () => {
+    const result = formatAssignmentWithPlace(makeRow(), sampleTags, sampleParticipants);
+    expect(result.place.tags).toEqual(sampleTags);
+    expect(result.participants).toEqual(sampleParticipants);
+  });
+});
+
+describe('ratingAggregate', () => {
+  const rate = (rating: number, user_id = 1) => ({ user_id, username: 'u', avatar: null, rating });
+
+  it('averages the ratings and counts them', () => {
+    expect(ratingAggregate([rate(5), rate(2, 2)])).toEqual({ rating_avg: 3.5, rating_count: 2 });
+  });
+
+  it('reports a null average for an empty list rather than NaN', () => {
+    expect(ratingAggregate([])).toEqual({ rating_avg: null, rating_count: 0 });
+  });
+
+  it('treats a place with no rating rows at all the same as an empty list', () => {
+    expect(ratingAggregate(undefined)).toEqual({ rating_avg: null, rating_count: 0 });
+  });
+});

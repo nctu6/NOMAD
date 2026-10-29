@@ -1,0 +1,102 @@
+import type { NotificationLocale } from '../externalNotifications/types';
+import { pluralForm } from '../plural';
+
+const tr: NotificationLocale = {
+  email: {
+    footer: "TREK'te bildirimleri etkinleştirdiğiniz için bunu aldınız.",
+    manage: 'Ayarlarda tercihleri yönetin',
+    madeWith: 'Made with',
+    openTrek: "TREK'i aç",
+  },
+  events: {
+    trip_invite: (p) => ({
+      title: `"${p.trip}" seyahatine davet`,
+      body: `${p.actor}, ${p.invitee || 'bir üyeyi'} "${p.trip}" seyahatine davet etti.`,
+    }),
+    booking_change: (p) => ({
+      title: `Yeni rezervasyon: ${p.booking}`,
+      body: `${p.actor}, "${p.trip}" seyahatine "${p.booking}" (${p.type}) rezervasyonu ekledi.`,
+    }),
+    trip_reminder: (p) => ({
+      title: `Seyahat hatırlatıcısı: ${p.trip}`,
+      body: `"${p.trip}" seyahatiniz yaklaşıyor!`,
+    }),
+    todo_due: (p) => ({
+      title: `Görev süresi dolmak üzere: ${p.todo}`,
+      body: `"${p.trip}" içindeki "${p.todo}" görevi ${p.due} tarihinde bitiyor.`,
+    }),
+    vacay_invite: (p) => ({
+      title: 'Vacay Fusion Daveti',
+      body: `${p.actor} sizi tatil planlarını birleştirmeye davet etti. Kabul etmek veya reddetmek için TREK'i açın.`,
+    }),
+    vacay_share: (p) => ({
+      title: 'Vacay Takvimi Paylaşıldı',
+      body: `${p.actor} tatil takvimini sizinle paylaştı. Görüntülemek için TREK'i açın.`,
+    }),
+    collection_invite: (p) => ({
+      title: 'Koleksiyon daveti',
+      body: `${p.actor} sizi bir koleksiyonu paylaşmaya davet etti. Kabul etmek veya reddetmek için TREK’i açın.`,
+    }),
+    photos_shared: (p) => ({
+      title: pluralForm(p.count, 'tr', {
+        one: `${p.count} fotoğraf paylaşıldı`,
+        other: `${p.count} fotoğraf paylaşıldı`,
+      }),
+      body: pluralForm(p.count, 'tr', {
+        one: `${p.actor}, "${p.trip}" içinde ${p.count} fotoğraf paylaştı.`,
+        other: `${p.actor}, "${p.trip}" içinde ${p.count} fotoğraf paylaştı.`,
+      }),
+    }),
+    collab_message: (p) => ({
+      title: `"${p.trip}" içinde yeni mesaj`,
+      body: `${p.actor}: ${p.preview}`,
+    }),
+    packing_tagged: (p) => ({
+      title: `Bagaj: ${p.category}`,
+      body: `${p.actor}, sizi "${p.trip}" içindeki "${p.category}" bagaj kategorisine atadı.`,
+    }),
+    version_available: (p) => ({
+      title: 'Yeni TREK sürümü mevcut',
+      body: `TREK ${p.version} artık mevcut. Güncellemek için yönetici panelini ziyaret edin.`,
+    }),
+    replica_failure: (p) => ({
+      title: 'Depolama kopyası hatası',
+      body:
+        `'${p.backend}' kopyasına yazma başarısız oldu: ${p.op} (${p.key}) — ${p.error}.` +
+        (p.suppressed !== '0'
+          ? pluralForm(p.suppressed, 'tr', {
+              one: ` Son bildirimden bu yana ${p.suppressed} hata daha bastırıldı.`,
+              other: ` Son bildirimden bu yana ${p.suppressed} hata daha bastırıldı.`,
+            })
+          : ''),
+    }),
+    paddle_region_requested: (p) => ({
+      title: 'Kürek bölgesi istendi',
+      body: `${p.actor}, ${p.region} bölgesinde kürek turu planlıyor. Su verisini yönetim alanında Eklentiler altında yükle ya da reddet.`,
+    }),
+    synology_session_cleared: () => ({
+      title: 'Synology oturumu temizlendi',
+      body: 'Synology hesabınız veya URL değişti. Synology Photos oturumunuz kapatıldı.',
+    }),
+    wanderer_source_hint: (p) => ({
+      title: `wanderer rotası: ${p.tour}`,
+      body:
+        p.state === 'changed'
+          ? `"${p.trip}" içindeki "${p.tour}" wanderer'da değiştirildi. Tüm değişiklikleri görmek için turu aç ve kaynağını denetle. Gezide hiçbir şey kendiliğinden değişmez.`
+          : p.state === 'unverifiable'
+            ? `"${p.trip}" içindeki "${p.tour}" artık wanderer'da denetlenemiyor. Gezindeki tur olduğu gibi kalır.`
+            : `"${p.trip}" içindeki "${p.tour}" wanderer'da değişmiş olabilir. Turu aç ve kaynağını denetle. Gezide hiçbir şey kendiliğinden değişmez.`,
+    }),
+    plugin_notification: (p) => ({ title: p.title ?? '', body: p.body ?? '' }),
+  },
+  passwordReset: {
+    subject: 'Şifrenizi sıfırlayın',
+    greeting: 'Merhaba',
+    body: 'TREK hesabınızın şifresini sıfırlamak için bir istek aldık. Yeni bir şifre belirlemek için aşağıdaki butona tıklayın.',
+    ctaIntro: 'Şifreyi sıfırla',
+    expiry: 'Bu bağlantı 60 dakika içinde sona erer.',
+    ignore: 'Bu isteği siz yapmadıysanız, bu e-postayı güvenle yok sayabilirsiniz — şifreniz değişmeyecektir.',
+  },
+};
+
+export default tr;

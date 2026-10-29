@@ -1,0 +1,105 @@
+# Admin: Users and Invites
+
+The **Users** tab in the Admin Panel (first in the **Users** group of the side navigation) lets you view all registered users, manage their accounts, and create invite links so new people can register without open registration.
+
+![Users tab](assets/UsersAndInvites.png)
+
+## User list
+
+The **Users** card shows the number of accounts in its head and a table of every registered account with the following columns:
+
+| Column | Description |
+|--------|-------------|
+| **User** | Avatar, username, and an always-visible presence dot (green = has TREK open, grey = offline) |
+| **Email** | Account email address |
+| **Role** | Badge showing **Administrator** or **User** |
+| **Created** | Account creation date |
+| **Last Active** | When the account last signed in or used TREK, whichever is later. A session renews itself while it is used, so someone can be active daily without signing in for weeks. The year shows once it is not the current one. |
+| **Actions** | Edit and delete buttons |
+
+The dots and the last activity refresh every 30 seconds while the list is open, and right away when you come back to the tab.
+
+Your own row is highlighted and marked **(You)**. Its delete button is disabled: you cannot delete your own account.
+
+## User actions
+
+### Edit a user
+
+Click the pencil icon (**Edit User**) on any row to open the edit dialog. You can change:
+
+- **Username**
+- **Email address**
+- **Role**: **User** or **Administrator**
+- **New Password**: leave it empty to keep the current password, or set a new one. It must be at least 8 characters and contain an uppercase letter, a lowercase letter, a number and a special character; commonly used passwords and strings made of a single repeated character are rejected. The same rules apply to the password you set under [Creating a user directly](#creating-a-user-directly). While you type, a checklist under the field ticks off each rule as it is met. See [Login and Registration](Login-and-Registration#password-requirements).
+
+Click **Save** to apply changes.
+
+An email address belongs to one account only, and case does not count: `Anna@Example.com` and `anna@example.com` are the same address. Saving an address another account already holds answers **Email already taken**, and creating such an account does the same.
+
+If an install from before 5.0 already holds two accounts whose addresses differ only in case, the update still starts, and the log names their user ids: `email address(es) belong to more than one account when case is ignored`. Give each of those accounts its own address here (or delete the one nobody uses). The next start then adds the database rule that keeps it that way.
+
+Below the fields sits **Reset passkeys**, which removes every passkey that user has registered: the recovery path when someone loses their authenticator. It asks for confirmation in a dialog, reports how many passkeys it removed, and takes effect immediately rather than on **Save**. The user can still sign in with their password. See [Passkeys](Passkeys).
+
+For every other account the dialog also has **Reset 2FA**, for example after a lost phone. After you confirm (**Turn off two-factor authentication for {name}?**) it switches 2FA off for that user and signs them out everywhere; they can set it up again after logging in with their password. It is not offered for your own account, and it is recorded in the [Audit-Log](Audit-Log). See [Two-Factor-Authentication](Two-Factor-Authentication).
+
+### Delete a user
+
+Click the trash icon and confirm in the **Delete user** dialog (**Delete user "name"? All trips will be permanently deleted.**). Deletion is permanent. The user's account is removed from the database along with their data, including the trips they own (cascade behavior is enforced at the database level).
+
+You cannot delete your own account while logged in as that user.
+
+## Creating a user directly
+
+Click **Create User** (top right of the **Users** card) to create an account without an invite link. The dialog asks for **Username**, **Email** and **Password** (all required, with the same password checklist as above) and the **Role**.
+
+## Invite links
+
+Invite links let a specific number of people register themselves. This is useful when open registration is disabled.
+
+![Invite links](assets/InviteLinkForm.png)
+
+### Creating an invite
+
+Click **Create Link** on the **Invite Links** card, below the user table. A dialog opens:
+
+- **Max. Uses**: how many times the link can be used before it expires: `1×`, `2×`, `3×`, `4×`, `5×`, or `∞` (unlimited). Defaults to `1×`.
+- **Expires after**: how long the link remains valid: `1d`, `3d`, `7d`, `14d`, or `∞` (no expiry). Defaults to `7d`.
+- **Add to trip (optional)**: bind the invite to a trip. Anyone who registers through the link is automatically added to that trip as a member. Defaults to **No trip** (a plain registration invite). The selector only appears when at least one trip exists.
+
+Click **Create & Copy**: the link is created and copied to your clipboard. Share it with the intended recipient. The URL format is:
+
+```
+<APP_URL>/register?invite=<token>
+```
+
+### Invite list
+
+Existing invites are listed below the creation button. Each row shows:
+
+- The invite token (truncated, monospace)
+- A status badge: **Active**, **Used up** or **Expired** (used up and expired rows are dimmed)
+- Usage as `used/max used` (or `used/∞` for unlimited)
+- The expiry date, if set
+- **adds to** the bound trip, if the invite is trip-bound
+- **by** the admin who generated the link
+- A **Copy link** button (only on active invites)
+- A delete (revoke) button, which asks you to confirm in the **Delete invite link** dialog ("Anyone who has not used it yet can no longer register with it.")
+
+Revoking an invite immediately invalidates it; anyone following the link after revocation will receive an error.
+
+## Permissions
+
+The **Users** tab also hosts the Permissions panel at the bottom, which controls what roles can perform which actions. See [Admin-Permissions](Admin-Permissions) for details.
+
+## On a phone
+
+The phone admin has the same functions in its **Users** section (user list, edit and create dialogs, invite links) with the permissions panel below it.
+
+## Related pages
+
+- [Login-and-Registration](Login-and-Registration)
+- [Invite-Links](Invite-Links)
+- [Admin-Permissions](Admin-Permissions)
+- [Two-Factor-Authentication](Two-Factor-Authentication)
+- [Passkeys](Passkeys)
+- [Admin-Panel-Overview](Admin-Panel-Overview)

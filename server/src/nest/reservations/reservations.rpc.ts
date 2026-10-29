@@ -1,0 +1,147 @@
+import { PluginGuards } from '../../nest-rpc/plugin-guards.service';
+import { BadParams, ForbiddenResource } from '../../nest-rpc/rpc-errors';
+import { PluginController, PluginMethod } from '../../nest-rpc/rpc-kit/decorators';
+import type { PluginRpcContext } from '../../nest-rpc/rpc-kit/types';
+import { num, schemaMessage } from '../../nest-rpc/rpc-params';
+import { RealtimeService } from '../realtime/realtime.service';
+import { ReservationsService } from './reservations.service';
+import {
+  reservationCreateRequestSchema,
+  reservationEndpointsInputSchema,
+  reservationUpdateRequestSchema,
+} from '@trek/shared';
+
+const RESERVATION_EDIT_ACTION = 'reservation_edit';
+
+/**
+ * The reservation surface a plugin may reach (#plugins).
+ *
+ * Everything delegates to ReservationsService, so the accommodation side effects, the
+ * budget sync, the booking notification and the broadcasts match the web app one for
+ * one. A booking write is rarely just one row: creating one can create an
+ * accommodation and a budget item, and deleting one can remove both again.
+ */
+@PluginController()
+export class ReservationsRpc {
+  constructor(
+    private readonly reservations: ReservationsService,
+    private readonly realtime: RealtimeService,
+    private readonly guards: PluginGuards,
+  ) {}
+
+  @PluginMethod('reservations.create', { permission: 'db:write:reservations' })
+  async create(params: Record<string, unknown>, ctx: PluginRpcContext): Promise<unknown> {
+    const tripId = num(params.tripId, 'tripId');
+    const actor = this.guards.requireActor(ctx, 'reservation');
+    const parsed = reservationCreateRequestSchema.safeParse(params.input);
+    if (!parsed.success) throw new BadParams(`invalid reservation: ${schemaMessage(parsed.error)}`);
+    const input = parsed.data as Record<string, unknown>;
+    this.requireValidEndpoints(input.endpoints);
+    await this.guards.requireTripEdit(tripId, actor, RESERVATION_EDIT_ACTION);
+    await this.requireOwnReferences(tripId, input);
+    const i = input as { title?: string; type?: string; create_budget_entry?: unknown };
+    // Same as the REST route: the price keeps its currency, at a rate frozen now (#2525).
+    const budgetEntry = await this.reservations.withFrozenRate(tripId, i.create_budget_entry as never);
+    const { reservation, accommodationCreated, costEvents } = await this.reservations.createWithCost(
+      String(tripId),
+      input as never,
+      budgetEntry,
+    );
+    if (accommodationCreated) this.realtime.broadcast(tripId, 'accommodation:created', {}, undefined);
+    this.reservations.announceCost(tripId, costEvents, undefined);
+    this.realtime.broadcast(tripId, 'reservation:created', { reservation }, undefined);
+    await this.notifyBooking(actor, tripId, i.title ?? '', i.type ?? '');
+    return reservation;
+  }
+
+  @PluginMethod('reservations.update', { permission: 'db:write:reservations' })
+  async update(params: Record<string, unknown>, ctx: PluginRpcContext): Promise<unknown> {
+    const tripId = num(params.tripId, 'tripId');
+    const reservationId = num(params.reservationId, 'reservationId');
+    const actor = this.guards.requireActor(ctx, 'reservation');
+    const parsed = reservationUpdateRequestSchema.safeParse(params.input);
+    if (!parsed.success) throw new BadParams(`invalid reservation: ${schemaMessage(parsed.error)}`);
+    const input = parsed.data as Record<string, unknown>;
+    this.requireValidEndpoints(input.endpoints);
+    await this.guards.requireTripEdit(tripId, actor, RESERVATION_EDIT_ACTION);
+    const current = await this.reservations.getReservation(String(reservationId), String(tripId));
+    if (!current) throw new ForbiddenResource(`no reservation ${reservationId} on trip ${tripId}`);
+    await this.requireOwnReferences(tripId, input);
+    const i = input as { title?: string; type?: string; create_budget_entry?: unknown };
+    const { reservation, accommodationChanged, accommodationCreated, costEvents } =
+      await this.reservations.updateWithCost(
+        String(reservationId),
+        String(tripId),
+        input as never,
+        current,
+        i.create_budget_entry as never,
+      );
+    // A stay this edit wrote for the first time is new, as the REST route announces it.
+    if (accommodationCreated) this.realtime.broadcast(tripId, 'accommodation:created', {}, undefined);
+    else if (accommodationChanged) this.realtime.broadcast(tripId, 'accommodation:updated', {}, undefined);
+    const cur = current as { title: string; type?: string };
+    this.reservations.announceCost(tripId, costEvents, undefined);
+    this.realtime.broadcast(tripId, 'reservation:updated', { reservation }, undefined);
+    await this.notifyBooking(actor, tripId, i.title || cur.title, i.type || cur.type || '');
+    return reservation;
+  }
+
+  @PluginMethod('reservations.delete', { permission: 'db:write:reservations' })
+  async delete(params: Record<string, unknown>, ctx: PluginRpcContext): Promise<unknown> {
+    const tripId = num(params.tripId, 'tripId');
+    const reservationId = num(params.reservationId, 'reservationId');
+    const actor = this.guards.requireActor(ctx, 'reservation');
+    await this.guards.requireTripEdit(tripId, actor, RESERVATION_EDIT_ACTION);
+    const { deleted, accommodationDeleted, deletedBudgetItemIds } = await this.reservations.remove(
+      String(reservationId),
+      String(tripId),
+    );
+    if (!deleted) throw new ForbiddenResource(`no reservation ${reservationId} on trip ${tripId}`);
+    if (accommodationDeleted)
+      this.realtime.broadcast(
+        tripId,
+        'accommodation:deleted',
+        { accommodationId: deleted.accommodation_id },
+        undefined,
+      );
+    for (const itemId of deletedBudgetItemIds) this.realtime.broadcast(tripId, 'budget:deleted', { itemId }, undefined);
+    this.realtime.broadcast(tripId, 'reservation:deleted', { reservationId }, undefined);
+    await this.notifyBooking(actor, tripId, deleted.title, deleted.type || '');
+    return { deleted: true };
+  }
+
+  /**
+   * The reservation body is passthrough by contract, but a malformed `endpoints`
+   * array would otherwise fail deep in the service (NOT NULL mid-transaction) or be
+   * dropped silently on missing coordinates. Both are miserable to debug from a
+   * plugin, so the shape is pinned up front. Absent stays absent: omitted means keep,
+   * [] means delete all.
+   */
+  private requireValidEndpoints(value: unknown): void {
+    if (value === undefined) return;
+    const parsed = reservationEndpointsInputSchema.safeParse(value);
+    if (!parsed.success) throw new BadParams(`invalid endpoints: ${schemaMessage(parsed.error)}`);
+  }
+
+  /**
+   * The body's ids have to be this trip's, and they have to exist. reservation_edit
+   * on tripId says the plugin may write here and nothing about day_id, place_id,
+   * assignment_id, accommodation_id or the create_accommodation days it puts in the
+   * body: a stay written against another trip's day puts a stop on that day, in a
+   * plan the acting user may not even be able to read. The REST route and the MCP
+   * tool refuse the same ids; this is the plugin half of that rule. An id that
+   * resolves to nothing is a foreign-key error the plugin reads as a crash (#2355),
+   * so it is named here as well, after the ownership check.
+   */
+  private async requireOwnReferences(tripId: number, input: Record<string, unknown>): Promise<void> {
+    const offenders = await this.reservations.referencesOutsideTrip(String(tripId), input as never);
+    if (offenders.length > 0) throw new ForbiddenResource(`not part of trip ${tripId}: ${offenders.join(', ')}`);
+    const unknown = await this.reservations.unresolvedReferences(String(tripId), input as never);
+    if (unknown.length > 0) throw new BadParams(`unknown reference: ${unknown.join(', ')}`);
+  }
+
+  /** Fire-and-forget, exactly as the REST controller sends it, so it never blocks the write. */
+  private async notifyBooking(actingUserId: number, tripId: number, booking: string, type: string): Promise<void> {
+    await this.reservations.notifyBookingChange(tripId, actingUserId, booking, type);
+  }
+}

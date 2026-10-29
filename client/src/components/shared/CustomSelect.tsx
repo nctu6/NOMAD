@@ -1,27 +1,78 @@
-import React, { useState, useRef, useEffect } from 'react'
-import ReactDOM from 'react-dom'
+import React, { useState, useRef, useEffect, useId } from 'react'
+import { createPortal } from 'react-dom'
 import { ChevronDown, Check } from 'lucide-react'
+import { useAnchoredPosition, scrollAnchorIntoView } from '../../hooks/useAnchoredPosition'
+import { useTranslation } from '../../i18n'
 
 interface SelectOption {
-  value: string
+  // Callers use both string keys and numeric ids (e.g. day/place ids) as values, and
+  // the value they hold need not be of the same kind as the options: see sameValue.
+  value: string | number
   label: string
   icon?: React.ReactNode
   isHeader?: boolean
   searchLabel?: string
   groupLabel?: string
+  badge?: string
 }
 
 interface CustomSelectProps {
-  value: string
-  onChange: (value: string) => void
+  ariaLabel?: string
+  value: string | number
+  onChange: (value: string | number) => void
   options?: SelectOption[]
   placeholder?: string
   searchable?: boolean
   style?: React.CSSProperties
   size?: 'sm' | 'md'
+  disabled?: boolean
+  /**
+   * How wide the open menu is.
+   *
+   * 'anchor' (the default) keeps it exactly as wide as the trigger, which is what a
+   * select normally wants. 'content' lets it grow to its longest option instead, for the
+   * cases where the trigger is a narrow flex item and the options are place names: there
+   * the trigger has to shorten to share its row, and a menu that shortened with it would
+   * offer a list of identical prefixes.
+   */
+  menuFit?: 'anchor' | 'content'
+  /** The trigger's id, so a label outside can point at it. */
+  id?: string
+}
+
+/**
+ * Whether an option is the one the caller holds.
+ *
+ * onChange hands back the option's own value, and callers routinely store it in another
+ * form: the trip share dialog kept String(value) against options keyed by numeric user
+ * ids, so a strict comparison never found the pick and the trigger stayed on its
+ * placeholder while the invite button already knew who was chosen (#2478). An id reads
+ * the same as a number or as text, so both sides are compared as text. A caller holding
+ * nothing (null or undefined at runtime) matches no option.
+ */
+function sameValue(held: string | number | null | undefined, option: string | number): boolean {
+  return held != null && String(held) === String(option)
+}
+
+/** How wide a content-fitted menu may get before it stops reading as a menu. */
+const MENU_MAX_WIDTH = 420
+
+/**
+ * How much room a content-fitted menu has, measured from the trigger's left edge.
+ *
+ * Bounded by the trigger's own container first: a select sits inside a panel, and a menu
+ * that grew past that panel's edge would hang over whatever is beside it — here, the map.
+ * The window is the second bound, for a container that reaches the edge of the screen.
+ */
+function menuRoom(anchor: HTMLElement | null, left: number): number {
+  const toWindowEdge = typeof window === 'undefined' ? MENU_MAX_WIDTH : window.innerWidth - left - 8
+  const box = anchor?.parentElement?.getBoundingClientRect()
+  const toPanelEdge = box && box.width > 0 ? box.right - left : Number.POSITIVE_INFINITY
+  return Math.min(MENU_MAX_WIDTH, toWindowEdge, toPanelEdge)
 }
 
 export default function CustomSelect({
+  ariaLabel,
   value,
   onChange,
   options = [],
@@ -29,16 +80,39 @@ export default function CustomSelect({
   searchable = false,
   style = {},
   size = 'md',
+  disabled = false,
+  menuFit = 'anchor',
+  id,
 }: CustomSelectProps) {
   const [open, setOpen] = useState(false)
   const [search, setSearch] = useState('')
   const ref = useRef<HTMLDivElement>(null)
+  const triggerRef = useRef<HTMLButtonElement>(null)
   const dropRef = useRef<HTMLDivElement>(null)
   const searchRef = useRef<HTMLInputElement>(null)
+  const keyboardDirection = useRef<'first' | 'last' | null>(null)
+  const menuId = useId()
+  const { t } = useTranslation()
+
+  // Follows the trigger while the sheet scrolls and while the on-screen keyboard
+  // resizes the viewport, instead of freezing at the rect measured on open (#1999).
+  const anchored = useAnchoredPosition(ref, open)
 
   useEffect(() => {
-    if (open && searchable && searchRef.current) searchRef.current.focus()
+    if (!open || !searchable || !searchRef.current) return
+    if (!keyboardDirection.current) searchRef.current.focus()
+    // Focusing raises the keyboard on a phone; scroll the trigger up so the list
+    // it just opened is not left underneath it (#2000).
+    scrollAnchorIntoView(ref.current)
   }, [open, searchable])
+
+  useEffect(() => {
+    if (!open || !keyboardDirection.current) return
+    const buttons = dropRef.current?.querySelectorAll<HTMLButtonElement>('button')
+    const direction = keyboardDirection.current
+    keyboardDirection.current = null
+    if (buttons?.length) buttons[direction === 'last' ? buttons.length - 1 : 0].focus()
+  }, [open])
 
   useEffect(() => {
     const handleClick = (e: MouseEvent) => {
@@ -50,7 +124,7 @@ export default function CustomSelect({
     return () => document.removeEventListener('mousedown', handleClick)
   }, [open])
 
-  const selected = options.find(o => o.value === value)
+  const selected = options.find(o => sameValue(value, o.value))
   const filtered = searchable && search
     ? (() => {
         const q = search.toLowerCase()
@@ -78,38 +152,94 @@ export default function CustomSelect({
 
   const sm = size === 'sm'
 
+  const closeMenu = () => {
+    setOpen(false)
+    setSearch('')
+    triggerRef.current?.focus()
+  }
+
+  const handleKeyDown = (event: React.KeyboardEvent) => {
+    if (disabled) return
+    if (event.key === 'Escape' && open) {
+      event.preventDefault()
+      event.stopPropagation()
+      closeMenu()
+    } else if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+      event.preventDefault()
+      const backwards = event.key === 'ArrowUp'
+      if (!open) {
+        keyboardDirection.current = backwards ? 'last' : 'first'
+        setSearch('')
+        setOpen(true)
+      } else {
+        const buttons = Array.from(dropRef.current?.querySelectorAll<HTMLButtonElement>('button') ?? [])
+        const current = buttons.findIndex(button => button === document.activeElement)
+        const next = current < 0 ? (backwards ? buttons.length - 1 : 0) : (current + (backwards ? -1 : 1) + buttons.length) % buttons.length
+        buttons[next]?.focus()
+      }
+    }
+  }
+
   return (
     <div ref={ref} style={{ position: 'relative', ...style }}>
       {/* Trigger */}
       <button
+        ref={triggerRef}
+        id={id}
         type="button"
-        onClick={() => { setOpen(o => !o); setSearch('') }}
+        aria-label={ariaLabel}
+        aria-expanded={open}
+        aria-controls={open ? menuId : undefined}
+        disabled={disabled}
+        onKeyDown={handleKeyDown}
+        onClick={() => { if (!disabled) { setOpen(o => !o); setSearch('') } }}
         style={{
           width: '100%', display: 'flex', alignItems: 'center', gap: 8,
           padding: sm ? '8px 12px' : '8px 14px', borderRadius: 10,
           border: '1px solid var(--border-primary)',
           background: 'var(--bg-input)', color: 'var(--text-primary)',
-          fontSize: 13, fontWeight: 500, fontFamily: 'inherit',
-          cursor: 'pointer', outline: 'none', textAlign: 'left',
+          fontSize: 'calc(13px * var(--fs-scale-body, 1))', fontWeight: 500, fontFamily: 'inherit',
+          cursor: disabled ? 'default' : 'pointer', outline: 'none', textAlign: 'start',
           transition: 'border-color 0.15s', overflow: 'hidden', minWidth: 0,
+          opacity: disabled ? 0.5 : 1,
         }}
-        onMouseEnter={e => e.currentTarget.style.borderColor = 'var(--text-faint)'}
+        onMouseEnter={e => { if (!disabled) e.currentTarget.style.borderColor = 'var(--text-faint)' }}
         onMouseLeave={e => { if (!open) e.currentTarget.style.borderColor = 'var(--border-primary)' }}
       >
         {selected?.icon && <span style={{ display: 'flex', flexShrink: 0 }}>{selected.icon}</span>}
         <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: selected ? 'var(--text-primary)' : 'var(--text-faint)' }}>
           {selected ? selected.label : placeholder}
         </span>
-        <ChevronDown size={sm ? 12 : 14} style={{ flexShrink: 0, color: 'var(--text-faint)', transition: 'transform 0.2s', transform: open ? 'rotate(180deg)' : 'none' }} />
+        {selected?.badge && (
+          <span style={{
+            flexShrink: 0, fontSize: 'calc(10px * var(--fs-scale-caption, 1))', fontWeight: 600, color: 'var(--text-muted)',
+            background: 'var(--bg-tertiary)', padding: '2px 7px', borderRadius: 999,
+            letterSpacing: '0.01em',
+          }}>{selected.badge}</span>
+        )}
+        <ChevronDown size={sm ? 12 : 14} style={{ flexShrink: 0, color: 'var(--text-faint)', transition: 'transform 200ms cubic-bezier(0.23,1,0.32,1)', transform: open ? 'rotate(180deg)' : 'none' }} />
       </button>
 
       {/* Dropdown */}
-      {open && ReactDOM.createPortal(
-        <div ref={dropRef} style={{
+      {open && createPortal(
+        <div ref={dropRef} id={menuId} role="group" aria-label={ariaLabel || selected?.label || placeholder || undefined} onKeyDown={handleKeyDown} style={{
           position: 'fixed',
-          top: (() => { const r = ref.current?.getBoundingClientRect(); return r ? r.bottom + 4 : 0 })(),
-          left: (() => { const r = ref.current?.getBoundingClientRect(); return r ? r.left : 0 })(),
-          width: (() => { const r = ref.current?.getBoundingClientRect(); return r ? r.width : 200 })(),
+          ...(anchored
+            ? {
+                ...(anchored.flipped ? { bottom: anchored.bottom } : { top: anchored.top }),
+                left: anchored.left,
+                // Never narrower than the trigger, and never past the right-hand edge of
+                // the window. The cap is read at render time rather than measured, and
+                // that is enough: every reason the anchor moved already re-renders this.
+                ...(menuFit === 'content'
+                  ? {
+                      minWidth: anchored.width,
+                      width: 'max-content',
+                      maxWidth: Math.max(anchored.width, menuRoom(ref.current, anchored.left)),
+                    }
+                  : { width: anchored.width }),
+              }
+            : { top: 0, left: 0, width: 200 }),
           zIndex: 99999,
           background: 'var(--bg-card)',
           backdropFilter: 'blur(24px) saturate(180%)',
@@ -118,7 +248,9 @@ export default function CustomSelect({
           borderRadius: 10,
           boxShadow: '0 8px 32px rgba(0,0,0,0.12)',
           overflow: 'hidden',
-          animation: 'selectIn 0.15s ease-out',
+          animation: 'trek-menu-enter 200ms cubic-bezier(0.23, 1, 0.32, 1)',
+          transformOrigin: anchored?.flipped ? 'bottom center' : 'top center',
+          willChange: 'transform, opacity',
         }}>
           {/* Search */}
           {searchable && (
@@ -128,10 +260,11 @@ export default function CustomSelect({
                 type="text"
                 value={search}
                 onChange={e => setSearch(e.target.value)}
-                placeholder="..."
+                placeholder={t('common.search')}
+                aria-label={t('common.search')}
                 style={{
                   width: '100%', border: '1px solid var(--border-secondary)', borderRadius: 6,
-                  padding: '5px 8px', fontSize: 12, outline: 'none', fontFamily: 'inherit',
+                  padding: '5px 8px', fontSize: 'calc(12px * var(--fs-scale-body, 1))', outline: 'none', fontFamily: 'inherit',
                   background: 'var(--bg-secondary)', color: 'var(--text-primary)',
                   boxSizing: 'border-box',
                 }}
@@ -139,16 +272,26 @@ export default function CustomSelect({
             </div>
           )}
 
-          {/* Options */}
-          <div style={{ maxHeight: 220, overflowY: 'auto', padding: '4px' }}>
+          {/* Options — capped at whatever the viewport still shows, so a list opened
+              beside an on-screen keyboard shrinks instead of hiding under it (#2000). */}
+          <div style={{
+            maxHeight: Math.min(220, Math.max(96, (anchored?.maxHeight ?? 220) - (searchable ? 38 : 0))),
+            overflowY: 'auto',
+            // The panel is portaled to document.body and positioned fixed, so its
+            // scroll chain runs to the viewport rather than to the sheet it looks
+            // like it belongs to. On a phone that meant a flick past either end of
+            // the list moved the page instead (#2078).
+            overscrollBehavior: 'contain',
+            padding: '4px',
+          }}>
             {filtered.length === 0 ? (
-              <div style={{ padding: '10px 12px', fontSize: 12, color: 'var(--text-faint)', textAlign: 'center' }}>—</div>
+              <div style={{ padding: '10px 12px', fontSize: 'calc(12px * var(--fs-scale-body, 1))', color: 'var(--text-faint)', textAlign: 'center' }}>—</div>
             ) : (
               filtered.map(option => {
                 if (option.isHeader) {
                   return (
                     <div key={option.value} style={{
-                      padding: '5px 10px', fontSize: 10, fontWeight: 700, color: 'var(--text-faint)',
+                      padding: '5px 10px', fontSize: 'calc(10px * var(--fs-scale-caption, 1))', fontWeight: 700, color: 'var(--text-faint)',
                       textTransform: 'uppercase', letterSpacing: '0.03em',
                       background: 'var(--bg-tertiary)', borderRadius: 4, margin: '2px 0',
                     }}>
@@ -156,24 +299,31 @@ export default function CustomSelect({
                     </div>
                   )
                 }
-                const isSelected = option.value === value
+                const isSelected = sameValue(value, option.value)
                 return (
                   <button
                     key={option.value}
                     type="button"
-                    onClick={() => { onChange(option.value); setOpen(false); setSearch('') }}
+                    onClick={() => { onChange(option.value); closeMenu() }}
                     style={{
                       width: '100%', display: 'flex', alignItems: 'center', gap: 8,
                       padding: '7px 10px', borderRadius: 6,
                       border: 'none', background: isSelected ? 'var(--bg-hover)' : 'transparent',
-                      color: 'var(--text-primary)', fontSize: 13, fontFamily: 'inherit',
-                      cursor: 'pointer', textAlign: 'left', transition: 'background 0.1s',
+                      color: 'var(--text-primary)', fontSize: 'calc(13px * var(--fs-scale-body, 1))', fontFamily: 'inherit',
+                      cursor: 'pointer', textAlign: 'start', transition: 'background 0.1s',
                     }}
                     onMouseEnter={e => e.currentTarget.style.background = 'var(--bg-hover)'}
                     onMouseLeave={e => e.currentTarget.style.background = isSelected ? 'var(--bg-hover)' : 'transparent'}
                   >
                     {option.icon && <span style={{ display: 'flex', flexShrink: 0 }}>{option.icon}</span>}
                     <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{option.label}</span>
+                    {option.badge && (
+                      <span style={{
+                        flexShrink: 0, fontSize: 'calc(10px * var(--fs-scale-caption, 1))', fontWeight: 600, color: 'var(--text-muted)',
+                        background: 'var(--bg-tertiary)', padding: '2px 7px', borderRadius: 999,
+                        letterSpacing: '0.01em',
+                      }}>{option.badge}</span>
+                    )}
                     {isSelected && <Check size={13} style={{ flexShrink: 0, color: 'var(--text-muted)' }} />}
                   </button>
                 )
@@ -184,12 +334,6 @@ export default function CustomSelect({
         document.body
       )}
 
-      <style>{`
-        @keyframes selectIn {
-          from { opacity: 0; transform: translateY(-4px); }
-          to { opacity: 1; transform: translateY(0); }
-        }
-      `}</style>
     </div>
   )
 }

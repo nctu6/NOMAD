@@ -1,0 +1,99 @@
+import type { NotificationLocale } from '../externalNotifications/types';
+import { pluralForm } from '../plural';
+
+const en: NotificationLocale = {
+  email: {
+    footer: 'You received this because you have notifications enabled in TREK.',
+    manage: 'Manage preferences in Settings',
+    madeWith: 'Made with',
+    openTrek: 'Open TREK',
+  },
+  events: {
+    trip_invite: (p) => ({
+      title: `Trip invite: "${p.trip}"`,
+      body: `${p.actor} invited ${p.invitee || 'a member'} to the trip "${p.trip}".`,
+    }),
+    booking_change: (p) => ({
+      title: `New booking: ${p.booking}`,
+      body: `${p.actor} added a new ${p.type} "${p.booking}" to "${p.trip}".`,
+    }),
+    trip_reminder: (p) => ({
+      title: `Trip reminder: ${p.trip}`,
+      body: `Your trip "${p.trip}" is coming up soon!`,
+    }),
+    todo_due: (p) => ({
+      title: `To-do due: ${p.todo}`,
+      body: `"${p.todo}" in "${p.trip}" is due on ${p.due}.`,
+    }),
+    vacay_invite: (p) => ({
+      title: 'Vacay Fusion Invite',
+      body: `${p.actor} invited you to fuse vacation plans. Open TREK to accept or decline.`,
+    }),
+    vacay_share: (p) => ({
+      title: 'Vacay Calendar Shared',
+      body: `${p.actor} shared their vacation calendar with you. Open TREK to view it.`,
+    }),
+    collection_invite: (p) => ({
+      title: 'Collection invite',
+      body: `${p.actor} invited you to share a collection. Open TREK to accept or decline.`,
+    }),
+    photos_shared: (p) => ({
+      title: pluralForm(p.count, 'en', { one: `${p.count} photo shared`, other: `${p.count} photos shared` }),
+      body: pluralForm(p.count, 'en', {
+        one: `${p.actor} shared ${p.count} photo in "${p.trip}".`,
+        other: `${p.actor} shared ${p.count} photos in "${p.trip}".`,
+      }),
+    }),
+    collab_message: (p) => ({
+      title: `New message in "${p.trip}"`,
+      body: `${p.actor}: ${p.preview}`,
+    }),
+    packing_tagged: (p) => ({
+      title: `Packing: ${p.category}`,
+      body: `${p.actor} assigned you to the "${p.category}" packing category in "${p.trip}".`,
+    }),
+    version_available: (p) => ({
+      title: 'New TREK version available',
+      body: `TREK ${p.version} is now available. Visit the admin panel to update.`,
+    }),
+    replica_failure: (p) => ({
+      title: 'Storage replica failure',
+      body:
+        `Replica write failed on '${p.backend}': ${p.op} of ${p.key} — ${p.error}.` +
+        (p.suppressed !== '0'
+          ? pluralForm(p.suppressed, 'en', {
+              one: ` ${p.suppressed} more failure was suppressed since the last notification.`,
+              other: ` ${p.suppressed} more failures were suppressed since the last notification.`,
+            })
+          : ''),
+    }),
+    paddle_region_requested: (p) => ({
+      title: 'Paddle region requested',
+      body: `${p.actor} is planning a paddle tour in ${p.region}. Load or decline its water data in the admin area under Addons.`,
+    }),
+    synology_session_cleared: () => ({
+      title: 'Synology session cleared',
+      body: 'Your Synology account or URL changed. You have been logged out of Synology Photos.',
+    }),
+    wanderer_source_hint: (p) => ({
+      title: `wanderer trail: ${p.tour}`,
+      body:
+        p.state === 'changed'
+          ? `"${p.tour}" in "${p.trip}" was changed in wanderer. Open the tour and check its source to see everything that changed. Nothing in the trip changes by itself.`
+          : p.state === 'unverifiable'
+            ? `"${p.tour}" in "${p.trip}" can no longer be checked in wanderer. The tour in your trip stays as it is.`
+            : `"${p.tour}" in "${p.trip}" may have changed in wanderer. Open the tour and check its source to see whether it did. Nothing in the trip changes by itself.`,
+    }),
+    plugin_notification: (p) => ({ title: p.title ?? '', body: p.body ?? '' }),
+  },
+  passwordReset: {
+    subject: 'Reset your password',
+    greeting: 'Hi',
+    body: 'We received a request to reset the password for your TREK account. Click the button below to set a new password.',
+    ctaIntro: 'Reset password',
+    expiry: 'This link expires in 60 minutes.',
+    ignore: "If you didn't request this, you can safely ignore this email — your password won't change.",
+  },
+};
+
+export default en;

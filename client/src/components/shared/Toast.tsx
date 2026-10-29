@@ -1,15 +1,6 @@
-import React, { createContext, useContext, useState, useCallback, useEffect } from 'react'
+import React, { useMemo } from 'react'
 import { CheckCircle, XCircle, AlertCircle, Info, X } from 'lucide-react'
-
-type ToastType = 'success' | 'error' | 'warning' | 'info'
-
-interface Toast {
-  id: number
-  message: string
-  type: ToastType
-  duration: number
-  removing: boolean
-}
+import { useToastQueue, type ToastType } from './useToastQueue'
 
 declare global {
   interface Window {
@@ -17,92 +8,114 @@ declare global {
   }
 }
 
-let toastIdCounter = 0
+const ICON_COLORS: Record<ToastType, string> = {
+  success: '#22c55e',
+  error: '#ef4444',
+  warning: '#f59e0b',
+  info: '#6366f1',
+}
 
 export function ToastContainer() {
-  const [toasts, setToasts] = useState<Toast[]>([])
-
-  const addToast = useCallback((message: string, type: ToastType = 'info', duration: number = 3000) => {
-    const id = ++toastIdCounter
-    setToasts(prev => [...prev, { id, message, type, duration, removing: false }])
-
-    if (duration > 0) {
-      setTimeout(() => {
-        setToasts(prev => prev.map(t => t.id === id ? { ...t, removing: true } : t))
-        setTimeout(() => {
-          setToasts(prev => prev.filter(t => t.id !== id))
-        }, 300)
-      }, duration)
-    }
-
-    return id
-  }, [])
-
-  const removeToast = useCallback((id: number) => {
-    setToasts(prev => prev.map(t => t.id === id ? { ...t, removing: true } : t))
-    setTimeout(() => {
-      setToasts(prev => prev.filter(t => t.id !== id))
-    }, 300)
-  }, [])
-
-  useEffect(() => {
-    window.__addToast = addToast
-    return () => { delete window.__addToast }
-  }, [addToast])
+  const { toasts, dismissToast: removeToast } = useToastQueue({ exitMs: 400, restorePrevious: false })
 
   const icons: Record<ToastType, React.ReactNode> = {
-    success: <CheckCircle className="w-5 h-5 text-emerald-500 flex-shrink-0" />,
-    error: <XCircle className="w-5 h-5 text-red-500 flex-shrink-0" />,
-    warning: <AlertCircle className="w-5 h-5 text-amber-500 flex-shrink-0" />,
-    info: <Info className="w-5 h-5 text-blue-500 flex-shrink-0" />,
-  }
-
-  const bgColors: Record<ToastType, string> = {
-    success: 'bg-white border-l-4 border-emerald-500',
-    error: 'bg-white border-l-4 border-red-500',
-    warning: 'bg-white border-l-4 border-amber-500',
-    info: 'bg-white border-l-4 border-blue-500',
+    success: <CheckCircle size={18} style={{ color: ICON_COLORS.success, flexShrink: 0 }} />,
+    error: <XCircle size={18} style={{ color: ICON_COLORS.error, flexShrink: 0 }} />,
+    warning: <AlertCircle size={18} style={{ color: ICON_COLORS.warning, flexShrink: 0 }} />,
+    info: <Info size={18} style={{ color: ICON_COLORS.info, flexShrink: 0 }} />,
   }
 
   return (
-    <div className="fixed top-4 right-4 z-[9999] flex flex-col gap-2 max-w-sm w-full pointer-events-none">
-      {toasts.map(toast => (
-        <div
-          key={toast.id}
-          className={`
-            ${bgColors[toast.type] || bgColors.info}
-            ${toast.removing ? 'toast-exit' : 'toast-enter'}
-            flex items-start gap-3 p-4 rounded-lg shadow-lg pointer-events-auto
-            min-w-0
-          `}
-        >
-          {icons[toast.type] || icons.info}
-          <p className="text-sm text-slate-700 flex-1 leading-relaxed">{toast.message}</p>
-          <button
-            onClick={() => removeToast(toast.id)}
-            className="text-slate-400 hover:text-slate-600 transition-colors flex-shrink-0"
+    <>
+      <style>{`
+        @keyframes toast-in {
+          from { opacity: 0; transform: translateY(16px) scale(0.95); }
+          to { opacity: 1; transform: translateY(0) scale(1); }
+        }
+        @keyframes toast-out {
+          from { opacity: 1; transform: translateY(0) scale(1); }
+          to { opacity: 0; transform: translateY(8px) scale(0.95); }
+        }
+        .nomad-toast {
+          background: rgba(255, 255, 255, 0.65);
+          border: 1px solid rgba(0, 0, 0, 0.06);
+          box-shadow: 0 8px 32px rgba(0, 0, 0, 0.1), inset 0 0.5px 0 rgba(255,255,255,0.5);
+        }
+        .nomad-toast span { color: rgba(0, 0, 0, 0.8) !important; }
+        .dark .nomad-toast {
+          background: rgba(30, 30, 40, 0.55);
+          border: 1px solid rgba(255, 255, 255, 0.1);
+          box-shadow: 0 8px 32px rgba(0, 0, 0, 0.25), inset 0 0.5px 0 rgba(255,255,255,0.08);
+        }
+        .dark .nomad-toast span { color: rgba(255, 255, 255, 0.9) !important; }
+        .nomad-toast-close { color: rgba(0, 0, 0, 0.4); }
+        .dark .nomad-toast-close { color: rgba(255, 255, 255, 0.4); }
+      `}</style>
+      <div style={{
+        position: 'fixed', bottom: 24, left: '50%', transform: 'translateX(-50%)',
+        // Above modal overlays (which sit around z-index 10000 with a backdrop-filter
+        // blur) so error toasts paint on top and stay legible instead of blurred behind.
+        zIndex: 100000, display: 'flex', flexDirection: 'column-reverse', gap: 8,
+        pointerEvents: 'none', maxWidth: 420, width: '100%', padding: '0 16px',
+      }}>
+        {toasts.map(toast => (
+          <div
+            key={toast.id}
+            className="nomad-toast"
+            style={{
+              display: 'flex', alignItems: 'center', gap: 10,
+              padding: '10px 14px',
+              borderRadius: 14,
+              backdropFilter: 'blur(24px) saturate(180%)',
+              WebkitBackdropFilter: 'blur(24px) saturate(180%)',
+              pointerEvents: 'auto',
+              animation: toast.removing ? 'toast-out 0.35s ease forwards' : 'toast-in 0.35s cubic-bezier(0.16,1,0.3,1) forwards',
+            }}
           >
-            <X className="w-4 h-4" />
-          </button>
-        </div>
-      ))}
-    </div>
+            {icons[toast.type] || icons.info}
+            <span style={{
+              flex: 1, fontSize: 'calc(13px * var(--fs-scale-body, 1))', fontWeight: 500, color: 'rgba(255, 255, 255, 0.9)',
+              lineHeight: 1.4,
+              fontFamily: "var(--font-system)",
+            }}>
+              {toast.message}
+            </span>
+            <button type="button"
+              onClick={() => removeToast(toast.id)}
+              className="nomad-toast-close"
+              style={{
+                background: 'none', border: 'none', cursor: 'pointer',
+                display: 'flex', padding: 2,
+                flexShrink: 0, borderRadius: 6, transition: 'opacity 0.15s',
+                opacity: 0.35,
+              }}
+              onMouseEnter={e => e.currentTarget.style.opacity = '0.7'}
+              onMouseLeave={e => e.currentTarget.style.opacity = '0.35'}
+            >
+              <X size={14} />
+            </button>
+          </div>
+        ))}
+      </div>
+    </>
   )
 }
 
-export const useToast = () => {
-  const show = useCallback((message: string, type: ToastType, duration?: number) => {
-    if (window.__addToast) {
-      window.__addToast(message, type, duration)
+// One object for the life of the component: hooks list `toast` in their effect
+// dependencies, and a fresh object per render re-ran those effects on every keystroke.
+export const useToast = () =>
+  useMemo(() => {
+    const show = (message: string, type: ToastType, duration?: number) => {
+      if (window.__addToast) {
+        window.__addToast(message, type, duration)
+      }
+    }
+    return {
+      success: (message: string, duration?: number) => show(message, 'success', duration),
+      error: (message: string, duration?: number) => show(message, 'error', duration),
+      warning: (message: string, duration?: number) => show(message, 'warning', duration),
+      info: (message: string, duration?: number) => show(message, 'info', duration),
     }
   }, [])
-
-  return {
-    success: (message: string, duration?: number) => show(message, 'success', duration),
-    error: (message: string, duration?: number) => show(message, 'error', duration),
-    warning: (message: string, duration?: number) => show(message, 'warning', duration),
-    info: (message: string, duration?: number) => show(message, 'info', duration),
-  }
-}
 
 export default useToast

@@ -1,0 +1,853 @@
+/**
+ * MCP integration tests.
+ * Covers MCP-001 to MCP-013.
+ *
+ * The MCP endpoint uses JWT auth and server-sent events / streaming HTTP.
+ * Tests cover authentication, session management, rate limiting, and API token auth.
+ */
+import { getMcpSafeUrl } from '../../src/app-config';
+import { buildApp } from '../../src/bootstrap';
+import { db as testDb } from '../../src/db/database';
+import { AuditLog } from '../../src/db/entities/AuditLog.entity';
+import { McpTokens } from '../../src/db/entities/McpTokens.entity';
+import { OauthClients } from '../../src/db/entities/OauthClients.entity';
+import { OauthConsents } from '../../src/db/entities/OauthConsents.entity';
+import { OauthTokens } from '../../src/db/entities/OauthTokens.entity';
+import { Users } from '../../src/db/entities/Users.entity';
+import { closeMcpSessions } from '../../src/mcp/index';
+import { sessions } from '../../src/mcp/sessionManager';
+import type { McpDynamicTool } from '../../src/nest-mcp';
+import { AuditService } from '../../src/nest/audit/audit.service';
+import { UnitOfWork } from '../../src/nest/database/unit-of-work';
+import { CimdClientResolver } from '../../src/nest/oauth/oauth-cimd';
+import { OauthService } from '../../src/nest/oauth/oauth.service';
+import { setPluginMcpToolSource } from '../../src/plugin-mcp-tools';
+import { generateToken } from '../helpers/auth';
+import { createUser } from '../helpers/factories';
+import { createMcpToken } from '../helpers/factories';
+import { countRows, deleteRows, findRow, findRows } from '../helpers/factories/rows';
+import { setAddonEnabled } from '../helpers/factories/settings';
+import { createTestAddonsService } from '../helpers/test-addons';
+import { resetTestDb, resetRateLimits } from '../helpers/test-db';
+import { createTestOrm, type TestOrm } from '../helpers/test-orm';
+import { MikroORM } from '@mikro-orm/core';
+import type { INestApplication } from '@nestjs/common';
+
+import type { Application } from 'express';
+import request from 'supertest';
+import { describe, it, expect, vi, beforeAll, beforeEach, afterEach, afterAll } from 'vitest';
+
+vi.mock('../../src/db/database', async () => {
+  const { createSnapshotTestDb, buildDbMock } = await import('../helpers/db-mock');
+  return buildDbMock(createSnapshotTestDb());
+});
+
+let oauthSvc: OauthService;
+
+/** Mint a trekoa_ access token for the user via a fresh OAuth client. */
+async function mintOauthToken(
+  userId: number,
+  audience: string | null,
+  scopes: string[] = ['trips:read'],
+): Promise<{ accessToken: string; clientId: string }> {
+  const created = await oauthSvc.createOAuthClient(
+    userId,
+    'MCP Test Client',
+    ['https://client.example.com/cb'],
+    scopes,
+  );
+  const clientId = (created.client as { client_id: string }).client_id;
+  const tokens = await oauthSvc.issueTokens(clientId, userId, scopes, null, audience);
+  return { accessToken: tokens.access_token, clientId };
+}
+
+/** /mcp answers as SSE, so the JSON-RPC payload rides a `data:` line. */
+function rpcResult(text: string): { tools?: Array<{ name: string; description?: string }> } {
+  const line = text.split('\n').find((l) => l.startsWith('data:'));
+  if (!line) throw new Error(`no SSE data frame in: ${text.slice(0, 200)}`);
+  return (JSON.parse(line.slice('data:'.length).trim()) as { result?: Record<string, never> }).result ?? {};
+}
+
+const MCP_AUDIENCE = `${getMcpSafeUrl().replace(/\/+$/, '')}/mcp`;
+const EXPECTED_CHALLENGE = `Bearer realm="TREK MCP", resource_metadata="${getMcpSafeUrl().replace(/\/+$/, '')}/.well-known/oauth-protected-resource/mcp", error="invalid_token"`;
+
+let nestApp: INestApplication;
+let app: Application;
+let t: TestOrm;
+
+beforeAll(async () => {
+  nestApp = await buildApp();
+  app = nestApp.getHttpAdapter().getInstance();
+  t = await createTestOrm(testDb);
+  oauthSvc = new OauthService(
+    t.repo(OauthClients),
+    t.repo(OauthTokens),
+    t.repo(OauthConsents),
+    await createTestAddonsService(testDb),
+    new AuditService(t.repo(AuditLog), t.repo(Users)),
+    new UnitOfWork(t.em),
+    nestApp.get(CimdClientResolver),
+  );
+});
+
+beforeEach(async () => {
+  resetTestDb(testDb);
+  await resetRateLimits(nestApp);
+});
+
+afterAll(async () => {
+  closeMcpSessions();
+  await nestApp.close();
+  await t.close();
+  testDb.close();
+});
+
+describe('MCP authentication', () => {
+  // MCP handler checks if the 'mcp' addon is enabled first (403 if not),
+  // then checks auth (401). In test DB the addon may be disabled.
+
+  it('MCP-001 — POST /mcp without auth returns 403 (addon disabled before auth check)', async () => {
+    const res = await request(app).post('/mcp').send({ jsonrpc: '2.0', method: 'initialize', id: 1 });
+    // MCP handler checks addon enabled before verifying auth; addon is disabled in test DB
+    expect(res.status).toBe(403);
+  });
+
+  it('MCP-001 — GET /mcp without auth returns 403 (addon disabled)', async () => {
+    const res = await request(app).get('/mcp');
+    expect(res.status).toBe(403);
+  });
+
+  it('MCP-001 — DELETE /mcp without auth returns 403 (addon disabled)', async () => {
+    const res = await request(app).delete('/mcp').set('Mcp-Session-Id', 'fake-session-id');
+    expect(res.status).toBe(403);
+  });
+});
+
+describe('MCP session init', () => {
+  it('MCP-002 — POST /mcp with valid JWT passes auth check (may fail if addon disabled)', async () => {
+    const { user } = createUser(testDb);
+    const token = generateToken(user.id);
+
+    // Enable MCP addon in test DB
+    await setAddonEnabled(t, 'mcp', true);
+
+    const res = await request(app)
+      .post('/mcp')
+      .set('Authorization', `Bearer ${token}`)
+      .set('Accept', 'application/json, text/event-stream')
+      .send({
+        jsonrpc: '2.0',
+        method: 'initialize',
+        id: 1,
+        params: { protocolVersion: '2024-11-05', capabilities: {}, clientInfo: { name: 'test', version: '1' } },
+      });
+    // Valid JWT + enabled addon → auth passes; SDK returns 200 with session headers
+    expect(res.status).toBe(200);
+  });
+
+  it('MCP-003 — DELETE /mcp with unknown session returns 404', async () => {
+    const { user } = createUser(testDb);
+    const token = generateToken(user.id);
+
+    await setAddonEnabled(t, 'mcp', true);
+
+    const res = await request(app)
+      .delete('/mcp')
+      .set('Authorization', `Bearer ${token}`)
+      .set('Mcp-Session-Id', 'nonexistent-session-id');
+    expect(res.status).toBe(404);
+  });
+
+  it('MCP-004 — POST /mcp with invalid JWT returns 401 (when addon enabled)', async () => {
+    await setAddonEnabled(t, 'mcp', true);
+
+    const res = await request(app)
+      .post('/mcp')
+      .set('Authorization', 'Bearer invalid.jwt.token')
+      .send({ jsonrpc: '2.0', method: 'initialize', id: 1 });
+    expect(res.status).toBe(401);
+  });
+});
+
+describe('MCP API token auth', () => {
+  it('MCP-002 — POST /mcp with valid trek_ API token authenticates successfully', async () => {
+    const { user } = createUser(testDb);
+    const { rawToken } = createMcpToken(testDb, user.id);
+    await setAddonEnabled(t, 'mcp', true);
+
+    const res = await request(app)
+      .post('/mcp')
+      .set('Authorization', `Bearer ${rawToken}`)
+      .set('Accept', 'application/json, text/event-stream')
+      .send({
+        jsonrpc: '2.0',
+        method: 'initialize',
+        id: 1,
+        params: { protocolVersion: '2024-11-05', capabilities: {}, clientInfo: { name: 'test', version: '1' } },
+      });
+    expect(res.status).toBe(200);
+  });
+
+  it('MCP-002 — last_used_at is updated on token use', async () => {
+    const { user } = createUser(testDb);
+    const { rawToken, id: tokenId } = createMcpToken(testDb, user.id);
+    await setAddonEnabled(t, 'mcp', true);
+
+    const before = (await findRow(t, McpTokens, { id: tokenId }))?.last_used_at;
+
+    await request(app)
+      .post('/mcp')
+      .set('Authorization', `Bearer ${rawToken}`)
+      .set('Accept', 'application/json, text/event-stream')
+      .send({
+        jsonrpc: '2.0',
+        method: 'initialize',
+        id: 1,
+        params: { protocolVersion: '2024-11-05', capabilities: {}, clientInfo: { name: 'test', version: '1' } },
+      });
+
+    const after = (await findRow(t, McpTokens, { id: tokenId }))?.last_used_at;
+    expect(after).not.toBeNull();
+    expect(after).not.toBe(before);
+  });
+
+  it('MCP — POST /mcp with unknown trek_ token returns 401', async () => {
+    await setAddonEnabled(t, 'mcp', true);
+
+    const res = await request(app)
+      .post('/mcp')
+      .set('Authorization', 'Bearer trek_totally_fake_token_not_in_db')
+      .send({ jsonrpc: '2.0', method: 'initialize', id: 1 });
+    expect(res.status).toBe(401);
+  });
+
+  it('MCP — POST /mcp with no Authorization header returns 401', async () => {
+    await setAddonEnabled(t, 'mcp', true);
+
+    const res = await request(app).post('/mcp').send({ jsonrpc: '2.0', method: 'initialize', id: 1 });
+    expect(res.status).toBe(401);
+  });
+});
+
+describe('MCP session management', () => {
+  async function createSession(userId: number): Promise<string> {
+    const token = generateToken(userId);
+    const res = await request(app)
+      .post('/mcp')
+      .set('Authorization', `Bearer ${token}`)
+      .set('Accept', 'application/json, text/event-stream')
+      .send({
+        jsonrpc: '2.0',
+        method: 'initialize',
+        id: 1,
+        params: { protocolVersion: '2024-11-05', capabilities: {}, clientInfo: { name: 'test', version: '1' } },
+      });
+    expect(res.status).toBe(200);
+    const sessionId = res.headers['mcp-session-id'];
+    expect(sessionId).toBeTruthy();
+    return sessionId as string;
+  }
+
+  it('MCP-003 — at the session cap, the coldest session is evicted rather than the request refused', async () => {
+    const { user } = createUser(testDb);
+    await setAddonEnabled(t, 'mcp', true);
+
+    const sessionsForUser = () => [...sessions.values()].filter((s) => s.userId === user.id).length;
+
+    // Fill the default cap of 20.
+    const firstSessionId = await createSession(user.id);
+    for (let i = 1; i < 20; i++) await createSession(user.id);
+    expect(sessionsForUser()).toBe(20);
+
+    // The 21st initialize must still succeed. A hard 429 here is what wedged real users: a
+    // client that can't persist its Mcp-Session-Id re-initializes on every tool call, and
+    // would be locked out of the server permanently once it hit the cap.
+    const newSessionId = await createSession(user.id);
+
+    expect(sessionsForUser()).toBe(20); // capped, not growing
+    expect(sessions.has(newSessionId)).toBe(true);
+    expect(sessions.has(firstSessionId)).toBe(false); // the least-recently-active one made room
+  });
+
+  it('MCP-006 — initializes that race past the cap check are trimmed when they register', async () => {
+    const { user } = createUser(testDb);
+    await setAddonEnabled(t, 'mcp', true);
+
+    const sessionsForUser = () => [...sessions.values()].filter((s) => s.userId === user.id).length;
+
+    // What the race leaves behind: concurrent initializes all read the same
+    // pre-registration count, all pass the cap check, and all register — so the
+    // map ends up over the cap. Driving that through supertest depends on how
+    // the requests interleave, so the state itself is set up instead: four past
+    // the cap, none of them the newcomer's doing. Each entry is only ever
+    // counted and evicted, so a stub with closable halves is enough.
+    // Inside the TTL, or countSessionsForUser skips them and there is nothing
+    // over the cap to trim.
+    const stale = Date.now() - 10_000;
+    for (let i = 0; i < 24; i++) {
+      sessions.set(`overshoot-${i}`, {
+        server: { close() {} },
+        transport: { close() {} },
+        userId: user.id,
+        scopes: null,
+        clientId: null,
+        isStaticToken: false,
+        lastActivity: stale + i,
+        lastClientIp: null,
+      } as unknown as NonNullable<ReturnType<typeof sessions.get>>);
+    }
+    expect(sessionsForUser()).toBe(24);
+
+    // The pre-check gives back one; without the trim at registration the other
+    // four stay in the map — each holding a full McpServer — until the TTL sweep.
+    const newSessionId = await createSession(user.id);
+
+    expect(sessionsForUser()).toBe(20);
+    expect(sessions.has(newSessionId)).toBe(true);
+  });
+
+  it('MCP — session resumption with valid mcp-session-id', async () => {
+    const { user } = createUser(testDb);
+    await setAddonEnabled(t, 'mcp', true);
+    const sessionId = await createSession(user.id);
+    const token = generateToken(user.id);
+
+    const res = await request(app)
+      .post('/mcp')
+      .set('Authorization', `Bearer ${token}`)
+      .set('mcp-session-id', sessionId)
+      .set('Accept', 'application/json, text/event-stream')
+      .send({ jsonrpc: '2.0', method: 'tools/list', id: 2, params: {} });
+    expect(res.status).toBe(200);
+  });
+
+  it('MCP — session belongs to different user returns 403', async () => {
+    const { user: user1 } = createUser(testDb);
+    const { user: user2 } = createUser(testDb);
+    await setAddonEnabled(t, 'mcp', true);
+
+    const sessionId = await createSession(user1.id);
+    const token2 = generateToken(user2.id);
+
+    const res = await request(app)
+      .post('/mcp')
+      .set('Authorization', `Bearer ${token2}`)
+      .set('mcp-session-id', sessionId)
+      .send({ jsonrpc: '2.0', method: 'tools/list', id: 2 });
+    expect(res.status).toBe(403);
+  });
+
+  it('MCP — a session-less non-initialize POST is rejected without registering a session', async () => {
+    const { user } = createUser(testDb);
+    await setAddonEnabled(t, 'mcp', true);
+    const token = generateToken(user.id);
+
+    const before = sessions.size;
+    const res = await request(app)
+      .post('/mcp')
+      .set('Authorization', `Bearer ${token}`)
+      .set('Accept', 'application/json, text/event-stream')
+      .send({ jsonrpc: '2.0', method: 'tools/list', id: 1, params: {} });
+
+    // The SDK rejects it ("Server not initialized"); the McpServer built to serve it must not
+    // linger — it is in no session, so nothing would ever sweep or close it.
+    expect(res.status).toBe(400);
+    expect(sessions.size).toBe(before);
+  });
+
+  it('MCP — initialize response exposes Mcp-Session-Id to browser-context clients', async () => {
+    const { user } = createUser(testDb);
+    await setAddonEnabled(t, 'mcp', true);
+    const token = generateToken(user.id);
+
+    const res = await request(app)
+      .post('/mcp')
+      .set('Authorization', `Bearer ${token}`)
+      .set('Origin', 'https://claude.ai')
+      .set('Accept', 'application/json, text/event-stream')
+      .send({
+        jsonrpc: '2.0',
+        method: 'initialize',
+        id: 1,
+        params: { protocolVersion: '2024-11-05', capabilities: {}, clientInfo: { name: 'test', version: '1' } },
+      });
+
+    expect(res.status).toBe(200);
+    expect(res.headers['mcp-session-id']).toBeTruthy();
+    // Without this header the Fetch spec hides Mcp-Session-Id from the client, so it can never
+    // echo it back and every tool call mints a fresh session until the cap kills the connection.
+    expect(String(res.headers['access-control-expose-headers'] ?? '').toLowerCase()).toContain('mcp-session-id');
+  });
+
+  it('MCP — GET without mcp-session-id returns 400', async () => {
+    const { user } = createUser(testDb);
+    await setAddonEnabled(t, 'mcp', true);
+    const token = generateToken(user.id);
+
+    const res = await request(app).get('/mcp').set('Authorization', `Bearer ${token}`);
+    expect(res.status).toBe(400);
+  });
+});
+
+describe('MCP transport parity pins (Nest-hosted /mcp)', () => {
+  const initBody = {
+    jsonrpc: '2.0',
+    method: 'initialize',
+    id: 1,
+    params: { protocolVersion: '2024-11-05', capabilities: {}, clientInfo: { name: 'test', version: '1' } },
+  };
+
+  async function createSession(token: string): Promise<string> {
+    const res = await request(app)
+      .post('/mcp')
+      .set('Authorization', `Bearer ${token}`)
+      .set('Accept', 'application/json, text/event-stream')
+      .send(initBody);
+    expect(res.status).toBe(200);
+    return res.headers['mcp-session-id'] as string;
+  }
+
+  beforeEach(async () => {
+    await setAddonEnabled(t, 'mcp', true);
+  });
+
+  // The source is process-level, so a test that installs one must not leak it
+  // into the next: every later session would carry its tools.
+  afterEach(() => {
+    setPluginMcpToolSource(null);
+  });
+
+  it('MCP-P01 — addon off answers 403 with the exact legacy body', async () => {
+    await setAddonEnabled(t, 'mcp', false);
+    const res = await request(app).post('/mcp').send(initBody);
+    expect(res.status).toBe(403);
+    expect(res.body).toEqual({ error: 'MCP is not enabled' });
+  });
+
+  it('MCP-P02 — missing/invalid auth carries the exact WWW-Authenticate challenge', async () => {
+    const res = await request(app).post('/mcp').send(initBody);
+    expect(res.status).toBe(401);
+    expect(res.body).toEqual({ error: 'Access token required' });
+    expect(res.headers['www-authenticate']).toBe(EXPECTED_CHALLENGE);
+  });
+
+  it('MCP-P03 — a non-Bearer scheme and a schemeless token are both rejected', async () => {
+    for (const header of ['Basic dXNlcjpwdw==', 'just-a-token']) {
+      const res = await request(app).post('/mcp').set('Authorization', header).send(initBody);
+      expect(res.status, header).toBe(401);
+    }
+  });
+
+  it('MCP-P04 — a trekoa_ token with the wrong audience is rejected with a challenge', async () => {
+    const { user } = createUser(testDb);
+    const { accessToken } = await mintOauthToken(user.id, 'https://other.example.com/api');
+    const res = await request(app).post('/mcp').set('Authorization', `Bearer ${accessToken}`).send(initBody);
+    expect(res.status).toBe(401);
+    expect(res.headers['www-authenticate']).toBe(EXPECTED_CHALLENGE);
+  });
+
+  it('MCP-P05 — a trekoa_ token with the MCP audience authenticates', async () => {
+    const { user } = createUser(testDb);
+    const { accessToken } = await mintOauthToken(user.id, MCP_AUDIENCE);
+    const res = await request(app)
+      .post('/mcp')
+      .set('Authorization', `Bearer ${accessToken}`)
+      .set('Accept', 'application/json, text/event-stream')
+      .send(initBody);
+    expect(res.status).toBe(200);
+    expect(res.headers['mcp-session-id']).toBeTruthy();
+  });
+
+  it('MCP-P06 — resuming an unknown session answers the exact 404 body', async () => {
+    const { user } = createUser(testDb);
+    const res = await request(app)
+      .post('/mcp')
+      .set('Authorization', `Bearer ${generateToken(user.id)}`)
+      .set('mcp-session-id', 'no-such-session')
+      .send({ jsonrpc: '2.0', method: 'tools/list', id: 2 });
+    expect(res.status).toBe(404);
+    expect(res.body).toEqual({ error: 'Session not found' });
+  });
+
+  it("MCP-P07 — another user's session answers 403 with the challenge and exact body", async () => {
+    const { user: owner } = createUser(testDb);
+    const { user: intruder } = createUser(testDb);
+    const sessionId = await createSession(generateToken(owner.id));
+
+    const res = await request(app)
+      .post('/mcp')
+      .set('Authorization', `Bearer ${generateToken(intruder.id)}`)
+      .set('mcp-session-id', sessionId)
+      .send({ jsonrpc: '2.0', method: 'tools/list', id: 2 });
+    expect(res.status).toBe(403);
+    expect(res.body).toEqual({ error: 'Session belongs to a different user' });
+    expect(res.headers['www-authenticate']).toBe(EXPECTED_CHALLENGE);
+  });
+
+  it('MCP-P08 — a session created via JWT rejects resumption by an OAuth client', async () => {
+    const { user } = createUser(testDb);
+    const sessionId = await createSession(generateToken(user.id));
+    const { accessToken } = await mintOauthToken(user.id, MCP_AUDIENCE);
+
+    const res = await request(app)
+      .post('/mcp')
+      .set('Authorization', `Bearer ${accessToken}`)
+      .set('mcp-session-id', sessionId)
+      .send({ jsonrpc: '2.0', method: 'tools/list', id: 2 });
+    expect(res.status).toBe(403);
+    expect(res.body).toEqual({ error: 'Session was created with a different OAuth client' });
+    expect(res.headers['www-authenticate']).toBe(EXPECTED_CHALLENGE);
+  });
+
+  it('MCP-P08b — a narrower token cannot resume a session that was created with wider scopes', async () => {
+    const { user } = createUser(testDb);
+    const created = await oauthSvc.createOAuthClient(
+      user.id,
+      'Scope Test Client',
+      ['https://client.example.com/cb'],
+      ['trips:read', 'trips:write'],
+    );
+    const clientId = (created.client as { client_id: string }).client_id;
+    const wide = await oauthSvc.issueTokens(clientId, user.id, ['trips:read', 'trips:write'], null, MCP_AUDIENCE);
+    const narrow = await oauthSvc.issueTokens(clientId, user.id, ['trips:read'], null, MCP_AUDIENCE);
+    const sessionId = await createSession(wide.access_token);
+
+    // The tool surface was registered from the wide set; resuming with the
+    // narrow one would ride it.
+    const res = await request(app)
+      .post('/mcp')
+      .set('Authorization', `Bearer ${narrow.access_token}`)
+      .set('mcp-session-id', sessionId)
+      .send({ jsonrpc: '2.0', method: 'tools/list', id: 2 });
+    expect(res.status).toBe(403);
+    expect(res.body).toEqual({ error: 'Session was created with different scopes' });
+    expect(res.headers['www-authenticate']).toContain('error="insufficient_scope"');
+  });
+
+  it('MCP-P08c — the same scopes in a different order still resume', async () => {
+    const { user } = createUser(testDb);
+    const created = await oauthSvc.createOAuthClient(
+      user.id,
+      'Scope Order Client',
+      ['https://client.example.com/cb'],
+      ['trips:read', 'trips:write'],
+    );
+    const clientId = (created.client as { client_id: string }).client_id;
+    const first = await oauthSvc.issueTokens(clientId, user.id, ['trips:read', 'trips:write'], null, MCP_AUDIENCE);
+    const reordered = await oauthSvc.issueTokens(clientId, user.id, ['trips:write', 'trips:read'], null, MCP_AUDIENCE);
+    const sessionId = await createSession(first.access_token);
+
+    const res = await request(app)
+      .post('/mcp')
+      .set('Authorization', `Bearer ${reordered.access_token}`)
+      .set('mcp-session-id', sessionId)
+      .set('Accept', 'application/json, text/event-stream')
+      .send({ jsonrpc: '2.0', method: 'tools/list', id: 2 });
+    expect(res.status).toBe(200);
+  });
+
+  it('MCP-P09 — a static-token session carries the deprecation notice on the first tool call only', async () => {
+    const { user } = createUser(testDb);
+    const { rawToken } = createMcpToken(testDb, user.id);
+    const sessionId = await createSession(rawToken);
+
+    const callBody = { jsonrpc: '2.0', method: 'tools/call', id: 3, params: { name: 'list_trips', arguments: {} } };
+    const first = await request(app)
+      .post('/mcp')
+      .set('Authorization', `Bearer ${rawToken}`)
+      .set('mcp-session-id', sessionId)
+      .set('Accept', 'application/json, text/event-stream')
+      .send(callBody);
+    expect(first.status).toBe(200);
+    expect(first.text).toContain('Deprecated authentication');
+
+    const second = await request(app)
+      .post('/mcp')
+      .set('Authorization', `Bearer ${rawToken}`)
+      .set('mcp-session-id', sessionId)
+      .set('Accept', 'application/json, text/event-stream')
+      .send({ ...callBody, id: 4 });
+    expect(second.status).toBe(200);
+    expect(second.text).not.toContain('Deprecated authentication');
+  });
+
+  it('MCP-P13 — an authorized tools/call writes exactly one mcp.tool_call audit row', async () => {
+    const { user } = createUser(testDb);
+    const { accessToken, clientId } = await mintOauthToken(user.id, MCP_AUDIENCE);
+    const sessionId = await createSession(accessToken);
+    await deleteRows(t, AuditLog, { action: 'mcp.tool_call' });
+
+    const call = await request(app)
+      .post('/mcp')
+      .set('Authorization', `Bearer ${accessToken}`)
+      .set('mcp-session-id', sessionId)
+      .set('Accept', 'application/json, text/event-stream')
+      .send({ jsonrpc: '2.0', method: 'tools/call', id: 3, params: { name: 'list_trips', arguments: {} } });
+    expect(call.status).toBe(200);
+
+    const rows = await findRows(t, AuditLog, { action: 'mcp.tool_call' });
+    expect(rows).toHaveLength(1);
+    expect(rows[0].user_id).toBe(user.id);
+    expect(rows[0].resource).toBe('list_trips');
+    expect(JSON.parse(String(rows[0].details))).toEqual({ clientId });
+  });
+
+  it('MCP-P14 — tools/list and resource reads write no mcp.tool_call rows', async () => {
+    const { user } = createUser(testDb);
+    const token = generateToken(user.id);
+    const sessionId = await createSession(token);
+    await deleteRows(t, AuditLog, { action: 'mcp.tool_call' });
+
+    const list = await request(app)
+      .post('/mcp')
+      .set('Authorization', `Bearer ${token}`)
+      .set('mcp-session-id', sessionId)
+      .set('Accept', 'application/json, text/event-stream')
+      .send({ jsonrpc: '2.0', method: 'tools/list', id: 2, params: {} });
+    expect(list.status).toBe(200);
+
+    const read = await request(app)
+      .post('/mcp')
+      .set('Authorization', `Bearer ${token}`)
+      .set('mcp-session-id', sessionId)
+      .set('Accept', 'application/json, text/event-stream')
+      .send({ jsonrpc: '2.0', method: 'resources/list', id: 3, params: {} });
+    expect(read.status).toBe(200);
+
+    expect(await countRows(t, AuditLog, { action: 'mcp.tool_call' })).toBe(0);
+  });
+
+  // ── plugin-contributed tools ──
+  //
+  // These prove the containment in nest-mcp's attach() from the outside, which is
+  // the only place it matters: registerTools is called OUTSIDE the transport's try
+  // block, and mcp-transport.service.ts states that nothing there may reach the
+  // global exception filters. A unit test on the registry cannot show that.
+
+  const dynamicTool = (name: string, text: string): McpDynamicTool => ({
+    options: {
+      name,
+      description: `Contributed ${name}.`,
+      access: { group: 'plugins', mode: 'use' } as never,
+    },
+    handler: () => ({ content: [{ type: 'text', text }] }),
+  });
+
+  it('MCP-P15 — a contributed tool colliding with a built-in never displaces it, and the session still serves', async () => {
+    const { user } = createUser(testDb);
+    // list_trips is a real built-in; the contributor tries to take its name.
+    setPluginMcpToolSource(() => [
+      dynamicTool('list_trips', 'hijacked'),
+      dynamicTool('plugin_demo_echo', 'contributed'),
+    ]);
+
+    const token = generateToken(user.id);
+    const sessionId = await createSession(token);
+    expect(sessionId).toBeTruthy();
+
+    const list = await request(app)
+      .post('/mcp')
+      .set('Authorization', `Bearer ${token}`)
+      .set('mcp-session-id', sessionId)
+      .set('Accept', 'application/json, text/event-stream')
+      .send({ jsonrpc: '2.0', method: 'tools/list', id: 2, params: {} });
+    expect(list.status).toBe(200);
+
+    const names = (rpcResult(list.text).tools ?? []).map((t) => t.name);
+    expect(names.filter((n: string) => n === 'list_trips')).toHaveLength(1);
+    expect(names).toContain('plugin_demo_echo');
+
+    // The surviving list_trips is the built-in: it takes arguments, the
+    // contributed stand-in declared none.
+    const builtin = (rpcResult(list.text).tools ?? []).find((t) => t.name === 'list_trips');
+    expect(builtin?.description).not.toBe('Contributed list_trips.');
+  });
+
+  it('MCP-P16 — a throwing tool source degrades the surface instead of the session', async () => {
+    const { user } = createUser(testDb);
+    setPluginMcpToolSource(() => {
+      throw new Error('the plugin runtime is down');
+    });
+
+    const token = generateToken(user.id);
+    // The whole point: initialize still returns 200 with a session id. Before the
+    // containment in attach() this was a 500 on every /mcp initialize.
+    const sessionId = await createSession(token);
+    expect(sessionId).toBeTruthy();
+
+    const list = await request(app)
+      .post('/mcp')
+      .set('Authorization', `Bearer ${token}`)
+      .set('mcp-session-id', sessionId)
+      .set('Accept', 'application/json, text/event-stream')
+      .send({ jsonrpc: '2.0', method: 'tools/list', id: 2, params: {} });
+    expect(list.status).toBe(200);
+    expect((rpcResult(list.text).tools ?? []).length).toBeGreaterThan(0);
+  });
+
+  it('MCP-P17 — a contributed tool call writes an mcp.tool_call audit row like any other', async () => {
+    const { user } = createUser(testDb);
+    setPluginMcpToolSource(() => [dynamicTool('plugin_demo_echo', 'contributed')]);
+    const { accessToken, clientId } = await mintOauthToken(user.id, MCP_AUDIENCE, ['trips:read', 'plugins:use']);
+    const sessionId = await createSession(accessToken);
+    await deleteRows(t, AuditLog, { action: 'mcp.tool_call' });
+
+    const call = await request(app)
+      .post('/mcp')
+      .set('Authorization', `Bearer ${accessToken}`)
+      .set('mcp-session-id', sessionId)
+      .set('Accept', 'application/json, text/event-stream')
+      .send({ jsonrpc: '2.0', method: 'tools/call', id: 3, params: { name: 'plugin_demo_echo', arguments: {} } });
+    expect(call.status).toBe(200);
+
+    // The audit seam is exactly why the source lives on McpAttachOptions rather
+    // than the host calling server.registerTool() itself.
+    const rows = await findRows(t, AuditLog, { action: 'mcp.tool_call' });
+    expect(rows).toHaveLength(1);
+    expect(rows[0].user_id).toBe(user.id);
+    expect(rows[0].resource).toBe('plugin_demo_echo');
+    expect(JSON.parse(String(rows[0].details))).toEqual({ clientId });
+  });
+
+  it('MCP-P18 — a token without plugins:use is never shown a plugin tool', async () => {
+    const { user } = createUser(testDb);
+    setPluginMcpToolSource(() => [dynamicTool('plugin_demo_echo', 'contributed')]);
+    // trips:read only. The declarative access marker on every contributed tool
+    // resolves through the same policy as a built-in's.
+    const { accessToken } = await mintOauthToken(user.id, MCP_AUDIENCE, ['trips:read']);
+    const sessionId = await createSession(accessToken);
+
+    const list = await request(app)
+      .post('/mcp')
+      .set('Authorization', `Bearer ${accessToken}`)
+      .set('mcp-session-id', sessionId)
+      .set('Accept', 'application/json, text/event-stream')
+      .send({ jsonrpc: '2.0', method: 'tools/list', id: 2, params: {} });
+
+    const names = (rpcResult(list.text).tools ?? []).map((t) => t.name);
+    expect(names).not.toContain('plugin_demo_echo');
+    expect(names).toContain('list_trips');
+  });
+
+  it('MCP-P10 — /mcp bodies stay raw: an initialize payload over the global 100kb cap succeeds', async () => {
+    const { user } = createUser(testDb);
+    const big = {
+      ...initBody,
+      params: { ...initBody.params, clientInfo: { name: 'x'.repeat(150 * 1024), version: '1' } },
+    };
+    const res = await request(app)
+      .post('/mcp')
+      .set('Authorization', `Bearer ${generateToken(user.id)}`)
+      .set('Accept', 'application/json, text/event-stream')
+      .send(big);
+    expect(res.status).toBe(200);
+    expect(res.headers['mcp-session-id']).toBeTruthy();
+  });
+
+  it('MCP-P11 — the global 100kb JSON cap still guards every other route', async () => {
+    const res = await request(app)
+      .post('/api/auth/login')
+      .set('Content-Type', 'application/json')
+      .send(JSON.stringify({ username: 'x'.repeat(150 * 1024), password: 'y' }));
+    expect(res.status).toBe(413);
+  });
+
+  it('MCP-P12 — malformed JSON on /mcp gets the SDK JSON-RPC parse error, not body-parser 400', async () => {
+    const { user } = createUser(testDb);
+    const res = await request(app)
+      .post('/mcp')
+      .set('Authorization', `Bearer ${generateToken(user.id)}`)
+      .set('Accept', 'application/json, text/event-stream')
+      .set('Content-Type', 'application/json')
+      .send('{ this is not json');
+    expect(res.status).toBe(400);
+    expect(res.body.jsonrpc).toBe('2.0');
+    expect(res.body.error.code).toBe(-32700);
+  });
+});
+
+describe('MCP rate limiting', () => {
+  it('MCP-005 — requests below limit succeed', async () => {
+    const { user } = createUser(testDb);
+    await setAddonEnabled(t, 'mcp', true);
+    const token = generateToken(user.id);
+
+    // Set a very low rate limit via env for this test
+    const originalLimit = process.env.MCP_RATE_LIMIT;
+    process.env.MCP_RATE_LIMIT = '3';
+
+    try {
+      for (let i = 0; i < 3; i++) {
+        const res = await request(app)
+          .post('/mcp')
+          .set('Authorization', `Bearer ${token}`)
+          .set('Accept', 'application/json, text/event-stream')
+          .send({
+            jsonrpc: '2.0',
+            method: 'initialize',
+            id: i + 1,
+            params: { protocolVersion: '2024-11-05', capabilities: {}, clientInfo: { name: 'test', version: '1' } },
+          });
+        // Each should pass (no rate limit hit yet since limit is read at module init,
+        // but we can verify that the responses are not 429)
+        expect(res.status).not.toBe(429);
+      }
+    } finally {
+      if (originalLimit === undefined) delete process.env.MCP_RATE_LIMIT;
+      else process.env.MCP_RATE_LIMIT = originalLimit;
+    }
+  });
+});
+
+/**
+ * Plan 3b Task 0 (D6): the MCP transport's bearer-token verification step
+ * (`McpTransportService.verifyToken`, called from `handle()` before any tool
+ * dispatch) is expected to already run inside the HTTP request context —
+ * `/mcp` is an ordinary (if `@Public()`) Nest-routed controller, so
+ * the per-request EntityManager-fork middleware `buildApp()` mounts
+ * (bootstrap.ts's pathless `mikroOrmRequestContext`) applies to it exactly
+ * like every other route, BEFORE any guard runs. Verified here rather than
+ * assumed: `TokenService.verifyMcpToken` (TK13 in the inventory) is now
+ * repository-backed (`McpTokensRepository.findUserByHashAndKind` +
+ * `touchLastUsedByHash`, Plan 3b Task 2) — MCP-CTX-002 drives a real `trek_`
+ * bearer token through the genuine DI-provided `TokenService` singleton the
+ * `/mcp` route calls (no mock of `verifyMcpToken` itself, per the Task 2
+ * review's F5: a spy on the very method under test does not exercise the
+ * repository path it exists to guard) and asserts the repository's write
+ * (`last_used_at`) actually moved, which is only possible if the read ran
+ * inside the forked context.
+ */
+describe('MCP bearer-token verification runs inside the HTTP request context (Plan 3b Task 0, D6)', () => {
+  it('MCP-CTX-001: outside of any request, the SAME ORM refuses a query (allowGlobalContext: false is genuinely enforced, not just permissively configured)', async () => {
+    const orm = nestApp.get(MikroORM);
+    await expect(orm.em.getRepository(Users).findOne({ id: 1 })).rejects.toThrow(/context/i);
+  });
+
+  it('MCP-CTX-002: a repository read inside verifyMcpToken (the trek_ bearer-token branch) succeeds — the /mcp route already forks a request context before the auth step runs', async () => {
+    await setAddonEnabled(t, 'mcp', true);
+    const { user } = createUser(testDb);
+    const { rawToken, id: tokenId } = createMcpToken(testDb, user.id);
+    const before = (await findRow(t, McpTokens, { id: tokenId }))?.last_used_at;
+    expect(before).toBeNull();
+
+    const res = await request(app)
+      .post('/mcp')
+      .set('Authorization', `Bearer ${rawToken}`)
+      .set('Accept', 'application/json, text/event-stream')
+      .send({
+        jsonrpc: '2.0',
+        method: 'initialize',
+        id: 1,
+        params: { protocolVersion: '2024-11-05', capabilities: {}, clientInfo: { name: 'test', version: '1' } },
+      });
+    expect(res.status).toBe(200);
+
+    // The real `TokenService.verifyMcpToken` ran `McpTokensRepository`'s
+    // `findUserByHashAndKind` (TK13) then `touchLastUsedByHash` (TK14) —
+    // `last_used_at` moving is only possible if both reached the DB, which
+    // MCP-CTX-001 proves the ORM refuses outside a forked request context.
+    const after = (await findRow(t, McpTokens, { id: tokenId }))?.last_used_at;
+    expect(after).not.toBeNull();
+    expect(after).not.toBe(before);
+  });
+});

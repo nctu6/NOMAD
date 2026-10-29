@@ -1,0 +1,89 @@
+import React from 'react'
+import { useTranslation } from '../../../i18n'
+import { PermissionLevel } from '../../../store/permissionsStore'
+import { CATEGORIES, LEVEL_LABELS, usePermissionsAdmin } from '../../../components/Admin/usePermissionsAdmin'
+import { Save, RotateCcw } from 'lucide-react'
+import { MAdminButton, MAdminCard } from './MAdminUi'
+
+export default function MAdminPermissionsPanel(): React.ReactElement {
+  const { t } = useTranslation()
+  const { entryMap, values, loading, saving, dirty, handleChange, handleSave, handleReset } = usePermissionsAdmin()
+
+  if (loading) {
+    return (
+      <MAdminCard>
+        <div className="flex justify-center py-6">
+          <div className="h-8 w-8 animate-spin rounded-full border-2 border-[color:var(--m-rowbr)] border-t-[color:var(--m-ink)]" />
+        </div>
+      </MAdminCard>
+    )
+  }
+
+  return (
+    <MAdminCard>
+      {/* The title gets the full width and the actions a row of their own: beside a
+          long title they ran into its second line. */}
+      <div className="mb-1">
+        <div className="text-[length:calc(14px*var(--fs-scale-body,1))] font-extrabold text-m-ink">{t('perm.title')}</div>
+        <div className="mt-[2px] font-geist text-[length:calc(10px*var(--fs-scale-caption,1))] leading-relaxed text-m-muted">{t('perm.subtitle')}</div>
+        <div className="mt-2.5 flex items-center justify-end gap-2">
+          <MAdminButton variant="ghost" disabled={saving} onClick={handleReset}>
+            <RotateCcw size={12} strokeWidth={2.2} />
+            {t('perm.resetDefaults')}
+          </MAdminButton>
+          <MAdminButton busy={saving} disabled={saving || !dirty} onClick={handleSave}>
+            {!saving && <Save size={12} strokeWidth={2.2} />}
+            {t('common.save')}
+          </MAdminButton>
+        </div>
+      </div>
+
+      <div>
+        {CATEGORIES.map(cat => (
+          <div key={cat.id} className="border-t border-[color:var(--m-rowbr)] pt-3 mt-3">
+            <div className="mb-2 font-geist text-[0.5625rem] font-extrabold uppercase tracking-wider text-m-faint">
+              {t(`perm.cat.${cat.id}`)}
+            </div>
+            <div className="space-y-3">
+              {cat.keys.map(key => {
+                const entry = entryMap.get(key)
+                if (!entry) return null
+                const currentLevel = values[key] || entry.defaultLevel
+                const isDefault = currentLevel === entry.defaultLevel
+                return (
+                  <div key={key}>
+                    <div className="mb-[6px] flex items-start gap-2">
+                      <div className="min-w-0 flex-1">
+                        <div className="text-[0.8125rem] font-bold text-m-ink">{t(`perm.action.${key}`)}</div>
+                        <div className="mt-[1px] font-geist text-[0.625rem] leading-relaxed text-m-muted">
+                          {t(`perm.actionHint.${key}`)}
+                        </div>
+                      </div>
+                      {!isDefault && (
+                        <span className="mt-[1px] flex-none rounded-full bg-[color:color-mix(in_srgb,var(--m-st-pending)_14%,transparent)] px-[7px] py-[2px] font-geist text-[0.5625rem] font-bold text-[color:var(--m-st-pending)]">
+                          {t('perm.customized')}
+                        </span>
+                      )}
+                    </div>
+                    <select
+                      value={currentLevel}
+                      onChange={(e) => handleChange(key, e.target.value as PermissionLevel)}
+                      aria-label={t(`perm.action.${key}`)}
+                      className="h-[42px] w-full rounded-xl border border-[color:var(--m-rowbr)] bg-[color:var(--m-ic)] px-3 text-[0.84375rem] text-m-ink outline-none"
+                    >
+                      {entry.allowedLevels.map(l => (
+                        <option key={l} value={l}>
+                          {t(LEVEL_LABELS[l] || l)}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                )
+              })}
+            </div>
+          </div>
+        ))}
+      </div>
+    </MAdminCard>
+  )
+}

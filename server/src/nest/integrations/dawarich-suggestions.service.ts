@@ -1,0 +1,693 @@
+import { BucketList } from '../../db/entities/BucketList.entity';
+import { DawarichVisitSuggestions } from '../../db/entities/DawarichVisitSuggestions.entity';
+import { Places } from '../../db/entities/Places.entity';
+import { Trips } from '../../db/entities/Trips.entity';
+import { Users } from '../../db/entities/Users.entity';
+import { BucketListRepository } from '../../db/repositories/BucketList.repository';
+import {
+  DawarichVisitSuggestionsRepository,
+  type SuggestionJoinRow,
+  type SuggestionRow,
+} from '../../db/repositories/DawarichVisitSuggestions.repository';
+import { PlacesRepository } from '../../db/repositories/Places.repository';
+import { TripsRepository } from '../../db/repositories/Trips.repository';
+import { UsersRepository } from '../../db/repositories/Users.repository';
+import { AssignmentsService } from '../assignments/assignments.service';
+import { NAME_TO_CODE } from '../atlas/atlas-geo';
+import { AtlasWritesService } from '../atlas/atlas-writes.service';
+import { AtlasService } from '../atlas/atlas.service';
+import { UnitOfWork } from '../database/unit-of-work';
+import { JourneyDomainService } from '../journey/journey-domain.service';
+import { JourneyEntryStaysService } from '../journey/journey-entry-stays.service';
+import { PermissionsService } from '../permissions/permissions.service';
+import { PlacesService } from '../places/places.service';
+import { DawarichClient, DawarichError, type DawarichCreds } from './dawarich.client';
+import { minutesBetween, toNumber } from './dawarich.helpers';
+import { DawarichService } from './dawarich.service';
+import { InjectRepository } from '@mikro-orm/nestjs';
+import { Injectable } from '@nestjs/common';
+import {
+  DAWARICH_BUCKET_MATCH_MIN_MINUTES,
+  DAWARICH_BUCKET_MATCH_RADIUS_M,
+  DAWARICH_BUCKET_SCAN_LIMIT,
+  type DawarichAccept,
+  type DawarichAcceptResult,
+  type DawarichAtlasCountry,
+  type DawarichAtlasSuggestions,
+  type DawarichBucketMatch,
+  type DawarichBucketScan,
+  type DawarichSuggestion,
+  type DawarichSuggestionList,
+  type DawarichErrorCode,
+} from '@trek/shared';
+
+/**
+ * The failures that are the instance's rather than one request's: it cannot
+ * be reached (a timeout included), it turns the key away, or it asks TREK to
+ * slow down. A bucket-list scan stops at the first of them.
+ */
+const INSTANCE_FAILURES: ReadonlySet<DawarichErrorCode> = new Set<DawarichErrorCode>([
+  'unreachable',
+  'unauthorized',
+  'forbidden',
+  'rate_limited',
+]);
+
+/**
+ * What a user does with the stays a sync brought in.
+ *
+ * Everything here is an explicit act by the person the suggestion belongs to.
+ * That is the whole point of the split: the sync may look at a shared trip, but
+ * only this service is ever allowed to write to one, and only because somebody
+ * pressed something.
+ *
+ * Three destinations, deliberately not one:
+ *   - **a place on the trip**, for a stay that was a stop worth planning around;
+ *   - **a journal entry**, for one that was a moment worth writing about;
+ *   - **a bucket-list tick**, for one that fulfilled a wish.
+ * They are separate because accepting into the wrong one is a mess to undo, and
+ * a single "import" button would have to guess which was meant.
+ *
+ * The trip UI offers the first two. A wish belongs to the Atlas — it is reached
+ * once, and it is confirmed there, against the whole wishlist at once — so the
+ * third is reached from the Atlas and from MCP, not from a row in a trip's rail.
+ */
+@Injectable()
+export class DawarichSuggestionsService {
+  constructor(
+    @InjectRepository(DawarichVisitSuggestions) private readonly suggestions: DawarichVisitSuggestionsRepository,
+    private readonly dawarich: DawarichService,
+    private readonly client: DawarichClient,
+    private readonly atlas: AtlasService,
+    private readonly places: PlacesService,
+    private readonly assignments: AssignmentsService,
+    private readonly permissions: PermissionsService,
+    private readonly journey: JourneyDomainService,
+    private readonly journeyStays: JourneyEntryStaysService,
+    @InjectRepository(Trips) private readonly trips: TripsRepository,
+    @InjectRepository(Places) private readonly placesRepo: PlacesRepository,
+    @InjectRepository(BucketList) private readonly bucketList: BucketListRepository,
+    @InjectRepository(Users) private readonly users: UsersRepository,
+    private readonly uow: UnitOfWork,
+    // Tells the user's tabs once a tick or a country landed in their atlas.
+    private readonly atlasWrites: AtlasWritesService,
+  ) {}
+
+  /**
+   * The review list, newest stay first.
+   *
+   * Scoped by `user_id` in SQL rather than filtered afterwards: these rows are
+   * someone's location history, and a forgotten filter over a wider read is how
+   * that leaks.
+   */
+  async list(userId: number, filter: { tripId?: number; state?: string }): Promise<DawarichSuggestionList> {
+    await this.reopenOrphaned(userId);
+
+    const rows = await this.suggestions.list(userId, filter);
+
+    const connection = await this.dawarich.getConnection(userId);
+    return {
+      suggestions: rows.map(toWire),
+      connected: connection.connected,
+      lastSyncAt: connection.lastSyncAt,
+      lastSyncState: connection.lastSyncState,
+      lastSyncError: connection.lastSyncError,
+    };
+  }
+
+  /**
+   * Put back into review every acceptance whose result no longer exists.
+   *
+   * Deleting the place an acceptance created is how somebody says "not that
+   * one" after the fact, and the stay then has nothing to show for itself: it
+   * is unhandled again, and leaving it in the handled list is a dead end — the
+   * row points at a place that is gone and accepting it again is refused as a
+   * duplicate.
+   *
+   * The place and bucket columns are `ON DELETE SET NULL`, so a NULL beside a
+   * target that names them IS the deletion. Journey entries are written by
+   * another domain without a foreign key, so that one is asked directly.
+   *
+   * A write on a read path, deliberately: the alternative is computing the state
+   * at read time, which would make the list say "back in review" while `accept`
+   * still refused the row as already accepted.
+   */
+  private async reopenOrphaned(userId: number): Promise<void> {
+    await this.suggestions.reopenOrphaned(userId);
+  }
+
+  async getOne(userId: number, id: number): Promise<DawarichSuggestion | null> {
+    const row = await this.suggestions.getOne(userId, id);
+    return row ? toWire(row) : null;
+  }
+
+  /**
+   * Put a suggestion back into review, or take it out of the list.
+   *
+   * Reversible on purpose: dismissing is the cheap action people take to clear
+   * a backlog, and the one they regret. Restoring an *accepted* suggestion is
+   * not offered — the place or entry it produced is a separate thing now, and
+   * "undo" would have to guess whether to delete it.
+   */
+  async setState(userId: number, id: number, state: 'new' | 'dismissed'): Promise<DawarichSuggestion | null> {
+    const row = await this.suggestions.findStateForUser(id, userId);
+    if (!row) return null;
+    if (row.state === 'accepted') return this.getOne(userId, id);
+
+    await this.suggestions.setState(id, state);
+    return this.getOne(userId, id);
+  }
+
+  /**
+   * Accept a suggestion into TREK.
+   *
+   * Throws `AcceptError` rather than an HttpException so the controller, the
+   * MCP tool and any future caller each shape the failure their own way — the
+   * atlas domain's `BucketItemExistsError` is the precedent.
+   */
+  async accept(userId: number, id: number, body: DawarichAccept, sid?: string): Promise<DawarichAcceptResult> {
+    const row = await this.suggestions.findForUser(id, userId);
+    if (!row) throw new AcceptError('not_found', 'Suggestion not found', 404);
+    if (row.state === 'accepted')
+      throw new AcceptError('already_accepted', 'Suggestion has already been accepted', 409);
+
+    switch (body.target) {
+      case 'place':
+        return this.acceptAsPlace(userId, row, body, sid);
+      case 'journal':
+        return this.acceptAsJournalEntry(userId, row, body, sid);
+      case 'bucket_list':
+        return this.acceptAsBucketTick(userId, row, body, sid);
+    }
+  }
+
+  /**
+   * A stay becomes a place on a trip, optionally pinned to one of its days.
+   *
+   * Every referenced id is verified against the trip before anything is
+   * written: permission to touch the trip is not permission to attach a place
+   * to somebody else's day.
+   */
+  private async acceptAsPlace(
+    userId: number,
+    row: SuggestionRow,
+    body: DawarichAccept,
+    sid?: string,
+  ): Promise<DawarichAcceptResult> {
+    const tripId = body.tripId ?? row.trip_id;
+    if (!tripId) throw new AcceptError('trip_required', 'A trip is required to create a place', 400);
+
+    const access = await this.trips.findAccessible(tripId, userId);
+    if (!access) throw new AcceptError('not_found', 'Trip not found', 404);
+
+    // Being on the roster is not permission to write to it. Every other way of
+    // putting a place on a trip asks `place_edit` (and `day_edit` for the
+    // assignment), and on an instance where an admin narrowed either to the
+    // owner, a member accepting a stay must be refused exactly as they would be
+    // in the planner. Asked here rather than in the controller so the MCP tool
+    // cannot take a different route to the same write.
+    await this.requirePermission('place_edit', access.user_id, userId);
+
+    if (body.dayId !== undefined) {
+      await this.requirePermission('day_edit', access.user_id, userId);
+      if (!(await this.assignments.dayExists(body.dayId, tripId))) {
+        throw new AcceptError('day_not_on_trip', 'Day does not belong to this trip', 400);
+      }
+    }
+
+    const lat = body.lat ?? row.lat ?? undefined;
+    const lng = body.lng ?? row.lng ?? undefined;
+
+    // One transaction for the four writes an acceptance makes. Half of it —
+    // a place with no assignment, or a place nobody recorded as accepted — is
+    // worse than none: the stay would come back as unhandled while the place it
+    // already produced sat on the trip.
+    const { created, placeId, assignment } = await this.uow.transactional(async () => {
+      const place = await this.places.create(String(tripId), {
+        name: body.name?.trim() || row.name,
+        lat,
+        lng,
+        notes: body.notes ?? null,
+        place_time: body.time ?? timeOf(row.started_at),
+        end_time: body.endTime ?? timeOf(row.ended_at),
+        duration_minutes: row.duration_minutes > 0 ? row.duration_minutes : undefined,
+      } as Parameters<PlacesService['create']>[1]);
+
+      const id = Number((place as { id: number }).id);
+      // Stamped here rather than passed through PlacesService.create: `source`
+      // is not part of the create contract and should not become something a
+      // request body can set — a place claims to come from a recording only
+      // because this path made it.
+      await this.placesRepo.setSource(id, 'dawarich');
+
+      const day = body.dayId !== undefined ? await this.assignments.createAssignment(body.dayId, id, null) : undefined;
+      await this.markAccepted(row.id, 'place', { placeId: id });
+      // Re-read, so what goes out on the wire carries the source: everyone else
+      // on the trip should see the Dawarich mark on it too, not only the person
+      // who accepted it.
+      return { created: (await this.placesRepo.findWithTagsAndRatings(id)) ?? place, placeId: id, assignment: day };
+    });
+
+    // Outside the transaction, because both reach past the database: a
+    // broadcast of a write that then rolls back is a lie every other client
+    // believes, and the journey mirror writes on its own.
+    //
+    // The same side effects the place and assignment routes perform, because
+    // this IS a place somebody added to the trip. Skipping them is why an
+    // accepted stay used to need a page reload to show up.
+    this.places.broadcast(String(tripId), 'place:created', { place: created }, sid);
+    if (assignment) {
+      this.assignments.broadcast(String(tripId), 'assignment:created', { assignment }, sid);
+      // What the planner runs once a stop is on a day: the journeys the trip is
+      // linked to gain its skeleton and hear about it. The place hook below
+      // would add the skeleton too, but without a word to anyone.
+      await this.assignments.reconcile(tripId, sid);
+    }
+    await this.places.onCreated(String(tripId), placeId);
+
+    return {
+      suggestion: (await this.getOne(userId, row.id))!,
+      createdPlaceId: placeId,
+      createdJournalEntryId: null,
+      bucketListItemId: null,
+    };
+  }
+
+  /**
+   * A stay becomes a dated journal entry.
+   *
+   * The date comes from the stay's own local date unless corrected, and the
+   * arrival time fills the entry's time — the two fields a person would
+   * otherwise copy off the suggestion by hand.
+   */
+  private async acceptAsJournalEntry(
+    userId: number,
+    row: SuggestionRow,
+    body: DawarichAccept,
+    sid?: string,
+  ): Promise<DawarichAcceptResult> {
+    if (body.journalId === undefined) {
+      throw new AcceptError('journal_required', 'A journey is required to create an entry', 400);
+    }
+    // canEdit is the journey domain's own answer, and createEntry asks it again.
+    // Asking here too is what turns "silently did nothing" into a 403.
+    if (!(await this.journey.canEdit(body.journalId, userId))) {
+      throw new AcceptError('journal_forbidden', 'Journey not found', 404);
+    }
+
+    // The entry and the record that it was written commit together. Apart, a
+    // failure between them leaves an entry in the journal with the stay still
+    // listed as unhandled — and the next acceptance writes a second copy of it.
+    //
+    // `createEntry` stays quiet in here (its last argument) and the entry is
+    // announced below, after the commit, as the day take-over does it: an event
+    // sent from inside could outrun a rollback.
+    const entry = await this.uow.transactional(async () => {
+      const created = await this.journey.createEntry(
+        body.journalId,
+        userId,
+        {
+          type: 'entry',
+          title: body.name?.trim() || row.name,
+          story: body.notes ?? undefined,
+          entry_date: body.date ?? row.local_date,
+          entry_time: body.time ?? timeOf(row.started_at) ?? undefined,
+          location_name: body.name?.trim() || row.name,
+          location_lat: body.lat ?? row.lat ?? undefined,
+          location_lng: body.lng ?? row.lng ?? undefined,
+        },
+        sid,
+        false,
+      );
+      if (!created) throw new AcceptError('journal_forbidden', 'Journey not found', 404);
+      // Recorded on the entry like a stay of a day taken over whole (JRN-02),
+      // so that taking the day over later finds this one in the journal.
+      await this.journeyStays.record(created.journey_id, created.id, userId, [
+        {
+          sourceVisitId: row.source_visit_id,
+          name: body.name?.trim() || row.name,
+          lat: row.lat,
+          lng: row.lng,
+          startedAt: row.started_at,
+          endedAt: row.ended_at,
+          durationMinutes: row.duration_minutes,
+        },
+      ]);
+      await this.markAccepted(row.id, 'journal', { journalEntryId: created.id });
+      return created;
+    });
+    await this.journey.broadcastJourneyEvent(entry.journey_id, 'journey:entry:created', { entry }, sid);
+    return {
+      suggestion: (await this.getOne(userId, row.id))!,
+      createdPlaceId: null,
+      createdJournalEntryId: entry.id,
+      bucketListItemId: null,
+    };
+  }
+
+  /** A stay ticks off a wish. The wish must be the caller's own. */
+  private async acceptAsBucketTick(
+    userId: number,
+    row: SuggestionRow,
+    body: DawarichAccept,
+    sid?: string,
+  ): Promise<DawarichAcceptResult> {
+    const itemId = body.bucketListItemId ?? row.matched_bucket_list_item_id;
+    if (!itemId) {
+      throw new AcceptError('bucket_required', 'A bucket-list entry is required', 400);
+    }
+    const item = await this.bucketList.findForUser(itemId, userId);
+    if (!item) throw new AcceptError('not_found', 'Bucket-list entry not found', 404);
+
+    await this.uow.transactional(async () => {
+      await this.bucketList.markVisited(itemId, userId, row.started_at);
+      await this.markAccepted(row.id, 'bucket_list', { bucketItemId: itemId });
+    });
+    this.atlasWrites.announce(userId, sid);
+
+    return {
+      suggestion: (await this.getOne(userId, row.id))!,
+      createdPlaceId: null,
+      createdJournalEntryId: null,
+      bucketListItemId: itemId,
+    };
+  }
+
+  /**
+   * The instance's answer to "may this person do this on this trip".
+   *
+   * The role comes out of the users table because the only thing every caller
+   * has in common is a user id: the REST controller holds the full user, the MCP
+   * tool holds `ctx.userId`, and a permission that depended on which door
+   * somebody came through would not be a permission.
+   */
+  private async requirePermission(
+    action: 'place_edit' | 'day_edit',
+    tripOwnerId: number,
+    userId: number,
+  ): Promise<void> {
+    const role = await this.users.getRole(userId);
+    const allowed = await this.permissions.checkPermission(
+      action,
+      role ?? 'user',
+      tripOwnerId,
+      userId,
+      tripOwnerId !== userId,
+    );
+    if (!(await allowed)) throw new AcceptError('forbidden', 'No permission', 403);
+  }
+
+  /**
+   * Record what the acceptance produced, and freeze the hash it was accepted at.
+   *
+   * `accepted_hash` is what makes "the source changed since you accepted this"
+   * answerable at all: without it there is nothing to compare the current hash
+   * against, and the flag would either never fire or fire forever.
+   */
+  private async markAccepted(
+    id: number,
+    target: 'place' | 'journal' | 'bucket_list',
+    ids: { placeId?: number; journalEntryId?: number; bucketItemId?: number },
+  ): Promise<void> {
+    await this.suggestions.markAccepted(id, {
+      target,
+      placeId: ids.placeId ?? null,
+      journalEntryId: ids.journalEntryId ?? null,
+      bucketItemId: ids.bucketItemId ?? null,
+    });
+  }
+
+  // ── Bucket-list scan ───────────────────────────────────────────────────────
+
+  /**
+   * Ask Dawarich, wish by wish, whether the user ever actually got there.
+   *
+   * This is the thorough half of the bucket-list match. The sync already links
+   * a wish to a stay when Dawarich's own detector happened to produce one
+   * nearby; this asks the recordings directly, which finds the places the
+   * detector never called a visit — the viewpoint you stopped at for half an
+   * hour on the way somewhere else.
+   *
+   * One upstream request per wish, so it is capped and explicitly triggered
+   * rather than run on a timer. The cap is reported, never silent: a user with
+   * eighty wishes must not be told their other thirty had no match.
+   *
+   * For the same reason an instance that cannot answer at all ends the scan
+   * with its error instead of reporting every wish as unmatched: one that does
+   * not answer would otherwise hold the request for a timeout per wish, and
+   * one that refuses the key would read as "you never got anywhere".
+   */
+  async scanBucketList(userId: number): Promise<DawarichBucketScan> {
+    const creds = await this.dawarich.getCredentials(userId);
+    if (!creds) throw new AcceptError('not_connected', 'Dawarich is not connected', 400);
+
+    const items: BucketRow[] = await this.bucketList.listForScan(userId);
+    const withCoords = items.filter((item) => item.lat !== null && item.lng !== null);
+    const skipped = items.length - withCoords.length;
+    const batch = withCoords.slice(0, DAWARICH_BUCKET_SCAN_LIMIT);
+
+    const matches: DawarichBucketMatch[] = [];
+    for (const item of batch) {
+      matches.push({
+        itemId: item.id,
+        name: item.name,
+        match: await this.bestStayNear(creds, item.lat!, item.lng!),
+        alreadyVisited: item.visited_at !== null,
+      });
+    }
+
+    return {
+      matches,
+      skippedWithoutCoordinates: skipped,
+      truncated: withCoords.length > batch.length,
+      fetchedAt: new Date().toISOString(),
+    };
+  }
+
+  /**
+   * The longest recorded stay near a coordinate that clears both thresholds.
+   *
+   * Longest rather than nearest: of two stays at the same landmark, the one
+   * that lasted two hours is the visit and the one that lasted four minutes is
+   * the bus stopping outside.
+   */
+  private async bestStayNear(creds: DawarichCreds, lat: number, lng: number): Promise<DawarichBucketMatch['match']> {
+    let stays;
+    try {
+      stays = await this.client.findVisitsNear(creds, lat, lng, DAWARICH_BUCKET_MATCH_RADIUS_M, 20);
+    } catch (err) {
+      // The instance itself is down or turns the key away: every later wish
+      // would fail the same way, so the scan ends here with that error.
+      if (err instanceof DawarichError && INSTANCE_FAILURES.has(err.code)) throw err;
+      // One wish that could not be checked is not a failed scan; it reports as
+      // "no match found" and the user can run it again.
+      return null;
+    }
+
+    let best: DawarichBucketMatch['match'] = null;
+    for (const stay of stays) {
+      const details = stay.visit_details ?? null;
+      const minutes =
+        toNumber(details?.duration_minutes) ??
+        (details?.start_time && details?.end_time ? minutesBetween(details.start_time, details.end_time) : 0);
+      if (minutes < DAWARICH_BUCKET_MATCH_MIN_MINUTES) continue;
+
+      const distance = toNumber(stay.distance_meters) ?? DAWARICH_BUCKET_MATCH_RADIUS_M;
+      if (distance > DAWARICH_BUCKET_MATCH_RADIUS_M) continue;
+
+      // A stay with no readable timestamp at either end cannot be dated, and a
+      // wish ticked off on 1970-01-01 is worse than one that is not offered.
+      const at = details?.start_time ?? isoFromUnix(toNumber(stay.timestamp));
+      if (!at) continue;
+      if (!best || minutes > best.minutes) {
+        best = {
+          at,
+          minutes,
+          distanceMeters: Math.round(distance),
+          points: toNumber(stay.points_count) ?? 0,
+        };
+      }
+    }
+    return best;
+  }
+
+  /** Tick off wishes the user confirmed after reading a scan. */
+  async confirmBucketVisits(userId: number, itemIds: number[], visitedAt?: string, sid?: string): Promise<number> {
+    const now = new Date().toISOString();
+    let updated = 0;
+    await this.uow.transactional(async () => {
+      for (const itemId of itemIds) {
+        // The date is the one the wish was actually reached on. A wish somebody
+        // got to in 2023 ticked off with today's date is a wrong entry in a list
+        // people keep for years, so "now" is only the answer when nothing else
+        // knows better: the caller's own value first, then the stay this wish
+        // was matched to, then the clock.
+        const stamp = visitedAt ?? (await this.matchedStayStart(userId, itemId)) ?? now;
+        updated += await this.bucketList.markVisitedIfUnset(itemId, userId, stamp);
+      }
+    });
+    if (updated > 0) this.atlasWrites.announce(userId, sid);
+    return updated;
+  }
+
+  /** When the stay that claimed this wish began, if one did. */
+  private async matchedStayStart(userId: number, itemId: number): Promise<string | null> {
+    return this.suggestions.matchedStayStart(userId, itemId);
+  }
+
+  /** Undo a tick. Clears the source with it, so the entry reads as untouched again. */
+  async clearBucketVisit(userId: number, itemId: number, sid?: string): Promise<boolean> {
+    const cleared = await this.bucketList.clearVisited(itemId, userId);
+    if (cleared) this.atlasWrites.announce(userId, sid);
+    return cleared;
+  }
+
+  // ── Atlas ──────────────────────────────────────────────────────────────────
+
+  /**
+   * Countries and cities the recordings put the user in, offered to the Atlas.
+   *
+   * Offered, never applied. The Atlas is a thing people curate — it has
+   * tombstones precisely so a country somebody removed stays removed — and a
+   * background job that ticked countries off would fight that. `alreadyVisited`
+   * marks the ones TREK already counts, so the list reads as "these are new"
+   * rather than as a wall of things the user has known for years.
+   *
+   * Dawarich names countries rather than coding them, so the name is mapped
+   * through the Atlas's own table. Anything that does not resolve is listed by
+   * name instead of being dropped: a country TREK cannot code is still a
+   * country the user went to, and silently losing it would be the worse bug.
+   */
+  async atlasSuggestions(userId: number, from: Date, to: Date): Promise<DawarichAtlasSuggestions> {
+    const creds = await this.dawarich.getCredentials(userId);
+    if (!creds) throw new AcceptError('not_connected', 'Dawarich is not connected', 400);
+
+    const countries = await this.client.listVisitedCities(creds, from, to);
+
+    // "Already on the map" is what the Atlas itself paints as visited: the
+    // countries a finished trip's places resolve to, a booking landed in, or a
+    // hand mark added, minus the ones the user removed. Reading only the hand
+    // marks would offer somebody their own past trips as news.
+    const visited = new Set<string>();
+    for (const country of (await this.atlas.stats(userId)).countries) {
+      // The shape for a user without trips carries no status; everything in it
+      // is a hand mark, which the Atlas draws as visited.
+      if (!('status' in country) || country.status === 'visited') visited.add(country.code.toUpperCase());
+    }
+
+    const resolved: DawarichAtlasCountry[] = [];
+    const unresolved: string[] = [];
+
+    for (const entry of countries) {
+      const name = (entry?.country ?? '').trim();
+      if (!name) continue;
+      const code = NAME_TO_CODE[name.toLowerCase()];
+      if (!code) {
+        unresolved.push(name);
+        continue;
+      }
+      resolved.push({
+        countryCode: code,
+        sourceName: name,
+        cities: (entry.cities ?? [])
+          .map((city) => ({
+            name: city?.city ?? '',
+            minutes: toNumber(city?.stayed_for) ?? 0,
+            lastSeenAt: isoFromUnix(toNumber(city?.timestamp)),
+          }))
+          .filter((city) => city.name !== ''),
+        alreadyVisited: visited.has(code),
+      });
+    }
+
+    return { countries: resolved, unresolved, fetchedAt: new Date().toISOString() };
+  }
+
+  /**
+   * Confirm a batch of countries into the Atlas.
+   *
+   * Goes through `AtlasService.markCountry`, which is what lifts the tombstone
+   * a previous removal left behind and keeps the two write paths from drifting.
+   * `INSERT OR IGNORE` underneath means a country already marked by hand keeps
+   * its own provenance — confirming it again does not relabel it as imported.
+   */
+  async acceptAtlasCountries(userId: number, codes: string[], sid?: string): Promise<number> {
+    let marked = 0;
+    await this.uow.transactional(async () => {
+      for (const raw of codes) {
+        const code = raw.trim().toUpperCase();
+        if (!/^[A-Z]{2}$/.test(code)) continue;
+        // Counted only when it was actually added: "3 countries added" must not
+        // include ones that were already on the map.
+        if (await this.atlas.markCountry(userId, code, 'dawarich')) marked++;
+      }
+    });
+    // Once, after the commit, rather than per country from inside the transaction.
+    if (marked > 0) this.atlasWrites.announce(userId, sid);
+    return marked;
+  }
+}
+
+/** A refusal with a code the controller and the MCP tool each render their own way. */
+export class AcceptError extends Error {
+  readonly code: string;
+  readonly status: number;
+  constructor(code: string, message: string, status: number) {
+    super(message);
+    this.name = 'AcceptError';
+    this.code = code;
+    this.status = status;
+  }
+}
+
+/** `HH:MM` out of an ISO timestamp, in the offset the timestamp carries. */
+function timeOf(iso: string): string | null {
+  return /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/.test(iso) ? iso.slice(11, 16) : null;
+}
+
+function toWire(row: SuggestionJoinRow): DawarichSuggestion {
+  return {
+    id: row.id,
+    sourceVisitId: row.source_visit_id,
+    tripId: row.trip_id,
+    tripTitle: row.trip_title ?? null,
+    name: row.name,
+    lat: row.lat,
+    lng: row.lng,
+    startedAt: row.started_at,
+    endedAt: row.ended_at,
+    durationMinutes: row.duration_minutes,
+    localDate: row.local_date,
+    sourceStatus: row.source_status === 'confirmed' ? 'confirmed' : 'suggested',
+    confidence: row.confidence,
+    confidenceBand: row.confidence_band,
+    state: row.state === 'accepted' || row.state === 'dismissed' ? row.state : 'new',
+    target: row.target === 'place' || row.target === 'journal' || row.target === 'bucket_list' ? row.target : null,
+    acceptedPlaceId: row.accepted_place_id,
+    acceptedJournalEntryId: row.accepted_journal_entry_id,
+    acceptedBucketListItemId: row.accepted_bucket_list_item_id,
+    // Only meaningful once something was accepted: before that there is no
+    // "what you agreed to" to have diverged from.
+    sourceChanged: row.accepted_hash !== null && row.accepted_hash !== row.source_hash,
+    sourceMissing: row.source_missing_at !== null,
+    matchedBucketListItemId: row.matched_bucket_list_item_id,
+    matchedBucketListName: row.matched_bucket_name ?? null,
+    countryCode: row.country_code,
+    firstSeenAt: row.first_seen_at,
+    lastSeenAt: row.last_seen_at,
+  };
+}
+
+/** A Unix timestamp as ISO-8601, or null when there was none to read. */
+function isoFromUnix(seconds: number | null | undefined): string | null {
+  if (seconds === null || seconds === undefined || !Number.isFinite(seconds)) return null;
+  return new Date(seconds * 1000).toISOString();
+}
+
+interface BucketRow {
+  id: number;
+  name: string;
+  lat: number | null;
+  lng: number | null;
+  visited_at: string | null;
+}

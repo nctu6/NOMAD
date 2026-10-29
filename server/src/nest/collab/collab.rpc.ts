@@ -1,0 +1,123 @@
+import { ADDON_IDS } from '../../addons';
+import { PluginGuards } from '../../nest-rpc/plugin-guards.service';
+import { BadParams } from '../../nest-rpc/rpc-errors';
+import { PluginController, PluginMethod } from '../../nest-rpc/rpc-kit/decorators';
+import type { PluginRpcContext } from '../../nest-rpc/rpc-kit/types';
+import { asPayload, num } from '../../nest-rpc/rpc-params';
+import { RealtimeService } from '../realtime/realtime.service';
+import { CollabService } from './collab.service';
+
+const COLLAB_EDIT_ACTION = 'collab_edit';
+
+/**
+ * The collab surface a plugin may reach (#plugins): notes, polls and messages.
+ *
+ * Every method is addon-gated. That gate used to live in the deps factory's closure
+ * rather than in the router, which is exactly how it could have been lost in this
+ * move: a handler calling CollabService directly would still work, just without the
+ * addon check, and nothing in the type system or the router tests would notice.
+ * Hence requireCollabAddon on every single method, and an addon-off case per method
+ * in the suite.
+ *
+ * Reads need membership only. The write side carries collab_edit on top.
+ */
+@PluginController()
+export class CollabRpc {
+  constructor(
+    private readonly collab: CollabService,
+    private readonly realtime: RealtimeService,
+    private readonly guards: PluginGuards,
+  ) {}
+
+  @PluginMethod('collab.listNotes', { permission: 'db:read:collab' })
+  listNotes(params: Record<string, unknown>, ctx: PluginRpcContext): unknown {
+    return this.guards.tripRead(params, ctx, async () => {
+      await this.requireCollabAddon();
+      return (await this.collab.listNotes(num(params.tripId, 'tripId'))) as unknown[];
+    });
+  }
+
+  @PluginMethod('collab.listPolls', { permission: 'db:read:collab' })
+  listPolls(params: Record<string, unknown>, ctx: PluginRpcContext): unknown {
+    return this.guards.tripRead(params, ctx, async () => {
+      await this.requireCollabAddon();
+      return (await this.collab.listPolls(num(params.tripId, 'tripId'))) as unknown[];
+    });
+  }
+
+  @PluginMethod('collab.listMessages', { permission: 'db:read:collab' })
+  listMessages(params: Record<string, unknown>, ctx: PluginRpcContext): unknown {
+    return this.guards.tripRead(params, ctx, async () => {
+      await this.requireCollabAddon();
+      const before = params.before != null ? num(params.before, 'before') : undefined;
+      return (await this.collab.listMessages(num(params.tripId, 'tripId'), before)) as unknown[];
+    });
+  }
+
+  @PluginMethod('collab.createNote', { permission: 'db:write:collab' })
+  async createNote(params: Record<string, unknown>, ctx: PluginRpcContext): Promise<unknown> {
+    const tripId = num(params.tripId, 'tripId');
+    const actor = this.guards.requireActor(ctx, 'collab note');
+    const input = asPayload(params.input);
+    if (typeof input.title !== 'string' || input.title.trim() === '') throw new BadParams('note title is required');
+    await this.guards.requireTripEdit(tripId, actor, COLLAB_EDIT_ACTION);
+    await this.requireCollabAddon();
+    const note = await this.collab.createNote(String(tripId), actor, input as never);
+    this.realtime.broadcast(tripId, 'collab:note:created', { note }, undefined);
+    return note;
+  }
+
+  @PluginMethod('collab.createPoll', { permission: 'db:write:collab' })
+  async createPoll(params: Record<string, unknown>, ctx: PluginRpcContext): Promise<unknown> {
+    const tripId = num(params.tripId, 'tripId');
+    const actor = this.guards.requireActor(ctx, 'collab poll');
+    const input = asPayload(params.input);
+    if (typeof input.question !== 'string' || input.question.trim() === '')
+      throw new BadParams('poll question is required');
+    if (!Array.isArray(input.options) || input.options.length < 2)
+      throw new BadParams('a poll needs at least two options');
+    await this.guards.requireTripEdit(tripId, actor, COLLAB_EDIT_ACTION);
+    await this.requireCollabAddon();
+    const poll = await this.collab.createPoll(String(tripId), actor, input as never);
+    this.realtime.broadcast(tripId, 'collab:poll:created', { poll }, undefined);
+    return poll;
+  }
+
+  @PluginMethod('collab.votePoll', { permission: 'db:write:collab' })
+  async votePoll(params: Record<string, unknown>, ctx: PluginRpcContext): Promise<unknown> {
+    const tripId = num(params.tripId, 'tripId');
+    const actor = this.guards.requireActor(ctx, 'collab poll');
+    await this.guards.requireTripEdit(tripId, actor, COLLAB_EDIT_ACTION);
+    await this.requireCollabAddon();
+    const result = await this.collab.votePoll(
+      String(tripId),
+      String(num(params.pollId, 'pollId')),
+      actor,
+      num(params.optionIndex, 'optionIndex'),
+    );
+    // The service reports its own validation failures rather than throwing.
+    if (result.error) throw new BadParams(result.error);
+    this.realtime.broadcast(tripId, 'collab:poll:voted', { poll: result.poll }, undefined);
+    return result.poll;
+  }
+
+  @PluginMethod('collab.createMessage', { permission: 'db:write:collab' })
+  async createMessage(params: Record<string, unknown>, ctx: PluginRpcContext): Promise<unknown> {
+    const tripId = num(params.tripId, 'tripId');
+    const actor = this.guards.requireActor(ctx, 'collab message');
+    if (typeof params.text !== 'string' || params.text.trim() === '' || params.text.length > 4000) {
+      throw new BadParams('message text is required (max 4000 chars)');
+    }
+    await this.guards.requireTripEdit(tripId, actor, COLLAB_EDIT_ACTION);
+    await this.requireCollabAddon();
+    const replyTo = typeof params.replyTo === 'number' ? params.replyTo : null;
+    const result = await this.collab.createMessage(String(tripId), actor, params.text, replyTo);
+    if (result.error) throw new BadParams(result.error);
+    this.realtime.broadcast(tripId, 'collab:message:created', { message: result.message }, undefined);
+    return result.message;
+  }
+
+  private async requireCollabAddon(): Promise<void> {
+    await this.guards.requireAddon(ADDON_IDS.COLLAB, 'collab');
+  }
+}

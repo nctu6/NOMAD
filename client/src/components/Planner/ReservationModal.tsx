@@ -1,78 +1,90 @@
-import { useState, useEffect, useRef, useMemo } from 'react'
-import Modal from '../shared/Modal'
+import { useEffect, useRef, useMemo, useId } from 'react'
+import { useParams } from 'react-router'
+import { useTripStore } from '../../store/tripStore'
+import { useAddonStore } from '../../store/addonStore'
 import CustomSelect from '../shared/CustomSelect'
-import { Plane, Hotel, Utensils, Train, Car, Ship, Ticket, FileText, Users, Paperclip, X, ExternalLink, Link2 } from 'lucide-react'
+import { BookingCodeInput } from '../shared/BookingCode'
+import { buildAssignmentOptions } from './assignmentOptions'
+import AddressInput from './AddressInput'
+import { Link2 } from 'lucide-react'
 import { useToast } from '../shared/Toast'
 import { useTranslation } from '../../i18n'
 import { CustomDatePicker } from '../shared/CustomDateTimePicker'
 import CustomTimePicker from '../shared/CustomTimePicker'
-import type { Day, Place, Reservation, TripFile, AssignmentsMap } from '../../types'
+import type { Day, Place, Reservation, TripFile, AssignmentsMap, Accommodation } from '../../types'
+import { BookingNotesFilesCosts } from './BookingNotesFilesCosts'
+import { importedPriceEntry } from './importedPrice'
+import { TravelerPicker } from './TravelerPicker'
+import type { TripMember } from '../Budget/BudgetPanelMemberChips'
+import type { BookingExpenseRequest } from './BookingCostsSection.types'
+import type { BookingReviewDraft } from './parsedItemToDraft'
+import { stayPlaces } from '../../utils/stayPlaces'
+import { BookingDialogHeader, StatusPill } from './bookings/BookingDialogShell'
+import { DialogShell, DialogFooter, FooterSpacer, DialogButton } from '../shared/DialogShell'
+import { INPUT, GRID_2, GRID_3, EditorField, PillSelect } from '../shared/dialogParts'
+import { typeInfo } from './bookings/bookingsModel'
+import type { StatusTone } from './bookings/bookingParts'
+import { RESERVATION_TYPE_OPTIONS as TYPE_OPTIONS, reservationFieldsFrom, reservationFieldsFromPrefill, selectedDayDate } from './reservationFormModel'
+import { useReservationForm } from './useReservationForm'
+import { expenseRequestAfterSave, pendingImportExpense, travelerIdsOf, travelersChanged, filesNeedConnection, uploadBookingFiles } from './bookingFormModel'
+import { useBookingExpenseIntent } from './useBookingExpenseIntent'
+import { useBookingFileAttach } from './useBookingFileAttach'
+import StayPinStatus from './StayPinStatus'
 
-const TYPE_OPTIONS = [
-  { value: 'flight',     labelKey: 'reservations.type.flight',     Icon: Plane },
-  { value: 'hotel',      labelKey: 'reservations.type.hotel',      Icon: Hotel },
-  { value: 'restaurant', labelKey: 'reservations.type.restaurant', Icon: Utensils },
-  { value: 'train',      labelKey: 'reservations.type.train',      Icon: Train },
-  { value: 'car',        labelKey: 'reservations.type.car',        Icon: Car },
-  { value: 'cruise',     labelKey: 'reservations.type.cruise',     Icon: Ship },
-  { value: 'event',      labelKey: 'reservations.type.event',      Icon: Ticket },
-  { value: 'tour',       labelKey: 'reservations.type.tour',       Icon: Users },
-  { value: 'other',      labelKey: 'reservations.type.other',      Icon: FileText },
-]
-
-function buildAssignmentOptions(days, assignments, t, locale) {
-  const options = []
-  for (const day of (days || [])) {
-    const da = (assignments?.[String(day.id)] || []).slice().sort((a, b) => a.order_index - b.order_index)
-    if (da.length === 0) continue
-    const dayLabel = day.title || t('dayplan.dayN', { n: day.day_number })
-    const dateStr = day.date ? ` · ${formatDate(day.date, locale)}` : ''
-    const groupLabel = `${dayLabel}${dateStr}`
-    // Group header (non-selectable)
-    options.push({ value: `_header_${day.id}`, label: groupLabel, disabled: true, isHeader: true })
-    for (let i = 0; i < da.length; i++) {
-      const place = da[i].place
-      if (!place) continue
-      const timeStr = place.place_time ? ` · ${place.place_time}${place.end_time ? ' – ' + place.end_time : ''}` : ''
-      options.push({
-        value: da[i].id,
-        label: `  ${i + 1}. ${place.name}${timeStr}`,
-        searchLabel: place.name,
-        groupLabel,
-        dayDate: day.date || null,
-      })
-    }
-  }
-  return options
+const EMPTY_FORM = {
+  title: '', type: 'other', status: 'pending',
+  reservation_time: '', reservation_end_time: '', end_date: '', location: '', confirmation_number: '',
+  notes: '', url: '', assignment_id: '' as string | number, accommodation_id: '' as string | number,
+  place_id: '' as string | number,
+  meta_check_in_time: '', meta_check_in_end_time: '', meta_check_out_time: '',
+  hotel_place_id: '' as string | number, hotel_start_day: '' as string | number, hotel_end_day: '' as string | number,
+  hotel_address: '',
 }
 
 interface ReservationModalProps {
   isOpen: boolean
   onClose: () => void
-  onSave: (data: Record<string, string | number | null>) => Promise<void> | void
+  onSave: (data: Record<string, string | number | null> & { title: string }) => Promise<Reservation | undefined>
   reservation: Reservation | null
   days: Day[]
   places: Place[]
   assignments: AssignmentsMap
   selectedDayId: number | null
   files?: TripFile[]
-  onFileUpload: (fd: FormData) => Promise<void>
+  onFileUpload?: (fd: FormData) => Promise<unknown>
   onFileDelete: (fileId: number) => Promise<void>
+  accommodations?: Accommodation[]
+  defaultAssignmentId?: number | null
+  onOpenExpense?: (req: BookingExpenseRequest) => void
+  // Pre-fill a brand-new booking from a parsed import item (review-before-save).
+  // Distinct from `reservation`: the form is populated but stays in create mode.
+  prefill?: BookingReviewDraft | null
+  /** Trip members + guests, for the traveler picker (#1517). */
+  tripMembers?: TripMember[]
 }
 
-export function ReservationModal({ isOpen, onClose, onSave, reservation, days, places, assignments, selectedDayId, files = [], onFileUpload, onFileDelete }: ReservationModalProps) {
+export function ReservationModal({ isOpen, onClose, onSave, reservation, days, places, assignments, selectedDayId, files = [], onFileUpload, onFileDelete, accommodations = [], defaultAssignmentId = null, onOpenExpense, prefill = null, tripMembers = [] }: ReservationModalProps) {
+  const { id: tripId } = useParams<{ id: string }>()
+  const setReservationTravelers = useTripStore(s => s.setReservationTravelers)
   const toast = useToast()
   const { t, locale } = useTranslation()
   const fileInputRef = useRef(null)
+  const titleId = useId()
 
-  const [form, setForm] = useState({
-    title: '', type: 'other', status: 'pending',
-    reservation_time: '', location: '', confirmation_number: '',
-    notes: '', assignment_id: '',
+  const isBudgetEnabled = useAddonStore(s => s.isEnabled('budget'))
+  const deleteBudgetItem = useTripStore(s => s.deleteBudgetItem)
+  // Set right before submit when the user clicked create/edit expense.
+  const expense = useBookingExpenseIntent(() => handleSubmit(), {
+    remove: item => deleteBudgetItem(Number(tripId), item.id),
+    onError: () => toast.error(t('common.unknownError')),
   })
-  const [isSaving, setIsSaving] = useState(false)
-  const [uploadingFile, setUploadingFile] = useState(false)
-  const [pendingFiles, setPendingFiles] = useState([])
+
+  const {
+    form, setForm, set, isSaving, setIsSaving, pendingFiles, setPendingFiles, travelerIds, setTravelerIds, toggleTraveler,
+    isEndBeforeStart, endTimeBeforeStartTime, dateBounds: tripDateRange, startDate, startTime, setStartDate, setStartTime, takeStopDay,
+    pickPlace, pickHotelPlace, pickHotelStart, pickHotelEnd, stayPin, saveData: buildSaveData,
+  } = useReservationForm(EMPTY_FORM, days, places)
+  const attach = useBookingFileAttach({ reservation, files, onFileUpload, setPendingFiles, toast, t })
 
   const assignmentOptions = useMemo(
     () => buildAssignmentOptions(days, assignments, t, locale),
@@ -80,135 +92,163 @@ export function ReservationModal({ isOpen, onClose, onSave, reservation, days, p
   )
 
   useEffect(() => {
+    // Match an existing place by name (exact, then loose contains) for hotels.
+    const matchPlaceId = (name: string | undefined): string | number => {
+      const n = (name || '').trim().toLowerCase()
+      if (!n) return ''
+      const exact = places.find(p => p.name?.trim().toLowerCase() === n)
+      if (exact) return exact.id
+      const loose = places.find(p => p.name && (p.name.toLowerCase().includes(n) || n.includes(p.name.toLowerCase())))
+      return loose?.id ?? ''
+    }
+
+    setTravelerIds(travelerIdsOf(reservation))
+    stayPin.reset()
     if (reservation) {
+      setForm({ ...reservationFieldsFrom(reservation, accommodations, places, true), assignment_id: reservation.assignment_id || '' })
+    } else if (prefill) {
+      // Review-before-save: populate from a parsed import item, stay in create mode.
+      const hotelPlaceId = matchPlaceId(prefill._venue?.name || prefill.title)
       setForm({
-        title: reservation.title || '',
-        type: reservation.type || 'other',
-        status: reservation.status || 'pending',
-        reservation_time: reservation.reservation_time ? reservation.reservation_time.slice(0, 16) : '',
-        reservation_end_time: reservation.reservation_end_time || '',
-        location: reservation.location || '',
-        confirmation_number: reservation.confirmation_number || '',
-        notes: reservation.notes || '',
-        assignment_id: reservation.assignment_id || '',
+        ...reservationFieldsFromPrefill(prefill, days, true),
+        assignment_id: defaultAssignmentId ?? '',
+        accommodation_id: '',
+        place_id: '',
+        hotel_place_id: hotelPlaceId,
       })
+      // A stay the trip does not hold yet: find it on the map now, so the review
+      // says whether it will show there before it is saved.
+      if (prefill.type === 'hotel' && !hotelPlaceId) stayPin.lookUp(prefill._venue?.name || prefill.title, prefill._venue?.address)
+      // Seed the booking's Files with the document this item was parsed from.
+      setPendingFiles(prefill._sourceFiles ?? [])
     } else {
-      setForm({
-        title: '', type: 'other', status: 'pending',
-        reservation_time: '', reservation_end_time: '', location: '', confirmation_number: '',
-        notes: '', assignment_id: '',
-      })
+      setForm({ ...EMPTY_FORM, assignment_id: defaultAssignmentId ?? '' })
       setPendingFiles([])
     }
-  }, [reservation, isOpen, selectedDayId])
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [reservation, prefill, isOpen, selectedDayId, defaultAssignmentId, days, places, accommodations])
 
-  const set = (field, value) => setForm(prev => ({ ...prev, [field]: value }))
-
-  const handleSubmit = async (e) => {
-    e.preventDefault()
+  const handleSubmit = async (e?: { preventDefault?: () => void }) => {
+    e?.preventDefault?.()
     if (!form.title.trim()) return
+    if (isEndBeforeStart) { toast.error(t('reservations.validation.endBeforeStart')); return }
+    if (filesNeedConnection(pendingFiles, !!onFileUpload)) { toast.error(t('reservations.filesNeedConnection')); return }
     setIsSaving(true)
     try {
-      const saved = await onSave({
-        ...form,
-        assignment_id: form.assignment_id || null,
-      })
-      if (!reservation?.id && saved?.id && pendingFiles.length > 0) {
-        for (const file of pendingFiles) {
-          const fd = new FormData()
-          fd.append('file', file)
-          fd.append('reservation_id', saved.id)
-          fd.append('description', form.title)
-          await onFileUpload(fd)
+      const saveData = buildSaveData({ assignmentId: form.assignment_id, isEdit: !!reservation?.id, withCheckInEnd: true })
+      // Imported booking → auto-create the linked cost from the parsed price (what the
+      // old direct import did). Only on create (not edit) and only when there's a price.
+      if (!reservation && prefill && isBudgetEnabled) {
+        const entry = importedPriceEntry(prefill.metadata, form.type)
+        if (entry) saveData.create_budget_entry = entry
+      }
+      const saved = await onSave(saveData as Record<string, string | number | null> & { title: string })
+      // Persist the traveler assignment once we have the reservation id (create → save
+      // result, edit → existing reservation), and only when it actually changed (#1517).
+      const savedId = saved?.id ?? reservation?.id
+      if (savedId && tripId) {
+        const { changed, nextIds } = travelersChanged(reservation, travelerIds)
+        if (changed) {
+          try { await setReservationTravelers(tripId, savedId, nextIds) } catch { toast.error(t('common.unknownError')) }
         }
       }
+      if (!reservation?.id && saved?.id && pendingFiles.length > 0) {
+        await uploadBookingFiles(onFileUpload, saved.id, pendingFiles, form.title)
+      }
+      // Open the Costs editor for the saved booking when the user asked to
+      // create/edit its linked expense (gated on saved?.id).
+      const expenseRequest = expenseRequestAfterSave(expense.take(), saved, form, days)
+      if (expenseRequest && onOpenExpense) onOpenExpense(expenseRequest)
     } finally {
       setIsSaving(false)
     }
   }
 
-  const handleFileChange = async (e) => {
-    const file = (e.target as HTMLInputElement).files?.[0]
-    if (!file) return
-    if (reservation?.id) {
-      setUploadingFile(true)
-      try {
-        const fd = new FormData()
-        fd.append('file', file)
-        fd.append('reservation_id', reservation.id)
-        fd.append('description', reservation.title)
-        await onFileUpload(fd)
-        toast.success(t('reservations.toast.fileUploaded'))
-      } catch {
-        toast.error(t('reservations.toast.uploadError'))
-      } finally {
-        setUploadingFile(false)
-        e.target.value = ''
-      }
-    } else {
-      setPendingFiles(prev => [...prev, file])
-      e.target.value = ''
+  // On an import review (not yet saved), preview the parsed price as the cost that will be
+  // linked: the same entry the save sends, so the two cannot name different currencies.
+  const pendingExpense = pendingImportExpense(reservation, prefill, form.type)
+
+  const status = form.status === 'confirmed' ? 'confirmed' : 'pending'
+  const tone: StatusTone = form.type === 'transit' ? 'transit' : status
+  const shownType = typeInfo(form.type)
+  const saveDisabled = isSaving || !form.title.trim() || isEndBeforeStart
+  const dayOptions = days.map(d => {
+    const dateBadge = d.date ? (formatDate(d.date, locale) ?? undefined) : undefined
+    const dayBadge = d.title ? t('dayplan.dayN', { n: d.day_number }) : undefined
+    return {
+      value: d.id,
+      label: d.title || t('dayplan.dayN', { n: d.day_number }),
+      badge: dateBadge ?? dayBadge,
     }
-  }
+  })
 
-  const attachedFiles = reservation?.id ? files.filter(f => f.reservation_id === reservation.id) : []
+  const header = (
+    <BookingDialogHeader
+      tone={tone}
+      type={form.type}
+      labelId={titleId}
+      onClose={onClose}
+      eyebrow={reservation ? t('reservations.editTitle') : t('reservations.newTitle')}
+      titleInput={{
+        value: form.title,
+        onChange: v => set('title', v),
+        label: t('reservations.titleLabel'),
+        placeholder: t('reservations.titlePlaceholder'),
+        required: true,
+      }}
+      pills={(
+        <>
+          <StatusPill status={status} onToggle={() => set('status', status === 'confirmed' ? 'pending' : 'confirmed')} />
+          <PillSelect
+            label={t('reservations.bookingType')}
+            value={form.type}
+            onChange={value => set('type', value)}
+            options={TYPE_OPTIONS.map(o => ({
+              value: o.value,
+              label: t(o.labelKey),
+              icon: <o.Icon size={14} style={{ color: typeInfo(o.value).color }} />,
+            }))}
+            fallback={{ label: t(shownType.chipKey), icon: <shownType.Icon size={14} style={{ color: shownType.color }} /> }}
+          />
+        </>
+      )}
+    />
+  )
 
-  const inputStyle = {
-    width: '100%', border: '1px solid var(--border-primary)', borderRadius: 10,
-    padding: '8px 12px', fontSize: 13, fontFamily: 'inherit',
-    outline: 'none', boxSizing: 'border-box', color: 'var(--text-primary)', background: 'var(--bg-input)',
-  }
-  const labelStyle = { display: 'block', fontSize: 11, fontWeight: 600, color: 'var(--text-faint)', marginBottom: 5, textTransform: 'uppercase', letterSpacing: '0.03em' }
+  const footer = (
+    <DialogFooter>
+      <FooterSpacer />
+      <DialogButton onClick={onClose}>{t('common.cancel')}</DialogButton>
+      <DialogButton variant="primary" onClick={handleSubmit} disabled={saveDisabled}>
+        {isSaving ? t('common.saving') : reservation ? t('common.update') : t('common.add')}
+      </DialogButton>
+    </DialogFooter>
+  )
 
   return (
-    <Modal isOpen={isOpen} onClose={onClose} title={reservation ? t('reservations.editTitle') : t('reservations.newTitle')} size="2xl">
-      <form onSubmit={handleSubmit} style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
-
-        {/* Type selector */}
-        <div>
-          <label style={labelStyle}>{t('reservations.bookingType')}</label>
-          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 5 }}>
-            {TYPE_OPTIONS.map(({ value, labelKey, Icon }) => (
-              <button key={value} type="button" onClick={() => set('type', value)} style={{
-                display: 'flex', alignItems: 'center', gap: 4,
-                padding: '5px 10px', borderRadius: 99, border: '1px solid',
-                fontSize: 11, fontWeight: 500, cursor: 'pointer', fontFamily: 'inherit', transition: 'all 0.12s',
-                background: form.type === value ? 'var(--text-primary)' : 'var(--bg-card)',
-                borderColor: form.type === value ? 'var(--text-primary)' : 'var(--border-primary)',
-                color: form.type === value ? 'var(--bg-primary)' : 'var(--text-muted)',
-              }}>
-                <Icon size={11} /> {t(labelKey)}
-              </button>
-            ))}
-          </div>
-        </div>
-
-        {/* Title */}
-        <div>
-          <label style={labelStyle}>{t('reservations.titleLabel')} *</label>
-          <input type="text" value={form.title} onChange={e => set('title', e.target.value)} required
-            placeholder={t('reservations.titlePlaceholder')} style={inputStyle} />
-        </div>
-
-        {/* Assignment Picker + Date */}
-        <div style={{ display: 'flex', gap: 8 }}>
+    <DialogShell
+      open={isOpen}
+      onClose={onClose}
+      labelledBy={titleId}
+      width="editor"
+      align="top"
+      // A stray click beside the editor asks before the typing is lost (#2253).
+      discardGuard={{ form, files: pendingFiles.length, travelers: [...travelerIds] }}
+      onSubmit={handleSubmit}
+      header={header}
+      footer={footer}
+    >
+      {/* When: the plan stop it belongs to, then start and end (hidden for hotels) */}
+      {form.type !== 'hotel' && (
+        <div className="flex flex-col gap-3">
           {assignmentOptions.length > 0 && (
-            <div style={{ flex: 1, minWidth: 0 }}>
-              <label style={labelStyle}>
-                <Link2 size={10} style={{ display: 'inline', verticalAlign: '-1px', marginRight: 3 }} />
-                {t('reservations.linkAssignment')}
-              </label>
+            <EditorField label={<><Link2 size={10} className="me-[3px] inline align-[-1px]" />{t('reservations.linkAssignment')}</>}>
               <CustomSelect
                 value={form.assignment_id}
                 onChange={value => {
                   set('assignment_id', value)
                   const opt = assignmentOptions.find(o => o.value === value)
-                  if (opt?.dayDate) {
-                    setForm(prev => {
-                      if (prev.reservation_time) return prev
-                      return { ...prev, reservation_time: opt.dayDate }
-                    })
-                  }
+                  if (opt?.dayDate) takeStopDay(opt.dayDate)
                 }}
                 placeholder={t('reservations.pickAssignment')}
                 options={[
@@ -218,127 +258,158 @@ export function ReservationModal({ isOpen, onClose, onSave, reservation, days, p
                 searchable
                 size="sm"
               />
-            </div>
+            </EditorField>
           )}
-          <div style={{ flex: 1, minWidth: 0 }}>
-            <label style={labelStyle}>{t('reservations.date')}</label>
-            <CustomDatePicker
-              value={(() => { const [d] = (form.reservation_time || '').split('T'); return d || '' })()}
-              onChange={d => {
-                const [, t] = (form.reservation_time || '').split('T')
-                set('reservation_time', d ? (t ? `${d}T${t}` : d) : '')
-              }}
-            />
+          <div className={GRID_2}>
+            <EditorField label={t('reservations.date')}>
+              <CustomDatePicker
+                value={startDate}
+                onChange={setStartDate}
+                min={tripDateRange.min}
+                max={tripDateRange.max}
+              />
+            </EditorField>
+            <EditorField label={t('reservations.startTime')}>
+              <CustomTimePicker
+                value={startTime}
+                onChange={tm => setStartTime(tm, selectedDayDate(days, selectedDayId))}
+              />
+            </EditorField>
+            <EditorField label={t('reservations.endDate')} error={isEndBeforeStart ? t('reservations.validation.endBeforeStart') : undefined}>
+              <CustomDatePicker
+                value={form.end_date}
+                onChange={d => set('end_date', d || '')}
+                min={tripDateRange.min}
+                max={tripDateRange.max}
+              />
+            </EditorField>
+            <EditorField
+              label={t('reservations.endTime')}
+              hint={endTimeBeforeStartTime ? <span className="text-warning">{t('reservations.validation.endTimeBeforeStartTime')}</span> : undefined}
+            >
+              <CustomTimePicker value={form.reservation_end_time} onChange={v => set('reservation_end_time', v)} />
+            </EditorField>
           </div>
         </div>
+      )}
 
-        {/* Start Time + End Time + Status */}
-        <div style={{ display: 'flex', gap: 8 }}>
-          <div style={{ flex: 1, minWidth: 0 }}>
-            <label style={labelStyle}>{t('reservations.startTime')}</label>
-            <CustomTimePicker
-              value={(() => { const [, t] = (form.reservation_time || '').split('T'); return t || '' })()}
-              onChange={t => {
-                const [d] = (form.reservation_time || '').split('T')
-                const date = d || new Date().toISOString().split('T')[0]
-                set('reservation_time', t ? `${date}T${t}` : date)
-              }}
-            />
-          </div>
-          <div style={{ flex: 1, minWidth: 0 }}>
-            <label style={labelStyle}>{t('reservations.endTime')}</label>
-            <CustomTimePicker value={form.reservation_end_time} onChange={v => set('reservation_end_time', v)} />
-          </div>
-          <div style={{ flex: 1, minWidth: 0 }}>
-            <label style={labelStyle}>{t('reservations.status')}</label>
+      {/* Where: a trip place/activity (#1353) and the address. Hotels pick their
+          place through the accommodation below. */}
+      {form.type !== 'hotel' && (
+        <div className={GRID_2}>
+          <EditorField label={t('reservations.meta.linkPlace')}>
             <CustomSelect
-              value={form.status}
-              onChange={value => set('status', value)}
+              value={form.place_id}
+              onChange={pickPlace}
+              placeholder={t('reservations.meta.pickPlace')}
               options={[
-                { value: 'pending', label: t('reservations.pending') },
-                { value: 'confirmed', label: t('reservations.confirmed') },
+                { value: '', label: '—' },
+                ...places.map(p => ({ value: p.id, label: p.name })),
               ]}
+              searchable
               size="sm"
             />
-          </div>
+          </EditorField>
+          <EditorField label={t('reservations.locationAddress')}>
+            <AddressInput value={form.location} onChange={v => set('location', v)}
+              placeholder={t('reservations.locationPlaceholder')} className={INPUT} />
+          </EditorField>
         </div>
+      )}
 
-        {/* Location + Booking Code */}
-        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-          <div>
-            <label style={labelStyle}>{t('reservations.locationAddress')}</label>
-            <input type="text" value={form.location} onChange={e => set('location', e.target.value)}
-              placeholder={t('reservations.locationPlaceholder')} style={inputStyle} />
+      {/* The stay: place and nights, then the check-in window */}
+      {form.type === 'hotel' && (
+        <>
+          <div className="flex flex-col gap-3">
+            <div className={GRID_3}>
+              <EditorField label={t('reservations.meta.hotelPlace')}>
+                <CustomSelect
+                  value={form.hotel_place_id}
+                  onChange={pickHotelPlace}
+                  placeholder={t('reservations.meta.pickHotel')}
+                  options={[
+                    { value: '', label: '—' },
+                    ...stayPlaces(places, form.hotel_place_id).map(p => ({ value: p.id, label: p.name })),
+                  ]}
+                  searchable
+                  size="sm"
+                />
+              </EditorField>
+              <EditorField label={t('reservations.meta.fromDay')}>
+                <CustomSelect
+                  value={form.hotel_start_day}
+                  onChange={pickHotelStart}
+                  placeholder={t('reservations.meta.selectDay')}
+                  options={dayOptions}
+                  size="sm"
+                />
+              </EditorField>
+              <EditorField label={t('reservations.meta.toDay')}>
+                <CustomSelect
+                  value={form.hotel_end_day}
+                  onChange={pickHotelEnd}
+                  placeholder={t('reservations.meta.selectDay')}
+                  options={dayOptions}
+                  size="sm"
+                />
+              </EditorField>
+            </div>
+            <div className={GRID_3}>
+              <EditorField label={t('reservations.meta.checkIn')}>
+                <CustomTimePicker value={form.meta_check_in_time} onChange={v => set('meta_check_in_time', v)} />
+              </EditorField>
+              <EditorField label={t('reservations.meta.checkInUntil')}>
+                <CustomTimePicker value={form.meta_check_in_end_time} onChange={v => set('meta_check_in_end_time', v)} />
+              </EditorField>
+              <EditorField label={t('reservations.meta.checkOut')}>
+                <CustomTimePicker value={form.meta_check_out_time} onChange={v => set('meta_check_out_time', v)} />
+              </EditorField>
+            </div>
           </div>
-          <div>
-            <label style={labelStyle}>{t('reservations.confirmationCode')}</label>
-            <input type="text" value={form.confirmation_number} onChange={e => set('confirmation_number', e.target.value)}
-              placeholder={t('reservations.confirmationPlaceholder')} style={inputStyle} />
-          </div>
-        </div>
+          <EditorField label={t('reservations.locationAddress')}>
+            <AddressInput value={form.hotel_address} onChange={v => set('hotel_address', v)}
+              onPick={stayPin.pick}
+              placeholder={t('reservations.locationPlaceholder')} className={INPUT} />
+          </EditorField>
+          <StayPinStatus
+            pin={stayPin.pin}
+            hidden={!!form.hotel_place_id}
+            onRetry={() => stayPin.lookUp(form.title, form.hotel_address)}
+          />
+        </>
+      )}
 
-        {/* Notes */}
-        <div>
-          <label style={labelStyle}>{t('reservations.notes')}</label>
-          <textarea value={form.notes} onChange={e => set('notes', e.target.value)} rows={2}
-            placeholder={t('reservations.notesPlaceholder')}
-            style={{ ...inputStyle, resize: 'none', lineHeight: 1.5 }} />
-        </div>
+      {/* The booking code, and the trip members and guests on this booking (#1517) */}
+      <div className={GRID_2}>
+        <EditorField label={t('reservations.confirmationCode')}>
+          <BookingCodeInput value={form.confirmation_number} onChange={e => set('confirmation_number', e.target.value)}
+            placeholder={t('reservations.confirmationPlaceholder')} className={INPUT} />
+        </EditorField>
+        <EditorField label={t('reservations.travelers.label')}>
+          <TravelerPicker tripMembers={tripMembers} selectedIds={travelerIds} onToggle={toggleTraveler} />
+        </EditorField>
+      </div>
 
-        {/* Files */}
-        <div>
-          <label style={labelStyle}>{t('files.title')}</label>
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-            {attachedFiles.map(f => (
-              <div key={f.id} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '5px 10px', background: 'var(--bg-secondary)', borderRadius: 8 }}>
-                <FileText size={12} style={{ color: 'var(--text-muted)', flexShrink: 0 }} />
-                <span style={{ flex: 1, fontSize: 12, color: 'var(--text-secondary)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{f.original_name}</span>
-                <a href={f.url} target="_blank" rel="noreferrer" style={{ color: 'var(--text-faint)', display: 'flex', flexShrink: 0 }}><ExternalLink size={11} /></a>
-                {onFileDelete && (
-                  <button type="button" onClick={() => onFileDelete(f.id)} style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--text-faint)', display: 'flex', padding: 0, flexShrink: 0 }}>
-                    <X size={11} />
-                  </button>
-                )}
-              </div>
-            ))}
-            {pendingFiles.map((f, i) => (
-              <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '5px 10px', background: 'var(--bg-secondary)', borderRadius: 8 }}>
-                <FileText size={12} style={{ color: 'var(--text-muted)', flexShrink: 0 }} />
-                <span style={{ flex: 1, fontSize: 12, color: 'var(--text-secondary)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{f.name}</span>
-                <button type="button" onClick={() => setPendingFiles(prev => prev.filter((_, j) => j !== i))}
-                  style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--text-faint)', display: 'flex', padding: 0, flexShrink: 0 }}>
-                  <X size={11} />
-                </button>
-              </div>
-            ))}
-            <input ref={fileInputRef} type="file" accept=".pdf,.doc,.docx,.txt,image/*" style={{ display: 'none' }} onChange={handleFileChange} />
-            <button type="button" onClick={() => fileInputRef.current?.click()} disabled={uploadingFile} style={{
-              display: 'flex', alignItems: 'center', gap: 5, padding: '6px 10px',
-              border: '1px dashed var(--border-primary)', borderRadius: 8, background: 'none',
-              fontSize: 11, color: 'var(--text-faint)', cursor: uploadingFile ? 'default' : 'pointer', fontFamily: 'inherit',
-            }}>
-              <Paperclip size={11} />
-              {uploadingFile ? t('reservations.uploading') : t('reservations.attachFile')}
-            </button>
-          </div>
-        </div>
-
-        {/* Actions */}
-        <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, paddingTop: 4, borderTop: '1px solid var(--border-secondary)' }}>
-          <button type="button" onClick={onClose} style={{ padding: '8px 16px', borderRadius: 10, border: '1px solid var(--border-primary)', background: 'none', fontSize: 12, cursor: 'pointer', fontFamily: 'inherit', color: 'var(--text-muted)' }}>
-            {t('common.cancel')}
-          </button>
-          <button type="submit" disabled={isSaving || !form.title.trim()} style={{ padding: '8px 20px', borderRadius: 10, border: 'none', background: 'var(--text-primary)', color: 'var(--bg-primary)', fontSize: 12, fontWeight: 600, cursor: 'pointer', fontFamily: 'inherit', opacity: isSaving || !form.title.trim() ? 0.5 : 1 }}>
-            {isSaving ? t('common.saving') : reservation ? t('common.update') : t('common.add')}
-          </button>
-        </div>
-      </form>
-    </Modal>
+      <BookingNotesFilesCosts
+        notes={form.notes}
+        onNotesChange={value => set('notes', value)}
+        url={form.url}
+        onUrlChange={value => set('url', value)}
+        reservationId={reservation?.id}
+        tripFiles={files}
+        pendingFiles={pendingFiles}
+        fileInputRef={fileInputRef}
+        attach={attach}
+        canAttach={!!onFileUpload}
+        showCosts={isBudgetEnabled}
+        pendingExpense={pendingExpense}
+        expense={expense}
+      />
+    </DialogShell>
   )
 }
 
 function formatDate(dateStr, locale) {
-  if (!dateStr) return ''
-  const d = new Date(dateStr + 'T00:00:00')
-  return d.toLocaleDateString(locale || 'de-DE', { day: 'numeric', month: 'short' })
+  const d = new Date(dateStr + 'T00:00:00Z')
+  return d.toLocaleDateString(locale || undefined, { day: 'numeric', month: 'short', timeZone: 'UTC' })
 }

@@ -1,0 +1,47 @@
+import type { TranslationStrings } from '../types';
+
+const map: TranslationStrings = {
+  'map.connections': 'Connections',
+  'map.showConnections': 'Show booking routes',
+  'map.hideConnections': 'Hide booking routes',
+  'poi.searchThisArea': 'Search this area',
+  'poi.cat.restaurants': 'Restaurants',
+  'poi.cat.cafes': 'Cafés',
+  'poi.cat.bars': 'Bars & nightlife',
+  'poi.cat.hotels': 'Accommodation',
+  'poi.cat.sights': 'Sights',
+  'poi.cat.museums': 'Museums & culture',
+  'poi.cat.nature': 'Nature & parks',
+  'poi.cat.activities': 'Activities',
+  'poi.pluginCategories': 'Categories from plugins',
+  'map.showAllConnections': 'Show all booking routes',
+  'map.hideAllConnections': 'Hide all booking routes',
+  'map.baseLayer.default': 'Map',
+  'map.baseLayer.satellite': 'Satellite',
+  'map.baseLayer.hiking': 'Hiking',
+  'map.baseLayer.hikingDown':
+    'OpenHikingMap is not answering right now. Switch to another map; your tour stays as it is.',
+  'map.baseLayer.cycle': 'Cycling',
+  'map.baseLayer.cycleDown': 'CyclOSM is not answering right now. Switch to another map; your tour stays as it is.',
+  'map.baseLayer.switchToSatellite': 'Switch to satellite view',
+  'map.baseLayer.switchToDefault': 'Switch to map view',
+  'map.location.denied':
+    'Location access is blocked. Check your device settings; an installed app has its own location permission, separate from the browser.',
+  'map.location.unavailable': 'Your location could not be determined.',
+  'map.location.timeout': 'Locating you took too long. Try again with a clearer view of the sky.',
+  'map.overview.show': 'Show whole trip',
+  'map.lock.lock': 'Lock the map view',
+  'map.lock.unlock': 'Let the map follow the selection',
+  'map.overview.hide': 'Hide whole trip',
+  'map.overview.total': 'Total distance',
+  'map.attribution': 'Map credits',
+  'map.overview.unrouted': '{count} legs could not be routed, so the distances are incomplete.',
+  'map.overview.unrouted.one': '{count} leg could not be routed, so the distances are incomplete.',
+  'map.overview.dayUnrouted': '{count} legs of this day could not be routed',
+  'map.overview.dayUnrouted.one': '{count} leg of this day could not be routed',
+  'map.baseLayer.topo': 'Topo',
+  'map.webgl2.fallback':
+    'This browser does not offer WebGL2, which GL maps need, so maps are shown with Leaflet instead.',
+  'map.webgl2.terrain': '3D needs WebGL2, which this browser does not offer. The map stays in 2D.',
+};
+export default map;

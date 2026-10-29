@@ -1,211 +1,247 @@
+import 'reflect-metadata';
 import 'dotenv/config';
-import express, { Request, Response, NextFunction } from 'express';
-import cors from 'cors';
-import helmet from 'helmet';
-import path from 'path';
-import fs from 'fs';
+// Fail-fast env validation — must stay directly after dotenv so a malformed
+// variable aborts before any other module runs its import-time side effects
+// (config.ts key resolution, ...).
+import './app-config/boot-validate';
 
-const app = express();
+import { getAppUrl, getMcpSafeUrl, readEnv } from './app-config';
+import { resolveDataPaths } from './app-config/data-paths';
+// bootstrap is required inside bootstrap() below, not imported here. Importing
+// it no longer opens the database (the ORM's first connect inside buildApp()
+// does, through DatabaseLifecycle), but a first-start restore (#1089) has to
+// put the backup's database in place before anything near it loads, and
+// keeping the require after the restore keeps that true by construction.
+import type * as Bootstrap from './bootstrap';
+import { resolveDbPath } from './db/db-path';
+import { flushLogFileSync, logError } from './nest/audit/audit-log.logger';
+import type { DatabaseLifecycle } from './nest/database/database-lifecycle.service';
+import { ReadinessService } from './nest/health/readiness.service';
+import { createFatalHandler } from './shutdown';
+import type { INestApplication } from '@nestjs/common';
 
-// Trust first proxy (nginx/Docker) for correct req.ip
-if (process.env.NODE_ENV === 'production' || process.env.TRUST_PROXY) {
-  app.set('trust proxy', parseInt(process.env.TRUST_PROXY as string) || 1);
-}
+import fs from 'node:fs';
+import http from 'node:http';
 
-// Create upload directories on startup
-const uploadsDir = path.join(__dirname, '../uploads');
-const photosDir = path.join(uploadsDir, 'photos');
-const filesDir = path.join(uploadsDir, 'files');
-const coversDir = path.join(uploadsDir, 'covers');
-const backupsDir = path.join(__dirname, '../data/backups');
-const tmpDir = path.join(__dirname, '../data/tmp');
+// data/tmp is the driver-agnostic global scratch dir (restore-upload spool,
+// mirror stream staging) and stays boot-created here. Driver-owned roots — the
+// uploads/ category tree and data/backups — are ensured by LocalDriver.init on
+// every storage-registry load (boot and reload(), storage-registry.service.ts),
+// which keeps the #1762 EACCES guarantee: a non-writable bind mount still
+// fails loudly at startup, inside app.init(), instead of as a stray 500 on
+// first upload. The Dockerfile `mkdir -p` list is pinned to the registry's
+// category prefixes by tests/unit/uploads-dirs.test.ts.
+const { tmpDir } = resolveDataPaths();
+if (!fs.existsSync(tmpDir)) fs.mkdirSync(tmpDir, { recursive: true });
 
-[uploadsDir, photosDir, filesDir, coversDir, backupsDir, tmpDir].forEach(dir => {
-  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-});
+const PORT = readEnv().app.port;
+const HOST = readEnv().app.host;
+const APP_VERSION: string = readEnv().app.appVersion || (require('../package.json') as { version: string }).version;
 
-// Middleware
-const allowedOrigins = process.env.ALLOWED_ORIGINS
-  ? process.env.ALLOWED_ORIGINS.split(',')
-  : null;
-
-let corsOrigin: cors.CorsOptions['origin'];
-if (allowedOrigins) {
-  // Explicit whitelist from env var
-  corsOrigin = (origin: string | undefined, callback: (err: Error | null, allow?: boolean) => void) => {
-    if (!origin || allowedOrigins.includes(origin)) callback(null, true);
-    else callback(new Error('Not allowed by CORS'));
-  };
-} else if (process.env.NODE_ENV === 'production') {
-  // Production: same-origin only (Express serves the static client)
-  corsOrigin = false;
-} else {
-  // Development: allow all origins (needed for Vite dev server)
-  corsOrigin = true;
-}
-
-app.use(cors({
-  origin: corsOrigin,
-  credentials: true
-}));
-app.use(helmet({
-  contentSecurityPolicy: {
-    directives: {
-      defaultSrc: ["'self'"],
-      scriptSrc: ["'self'", "'unsafe-inline'"],
-      styleSrc: ["'self'", "'unsafe-inline'", "https://fonts.googleapis.com", "https://unpkg.com"],
-      imgSrc: ["'self'", "data:", "blob:", "https:", "http:"],
-      connectSrc: ["'self'", "ws:", "wss:", "https:", "http:"],
-      fontSrc: ["'self'", "https://fonts.gstatic.com", "data:"],
-      objectSrc: ["'self'"],
-      frameSrc: ["'self'"],
-      frameAncestors: ["'self'"],
+const onListen = () => {
+  const { logInfo: sLogInfo, logWarn: sLogWarn } = require('./nest/audit/audit-log.logger');
+  const env = readEnv();
+  const LOG_LVL = (env.app.logLevel || 'info').toLowerCase();
+  const tz = env.app.tz || Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
+  const origins = env.http.allowedOriginsRaw || '(same-origin)';
+  const appUrl = getAppUrl();
+  const resolvedAppUrl = getMcpSafeUrl();
+  const banner = [
+    '──────────────────────────────────────',
+    '  TREK API started',
+    `  Version         ${APP_VERSION}`,
+    ...(HOST ? [`  Host:           ${HOST}`] : []),
+    `  Container Port: ${PORT}`,
+    `  App URL:        ${appUrl}`,
+    `  Environment:    ${env.app.nodeEnv || 'development'}`,
+    `  Timezone:       ${tz}`,
+    `  Origins:        ${origins}`,
+    `  Log level:      ${LOG_LVL}`,
+    `  Log file:       /app/data/logs/trek.log`,
+    `  PID:            ${process.pid}`,
+    `  User:           uid=${process.getuid?.()} gid=${process.getgid?.()}`,
+    '──────────────────────────────────────',
+  ];
+  banner.forEach((l) => console.log(l));
+  sLogInfo('NestJS serving all routes (Express decommissioned)');
+  if (env.app.appUrl) {
+    let parsedAppUrl: URL | null = null;
+    try {
+      parsedAppUrl = new URL(env.app.appUrl);
+    } catch {
+      /* invalid */
     }
-  },
-  crossOriginEmbedderPolicy: false,
-}));
-// Redirect HTTP to HTTPS in production
-if (process.env.NODE_ENV === 'production' && process.env.FORCE_HTTPS !== 'false') {
-  app.use((req: Request, res: Response, next: NextFunction) => {
-    if (req.secure || req.headers['x-forwarded-proto'] === 'https') return next();
-    res.redirect(301, 'https://' + req.headers.host + req.url);
-  });
-}
-app.use(express.json({ limit: '100kb' }));
-app.use(express.urlencoded({ extended: true }));
 
-// Avatars are public (shown on login, sharing screens)
-app.use('/uploads/avatars', express.static(path.join(__dirname, '../uploads/avatars')));
+    if (!parsedAppUrl) {
+      sLogWarn(`APP_URL: "${env.app.appUrl}" is not a valid URL — it will be ignored.`);
+    }
 
-// All other uploads require authentication
-app.get('/uploads/:type/:filename', (req: Request, res: Response) => {
-  const { type, filename } = req.params;
-  const allowedTypes = ['covers', 'files', 'photos'];
-  if (!allowedTypes.includes(type)) return res.status(404).send('Not found');
-
-  // Prevent path traversal
-  const safeName = path.basename(filename);
-  const filePath = path.join(__dirname, '../uploads', type, safeName);
-  const resolved = path.resolve(filePath);
-  if (!resolved.startsWith(path.resolve(__dirname, '../uploads', type))) {
-    return res.status(403).send('Forbidden');
+    const mcpSafe =
+      parsedAppUrl !== null &&
+      (parsedAppUrl.protocol === 'https:' ||
+        parsedAppUrl.hostname === 'localhost' ||
+        parsedAppUrl.hostname === '127.0.0.1');
+    if (!mcpSafe) {
+      sLogWarn(`APP_URL: not MCP-safe (requires https:// or http://localhost) — MCP will use ${resolvedAppUrl}.`);
+    }
   }
+  if (env.demo.enabled) sLogInfo('Demo mode: ENABLED');
+  if (env.demo.enabled && env.app.isProduction) {
+    sLogWarn('SECURITY WARNING: DEMO_MODE is enabled in production!');
+  }
+  // Nothing else to boot by hand: the crons are domain providers on the
+  // scheduling registrar, and /ws is the Nest gateway buildApp already bound.
+};
 
-  if (!fs.existsSync(resolved)) return res.status(404).send('Not found');
-  res.sendFile(resolved);
-});
+let server: http.Server;
+let nestApp: INestApplication;
+let database: DatabaseLifecycle | undefined;
 
-// Routes
-import authRoutes from './routes/auth';
-import tripsRoutes from './routes/trips';
-import daysRoutes, { accommodationsRouter as accommodationsRoutes } from './routes/days';
-import placesRoutes from './routes/places';
-import assignmentsRoutes from './routes/assignments';
-import packingRoutes from './routes/packing';
-import tagsRoutes from './routes/tags';
-import categoriesRoutes from './routes/categories';
-import adminRoutes from './routes/admin';
-import mapsRoutes from './routes/maps';
-import filesRoutes from './routes/files';
-import reservationsRoutes from './routes/reservations';
-import dayNotesRoutes from './routes/dayNotes';
-import weatherRoutes from './routes/weather';
-import settingsRoutes from './routes/settings';
-import budgetRoutes from './routes/budget';
-import collabRoutes from './routes/collab';
-import backupRoutes from './routes/backup';
-import oidcRoutes from './routes/oidc';
-app.use('/api/auth', authRoutes);
-app.use('/api/auth/oidc', oidcRoutes);
-app.use('/api/trips', tripsRoutes);
-app.use('/api/trips/:tripId/days', daysRoutes);
-app.use('/api/trips/:tripId/accommodations', accommodationsRoutes);
-app.use('/api/trips/:tripId/places', placesRoutes);
-app.use('/api/trips/:tripId/packing', packingRoutes);
-app.use('/api/trips/:tripId/files', filesRoutes);
-app.use('/api/trips/:tripId/budget', budgetRoutes);
-app.use('/api/trips/:tripId/collab', collabRoutes);
-app.use('/api/trips/:tripId/reservations', reservationsRoutes);
-app.use('/api/trips/:tripId/days/:dayId/notes', dayNotesRoutes);
-app.get('/api/health', (req: Request, res: Response) => res.json({ status: 'ok' }));
-app.use('/api', assignmentsRoutes);
-app.use('/api/tags', tagsRoutes);
-app.use('/api/categories', categoriesRoutes);
-app.use('/api/admin', adminRoutes);
+// Strangler toggle: prefixes served by Nest (env-overridable, instant rollback).
+async function bootstrap(): Promise<void> {
+  // The whole surface runs on the single NestJS app now (Express decommissioned):
+  // global pipeline + /uploads + every /api domain + the platform/transport routes
+  // (/mcp, /.well-known, OAuth SDK, SPA catch-all). buildApp() owns the composition
+  // order; it is shared with the integration-test harness so they can't drift.
+  const restore = await restoreBeforeTheDatabaseOpens();
+  const { buildApp, getHttpServer, DatabaseLifecycle: Lifecycle } = require('./bootstrap') as typeof Bootstrap;
+  nestApp = await buildApp();
+  database = nestApp.get(Lifecycle);
+  if (restore.restored) await finishFirstBootRestore(nestApp, restore);
+  // The server buildApp created and bound /ws to. Creating a second one here
+  // would serve the REST API fine and leave the gateway attached to a socket
+  // nobody listens on.
+  server = getHttpServer();
 
-// Public addons endpoint (authenticated but not admin-only)
-import { authenticate as addonAuth } from './middleware/auth';
-import { db as addonDb } from './db/database';
-import { Addon } from './types';
-app.get('/api/addons', addonAuth, (req: Request, res: Response) => {
-  const addons = addonDb.prepare('SELECT id, name, type, icon, enabled FROM addons WHERE enabled = 1 ORDER BY sort_order').all() as Pick<Addon, 'id' | 'name' | 'type' | 'icon' | 'enabled'>[];
-  res.json({ addons: addons.map(a => ({ ...a, enabled: !!a.enabled })) });
-});
+  // A bind failure has to be fatal and loud, and it needs saying explicitly.
+  // listen() reports failure by event, not by rejecting, so the catch around
+  // bootstrap() never sees it. And since buildApp attaches the ws server to this
+  // http server, ws has already registered its own `error` listener on it, which
+  // is enough for Node to stop throwing on an unhandled one. Without this the
+  // process would survive EADDRINUSE, never run onListen, and serve nothing
+  // while looking healthy.
+  server.on('error', (err: NodeJS.ErrnoException) => {
+    const where = HOST ? `${HOST}:${PORT}` : `:${PORT}`;
+    console.error(`Fatal: cannot listen on ${where} — ${err.code ?? ''} ${err.message}`);
+    process.exit(1);
+  });
 
-// Addon routes
-import vacayRoutes from './routes/vacay';
-app.use('/api/addons/vacay', vacayRoutes);
-import atlasRoutes from './routes/atlas';
-app.use('/api/addons/atlas', atlasRoutes);
-import citiesRoutes from './routes/cities';
-app.use('/api/cities', citiesRoutes);
+  if (HOST) server.listen(PORT, HOST, onListen);
+  else server.listen(PORT, onListen);
+}
 
-app.use('/api/maps', mapsRoutes);
-app.use('/api/weather', weatherRoutes);
-app.use('/api/settings', settingsRoutes);
-app.use('/api/backup', backupRoutes);
-
-// Serve static files in production
-if (process.env.NODE_ENV === 'production') {
-  const publicPath = path.join(__dirname, '../public');
-  app.use(express.static(publicPath));
-  app.get('*', (req: Request, res: Response) => {
-    res.sendFile(path.join(publicPath, 'index.html'));
+/**
+ * RESTORE_FROM_BACKUP on a first start (#1089), before anything opens the
+ * database. See nest/backup/boot-restore.ts for when it runs and why it fails
+ * the start rather than coming up empty.
+ */
+async function restoreBeforeTheDatabaseOpens() {
+  const { restoreOnFirstBoot } = require('./nest/backup/boot-restore') as typeof import('./nest/backup/boot-restore');
+  const env = readEnv();
+  return restoreOnFirstBoot({
+    archive: env.backup.restoreFromBackup,
+    dbFile: resolveDbPath(),
+    dataDir: resolveDataPaths(env).dataDir,
   });
 }
 
-// Global error handler
-app.use((err: Error, req: Request, res: Response, next: NextFunction) => {
-  console.error('Unhandled error:', err);
-  res.status(500).json({ error: 'Internal server error' });
-});
-
-import * as scheduler from './scheduler';
-
-const PORT = process.env.PORT || 3001;
-const server = app.listen(PORT, () => {
-  console.log(`NOMAD API running on port ${PORT}`);
-  console.log(`Environment: ${process.env.NODE_ENV || 'development'}`);
-  if (process.env.DEMO_MODE === 'true') console.log('Demo mode: ENABLED');
-  if (process.env.DEMO_MODE === 'true' && process.env.NODE_ENV === 'production') {
-    console.warn('[SECURITY WARNING] DEMO_MODE is enabled in production! Demo credentials are publicly exposed.');
+/**
+ * The uploads go in once storage is up, through the same driver every upload
+ * uses, so an instance on S3 gets them in S3. A failure here leaves the restored
+ * database running and says where the files are, rather than stopping a start
+ * whose data is already in place.
+ */
+async function finishFirstBootRestore(
+  app: INestApplication,
+  restore: { uploads: string | null; staging: string },
+): Promise<void> {
+  const { StorageService } =
+    require('./nest/storage/storage.service') as typeof import('./nest/storage/storage.service');
+  const { rehydrateUploads } = require('./nest/backup/backup.impl') as typeof import('./nest/backup/backup.impl');
+  try {
+    if (restore.uploads) await rehydrateUploads(app.get(StorageService), restore.uploads);
+    fs.rmSync(restore.staging, { recursive: true, force: true });
+    console.log('[restore] Backup restored. Sign in with an account from the backup.');
+  } catch (err) {
+    console.error(
+      `[restore] The database was restored, but the uploads could not be copied (${err instanceof Error ? err.message : String(err)}). They are still in ${restore.staging}.`,
+    );
   }
-  scheduler.start();
-  scheduler.startDemoReset();
-  import('./websocket').then(({ setupWebSocket }) => {
-    setupWebSocket(server);
-  });
+}
+
+bootstrap().catch((err) => {
+  console.error('Fatal: failed to bootstrap server', err);
+  process.exit(1);
 });
 
 // Graceful shutdown
-function shutdown(signal: string): void {
-  console.log(`\n${signal} received — shutting down gracefully...`);
-  scheduler.stop();
-  server.close(() => {
-    console.log('HTTP server closed');
-    const { closeDb } = require('./db/database');
-    closeDb();
-    console.log('Shutdown complete');
-    process.exit(0);
-  });
-  // Force exit after 10s if connections don't close
-  setTimeout(() => {
-    console.error('Forced shutdown after timeout');
+//
+// The sequence itself lives in ./shutdown so it can be tested without a process
+// to exit; this is only the wiring. See that file for why the order matters —
+// in short, #2193: nothing here could ever release a WebSocket, so `docker
+// stop` always ended in SIGKILL and exit 137.
+let shuttingDown = false;
+// Raised by a fatal error even when a signal's shutdown is already running, so
+// the process still leaves with a failure code the orchestrator can see.
+let exitCode = 0;
+function shutdown(signal: string, code = 0): void {
+  exitCode = Math.max(exitCode, code);
+  // A second signal (the SIGINT that follows a Ctrl-C, or an impatient
+  // orchestrator sending SIGTERM twice) must not start a second teardown on
+  // top of the first one.
+  if (shuttingDown) return;
+  shuttingDown = true;
+  const { logInfo: sLogInfo, logError: sLogError } = require('./nest/audit/audit-log.logger');
+  const { closeMcpSessions } = require('./mcp');
+  const { getServer } = require('./nest/realtime/ws-state');
+  const { runShutdown } = require('./shutdown');
+  runShutdown(signal, {
+    // Both are still undefined if the signal beat bootstrap(); the sequence
+    // handles that and still exits rather than hanging or throwing.
+    server,
+    // nestApp.close() stops every cron via the scheduling registrar's shutdown
+    // hook, and tears the plugin supervisor's forked children down.
+    closeNestApp: async () => {
+      await nestApp?.close();
+    },
+    getWsClients: () => getServer()?.clients ?? null,
+    closeMcpSessions,
+    // Through the lifecycle provider once the app is up; before that (a signal
+    // that beat bootstrap()) the module function is all there is.
+    closeDb: () => {
+      if (database) database.close();
+      else (require('./db/database') as typeof import('./db/database')).closeDb();
+    },
+    logInfo: sLogInfo,
+    logError: sLogError,
+    // Readiness answers 503 from here on; strict: false because the provider
+    // lives in HealthModule, not in the root module.
+    markDraining: () => nestApp?.get(ReadinessService, { strict: false }).markDraining(),
+    exitCode,
+    exit: (code: number) => process.exit(Math.max(code, exitCode)),
+  }).catch((err: unknown) => {
+    // Fire-and-forget would make this an unhandled rejection, which on Node 22
+    // is a crash — a worse ending than the one we are here to fix.
+    sLogError(`Shutdown failed: ${err instanceof Error ? err.message : String(err)}`);
     process.exit(1);
-  }, 10000);
+  });
 }
+
+// trek.log is written in batches off the event loop. Whatever is still queued
+// when the process ends, by any of the exits above or below, goes out
+// synchronously here: an 'exit' listener cannot wait for a promise.
+process.on('exit', () => flushLogFileSync());
+
+// Last-resort handlers. Node would crash on either anyway, printing the stack
+// to stderr only; this way it lands in trek.log first, and the process goes
+// through the same orderly shutdown as on SIGTERM before it exits with 1.
+const onFatal = createFatalHandler({
+  logError,
+  shutdown: (reason, code) => shutdown(reason, code),
+  exit: (code) => process.exit(code),
+});
+process.on('unhandledRejection', (reason) => onFatal('Unhandled promise rejection', reason));
+process.on('uncaughtException', (error) => onFatal('Uncaught exception', error));
 
 process.on('SIGTERM', () => shutdown('SIGTERM'));
 process.on('SIGINT', () => shutdown('SIGINT'));
-
-export default app;

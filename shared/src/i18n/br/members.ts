@@ -1,0 +1,39 @@
+import type { TranslationStrings } from '../types';
+
+const members: TranslationStrings = {
+  'members.inviteUser': 'Convidar usuário',
+  'members.selectUser': 'Selecionar usuário…',
+  'members.invite': 'Convidar',
+  'members.allHaveAccess': 'Todos os usuários já têm acesso.',
+  'members.access': 'Acesso',
+  'members.persons': 'pessoas',
+  'members.persons.one': 'pessoa',
+  'members.you': 'você',
+  'members.owner': 'Proprietário',
+  'members.leaveTrip': 'Sair da viagem',
+  'members.removeAccess': 'Remover acesso',
+  'members.confirmLeave': 'Sair da viagem? Você perderá o acesso.',
+  'members.confirmRemove': 'Remover o acesso deste usuário?',
+  'members.loadError': 'Falha ao carregar membros',
+  'members.added': 'adicionado',
+  'members.addError': 'Falha ao adicionar',
+  'members.removed': 'Membro removido',
+  'members.removeError': 'Falha ao remover',
+  'members.makeOwner': 'Tornar proprietário',
+  'members.confirmTransfer': 'Transferir a propriedade para {name}? Você se tornará um membro comum.',
+  'members.transferError': 'Falha ao transferir a propriedade',
+  'members.guests': 'Convidados',
+  'members.guest': 'Convidado',
+  'members.guestsHint': 'Pessoas sem conta. Podem ser atribuídas a custos, bagagem e tarefas, mas não podem entrar.',
+  'members.addGuest': 'Adicionar convidado',
+  'members.guestNamePlaceholder': 'Nome do convidado',
+  'members.guestAdded': 'Convidado adicionado',
+  'members.guestAddError': 'Falha ao adicionar convidado',
+  'members.guestRenameError': 'Falha ao renomear convidado',
+  'members.guestRemoved': 'Convidado removido',
+  'members.confirmRemoveGuest':
+    'Remover este convidado? As atribuições dele serão removidas e a parte dele em cada despesa será dividida entre os demais participantes.',
+  'members.guestHasPayments':
+    'Este convidado pagou uma despesa ou faz parte de um pagamento registrado. Altere o pagador ou exclua o pagamento primeiro.',
+};
+export default members;

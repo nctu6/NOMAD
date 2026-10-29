@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react'
-import { Link, useNavigate } from 'react-router-dom'
+import { Link, useNavigate } from 'react-router'
 import { LayoutGrid, Map as MapIcon, Search } from 'lucide-react'
 import Navbar from '../components/Layout/Navbar'
 import CityMap from '../components/Cities/CityMap'
@@ -160,7 +160,7 @@ export default function CitiesPage() {
           ))}
         </div>
         <p className="text-xs mb-4" style={{ color: 'var(--text-faint)' }}>
-          {loading && !data ? t('cities.loading') : t('cities.results', { count: data?.total ?? 0 })}
+          {loading && !data ? t('cities.loading') : t('cities.results', { total: data?.total ?? 0 })}
           {(filters.warm || filters.cheap || filters.fast || filters.safe || filters.healthcare || filters.english) && ` · ${t('cities.filterHidesMissing')}`}
         </p>
 
@@ -261,7 +261,7 @@ function CityCard({ city, locale, fahrenheit, t }: { city: CitySummary; locale: 
       </div>
       {city.overall_score != null && (
         <p className="text-[10px] mt-3" style={{ color: 'var(--text-faint)' }}>
-          {t('cities.basedOn', { count: city.score_count, total: SCORE_KEYS.length })}
+          {t('cities.basedOn', { have: city.score_count, total: SCORE_KEYS.length })}
         </p>
       )}
     </Link>

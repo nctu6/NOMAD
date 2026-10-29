@@ -1,0 +1,32 @@
+import {
+  adminNotificationPreferencesRequestSchema,
+  notificationDefaultsUpdateRequestSchema,
+  preferencesUpdateRequestSchema,
+  testSmtpRequestSchema,
+  testWebhookRequestSchema,
+  testNtfyRequestSchema,
+  notificationRespondRequestSchema,
+  pushSubscribeRequestSchema,
+  pushUnsubscribeRequestSchema,
+} from '@trek/shared';
+
+import { createZodDto } from 'nestjs-zod';
+
+/**
+ * Server-side createZodDto wrappers over the @trek/shared notification
+ * contracts. The global ZodValidationPipe (APP_PIPE in app.module.ts)
+ * validates any @Body() parameter typed with one of these classes by
+ * metatype — the Zod schemas in shared/ remain the single source of truth
+ * for the wire contract.
+ */
+export class PreferencesUpdateDto extends createZodDto(preferencesUpdateRequestSchema) {}
+export class TestSmtpDto extends createZodDto(testSmtpRequestSchema) {}
+export class TestWebhookDto extends createZodDto(testWebhookRequestSchema) {}
+export class TestNtfyDto extends createZodDto(testNtfyRequestSchema) {}
+export class NotificationRespondDto extends createZodDto(notificationRespondRequestSchema) {}
+export class PushSubscribeDto extends createZodDto(pushSubscribeRequestSchema) {}
+export class PushUnsubscribeDto extends createZodDto(pushUnsubscribeRequestSchema) {}
+
+/** The admin-side notification routes NotificationsController serves. */
+export class AdminNotificationPreferencesDto extends createZodDto(adminNotificationPreferencesRequestSchema) {}
+export class NotificationDefaultsUpdateDto extends createZodDto(notificationDefaultsUpdateRequestSchema) {}

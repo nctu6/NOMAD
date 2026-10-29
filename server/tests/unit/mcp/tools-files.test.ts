@@ -1,0 +1,1163 @@
+/**
+ * The trip-file MCP surface (FilesMcp): listing a trip's documents, reading one
+ * document's contents under its own scope, and the attach/describe writes.
+ *
+ * The gates are what this file is really about. Every tool has to answer exactly
+ * what its REST route answers: trip access before anything else, file_edit on
+ * the writes, and a file id that is only resolvable inside its own trip. And
+ * read_trip_file has to stay behind files:content while list_trip_files answers
+ * on files:read alone.
+ */
+import { db as testDb } from '../../../src/db/database';
+import { AppSettings } from '../../../src/db/entities/AppSettings.entity';
+import { FileLinks } from '../../../src/db/entities/FileLinks.entity';
+import { TripFiles } from '../../../src/db/entities/TripFiles.entity';
+import { FilesMcp } from '../../../src/nest/files/files.mcp';
+import { FilesModule } from '../../../src/nest/files/files.module';
+import { FILE_CONTENT_MAX } from '../../../src/nest/files/files.service';
+import { invalidatePermissionsCache } from '../../../src/nest/permissions/permissions-cache';
+import { StorageService } from '../../../src/nest/storage/storage.service';
+import {
+  createUser,
+  createTrip,
+  createDay,
+  createPlace,
+  createDayAssignment,
+  createReservation,
+  addTripMember,
+} from '../../helpers/factories';
+import { linkFile, makeTripFile } from '../../helpers/factories/files';
+import { countRows, findRow, findRows, updateRows } from '../../helpers/factories/rows';
+import { setAppSetting } from '../../helpers/factories/settings';
+import { FakeRealtimeService } from '../../helpers/fake-realtime';
+import { createMcpHarness, parseToolResult, type McpHarness } from '../../helpers/mcp-harness';
+import { expectRegisteredProvider } from '../../helpers/module-providers';
+import { resetTestDb } from '../../helpers/test-db';
+import { createTestOrm, type TestOrm } from '../../helpers/test-orm';
+
+import fs from 'node:fs';
+import nodePath from 'node:path';
+import { describe, it, expect, vi, beforeAll, beforeEach, afterAll } from 'vitest';
+
+vi.mock('../../../src/db/database', async () => {
+  const { createSnapshotTestDb, buildDbMock } = await import('../../helpers/db-mock');
+  return buildDbMock(createSnapshotTestDb());
+});
+
+const { fixture } = vi.hoisted(() => ({ fixture: {} as { root: string } }));
+// The booted container's StorageService is a makeStorageFixture('') over its own
+// mkdtemp root (tests/helpers/test-app.ts). Pin one shared fixture and remember
+// its root, which is what lets read_trip_file return a file this suite wrote.
+vi.mock('../../helpers/storage-fixture', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../helpers/storage-fixture')>();
+  const shared = actual.makeStorageFixture('');
+  fixture.root = shared.root;
+  return { makeStorageFixture: () => shared };
+});
+
+const realtime = new FakeRealtimeService();
+const broadcastMock = realtime.broadcastMock;
+
+beforeEach(async () => {
+  resetTestDb(testDb);
+  broadcastMock.mockClear();
+  delete process.env.DEMO_MODE;
+  // resetTestDb truncates app_settings, but the permission cache is module-scoped
+  // and would keep serving whatever the previous case configured.
+  await invalidatePermissionsCache();
+});
+
+let orm: TestOrm;
+
+beforeAll(async () => {
+  orm = await createTestOrm(testDb);
+});
+
+afterAll(async () => {
+  await orm.close();
+  testDb.close();
+});
+
+async function withHarness(userId: number, fn: (h: McpHarness) => Promise<void>) {
+  const h = await createMcpHarness({ realtime, userId, withResources: false });
+  try {
+    await fn(h);
+  } finally {
+    await h.cleanup();
+  }
+}
+
+/** Lower a configurable action the way the admin permission panel does. */
+async function setPermission(action: string, level: string): Promise<void> {
+  await setAppSetting(orm, `perm_${action}`, level);
+  await invalidatePermissionsCache();
+}
+
+interface FileRowOverrides {
+  filename: string;
+  original_name: string;
+  file_size: number | null;
+  mime_type: string | null;
+  description: string | null;
+  uploaded_by: number | null;
+  place_id: number | null;
+  reservation_id: number | null;
+  starred: number;
+  deleted_at: string | null;
+}
+
+/** A trip_files row, straight in, so each case controls every column. */
+function insertFile(tripId: number, overrides: Partial<FileRowOverrides> = {}) {
+  return makeTripFile(orm, tripId, {
+    filename: overrides.filename ?? 'stored-visa.pdf',
+    original_name: overrides.original_name ?? 'visa.pdf',
+    // `??` would swallow an explicit null here, and a row with no recorded size
+    // or type is exactly what the fallback cases need.
+    file_size: overrides.file_size === undefined ? 2 : overrides.file_size,
+    mime_type: overrides.mime_type === undefined ? 'application/pdf' : overrides.mime_type,
+    description: overrides.description ?? null,
+    uploadedByRef: overrides.uploaded_by ?? null,
+    place: overrides.place_id ?? null,
+    reservation: overrides.reservation_id ?? null,
+    starred: overrides.starred ?? 0,
+    deleted_at: overrides.deleted_at ?? null,
+  });
+}
+
+/** Put real bytes where the storage layer will look for `filename`. */
+function storeBytes(filename: string, body: Buffer | string) {
+  fs.writeFileSync(nodePath.join(fixture.root, filename), body);
+}
+
+async function fileRow(id: number) {
+  const row = await findRow(orm, TripFiles, { id });
+  if (!row) throw new Error(`no trip file ${id}`);
+  return row;
+}
+
+function linkRows(fileId: number) {
+  return findRows(orm, FileLinks, { file: fileId });
+}
+
+// ---------------------------------------------------------------------------
+// list_trip_files
+// ---------------------------------------------------------------------------
+
+describe('Tool: list_trip_files', () => {
+  it('reports name, size, uploader, links and starred state', async () => {
+    const { user } = createUser(testDb);
+    const trip = createTrip(testDb, user.id);
+    const place = createPlace(testDb, trip.id);
+    const reservation = createReservation(testDb, trip.id, { title: 'Hotel Ritz' });
+    const file = await insertFile(trip.id, {
+      original_name: 'boarding-pass.pdf',
+      file_size: 4242,
+      uploaded_by: user.id,
+      place_id: place.id,
+      reservation_id: reservation.id,
+      starred: 1,
+      description: 'AF1234',
+    });
+
+    await withHarness(user.id, async (h) => {
+      const result = await h.client.callTool({ name: 'list_trip_files', arguments: { tripId: trip.id } });
+      const data = parseToolResult(result) as any;
+      expect(data.files).toHaveLength(1);
+      expect(data.files[0]).toMatchObject({
+        id: file.id,
+        original_name: 'boarding-pass.pdf',
+        file_size: 4242,
+        mime_type: 'application/pdf',
+        description: 'AF1234',
+        starred: 1,
+        deleted_at: null,
+        reservation_title: 'Hotel Ritz',
+        uploaded_by_name: user.username,
+      });
+    });
+  });
+
+  it('lists the trash only when asked for it', async () => {
+    const { user } = createUser(testDb);
+    const trip = createTrip(testDb, user.id);
+    await insertFile(trip.id, { original_name: 'live.pdf' });
+    await insertFile(trip.id, { original_name: 'trashed.pdf', deleted_at: '2027-01-01 10:00:00' });
+
+    await withHarness(user.id, async (h) => {
+      const live = parseToolResult(
+        await h.client.callTool({ name: 'list_trip_files', arguments: { tripId: trip.id } }),
+      ) as any;
+      expect(live.files.map((f: any) => f.original_name)).toEqual(['live.pdf']);
+
+      const trashed = parseToolResult(
+        await h.client.callTool({ name: 'list_trip_files', arguments: { tripId: trip.id, trash: true } }),
+      ) as any;
+      expect(trashed.files.map((f: any) => f.original_name)).toEqual(['trashed.pdf']);
+    });
+  });
+
+  it('reports the bookings and places a file is linked to', async () => {
+    const { user } = createUser(testDb);
+    const trip = createTrip(testDb, user.id);
+    const place = createPlace(testDb, trip.id);
+    const reservation = createReservation(testDb, trip.id);
+    const file = await insertFile(trip.id);
+    await linkFile(orm, file.id, { reservation: reservation.id });
+    await linkFile(orm, file.id, { place: place.id });
+
+    await withHarness(user.id, async (h) => {
+      const data = parseToolResult(
+        await h.client.callTool({ name: 'list_trip_files', arguments: { tripId: trip.id } }),
+      ) as any;
+      expect(data.files[0].linked_reservation_ids).toEqual([reservation.id]);
+      expect(data.files[0].linked_place_ids).toEqual([place.id]);
+    });
+  });
+
+  it('denies a non-member', async () => {
+    const { user } = createUser(testDb);
+    const { user: other } = createUser(testDb);
+    const trip = createTrip(testDb, other.id);
+    await insertFile(trip.id);
+
+    await withHarness(user.id, async (h) => {
+      const result = await h.client.callTool({ name: 'list_trip_files', arguments: { tripId: trip.id } });
+      expect(result.isError).toBe(true);
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// read_trip_file
+// ---------------------------------------------------------------------------
+
+describe('Tool: read_trip_file', () => {
+  it('returns a text document as text', async () => {
+    const { user } = createUser(testDb);
+    const trip = createTrip(testDb, user.id);
+    const file = await insertFile(trip.id, {
+      filename: 'notes.txt',
+      original_name: 'packing-notes.txt',
+      mime_type: 'text/plain',
+      file_size: 11,
+    });
+    storeBytes('notes.txt', 'Bring socks');
+
+    await withHarness(user.id, async (h) => {
+      const data = parseToolResult(
+        await h.client.callTool({
+          name: 'read_trip_file',
+          arguments: { tripId: trip.id, fileId: file.id },
+        }),
+      ) as any;
+      expect(data.file).toMatchObject({
+        id: file.id,
+        name: 'packing-notes.txt',
+        mimetype: 'text/plain',
+        size: 11,
+        encoding: 'utf8',
+        content: 'Bring socks',
+      });
+    });
+  });
+
+  it('returns a binary document base64-encoded', async () => {
+    const { user } = createUser(testDb);
+    const trip = createTrip(testDb, user.id);
+    const bytes = Buffer.from([0x25, 0x50, 0x44, 0x46, 0x00, 0xff]);
+    const file = await insertFile(trip.id, {
+      filename: 'stored.pdf',
+      mime_type: 'application/pdf',
+      file_size: bytes.length,
+    });
+    storeBytes('stored.pdf', bytes);
+
+    await withHarness(user.id, async (h) => {
+      const data = parseToolResult(
+        await h.client.callTool({
+          name: 'read_trip_file',
+          arguments: { tripId: trip.id, fileId: file.id },
+        }),
+      ) as any;
+      expect(data.file.encoding).toBe('base64');
+      expect(Buffer.from(data.file.content, 'base64').equals(bytes)).toBe(true);
+    });
+  });
+
+  it('falls back to a binary mimetype when the row has none', async () => {
+    const { user } = createUser(testDb);
+    const trip = createTrip(testDb, user.id);
+    const file = await insertFile(trip.id, { filename: 'unknown.bin', mime_type: null, file_size: null });
+    storeBytes('unknown.bin', 'hi');
+
+    await withHarness(user.id, async (h) => {
+      const data = parseToolResult(
+        await h.client.callTool({
+          name: 'read_trip_file',
+          arguments: { tripId: trip.id, fileId: file.id },
+        }),
+      ) as any;
+      expect(data.file.mimetype).toBe('application/octet-stream');
+      expect(data.file.encoding).toBe('base64');
+    });
+  });
+
+  it('refuses a file that belongs to another trip', async () => {
+    const { user } = createUser(testDb);
+    const trip = createTrip(testDb, user.id);
+    const otherTrip = createTrip(testDb, user.id);
+    const foreign = await insertFile(otherTrip.id, { filename: 'foreign.txt', mime_type: 'text/plain' });
+    storeBytes('foreign.txt', 'secret');
+
+    await withHarness(user.id, async (h) => {
+      const result = await h.client.callTool({
+        name: 'read_trip_file',
+        arguments: { tripId: trip.id, fileId: foreign.id },
+      });
+      expect(result.isError).toBe(true);
+      expect(JSON.stringify(result.content)).toContain('File not found.');
+    });
+  });
+
+  it('refuses a trashed file', async () => {
+    const { user } = createUser(testDb);
+    const trip = createTrip(testDb, user.id);
+    const file = await insertFile(trip.id, {
+      filename: 'trashed.txt',
+      mime_type: 'text/plain',
+      deleted_at: '2027-01-01 10:00:00',
+    });
+    storeBytes('trashed.txt', 'gone');
+
+    await withHarness(user.id, async (h) => {
+      const result = await h.client.callTool({
+        name: 'read_trip_file',
+        arguments: { tripId: trip.id, fileId: file.id },
+      });
+      expect(result.isError).toBe(true);
+      expect(JSON.stringify(result.content)).toContain('File not found.');
+    });
+  });
+
+  it('refuses a file over the 10 MB cap without touching the bytes', async () => {
+    const { user } = createUser(testDb);
+    const trip = createTrip(testDb, user.id);
+    // Recorded size only: the refusal happens before the storage layer is asked,
+    // which is the whole point of capping on the row.
+    const file = await insertFile(trip.id, {
+      filename: 'huge.mp4',
+      mime_type: 'video/mp4',
+      file_size: FILE_CONTENT_MAX + 1,
+    });
+
+    await withHarness(user.id, async (h) => {
+      const result = await h.client.callTool({
+        name: 'read_trip_file',
+        arguments: { tripId: trip.id, fileId: file.id },
+      });
+      expect(result.isError).toBe(true);
+      expect(JSON.stringify(result.content)).toContain('too large to read here (over 10 MB)');
+    });
+  });
+
+  it('reports a row whose bytes are gone as unavailable, not as a crash', async () => {
+    const { user } = createUser(testDb);
+    const trip = createTrip(testDb, user.id);
+    const file = await insertFile(trip.id, { filename: 'never-stored.pdf' });
+
+    await withHarness(user.id, async (h) => {
+      const result = await h.client.callTool({
+        name: 'read_trip_file',
+        arguments: { tripId: trip.id, fileId: file.id },
+      });
+      expect(result.isError).toBe(true);
+      expect(JSON.stringify(result.content)).toContain('File contents are not available.');
+    });
+  });
+
+  it('lets an unexpected storage failure surface instead of calling the file missing', async () => {
+    const { user } = createUser(testDb);
+    const trip = createTrip(testDb, user.id);
+    const file = await insertFile(trip.id, { filename: 'flaky.txt', mime_type: 'text/plain' });
+    storeBytes('flaky.txt', 'hi');
+    // A backend outage is not one of the three refusals: reporting it as "not
+    // found" would send the caller off to fix a file that is perfectly fine.
+    const outage = vi.spyOn(StorageService.prototype, 'getStream').mockRejectedValueOnce(new Error('backend down'));
+
+    try {
+      await withHarness(user.id, async (h) => {
+        const result = await h.client.callTool({
+          name: 'read_trip_file',
+          arguments: { tripId: trip.id, fileId: file.id },
+        });
+        expect(result.isError).toBe(true);
+        const text = JSON.stringify(result.content);
+        expect(text).not.toContain('File not found.');
+        expect(text).not.toContain('File contents are not available.');
+      });
+    } finally {
+      outage.mockRestore();
+    }
+  });
+
+  it('denies a non-member', async () => {
+    const { user } = createUser(testDb);
+    const { user: other } = createUser(testDb);
+    const trip = createTrip(testDb, other.id);
+    const file = await insertFile(trip.id, { filename: 'members-only.txt', mime_type: 'text/plain' });
+    storeBytes('members-only.txt', 'secret');
+
+    await withHarness(user.id, async (h) => {
+      const result = await h.client.callTool({
+        name: 'read_trip_file',
+        arguments: { tripId: trip.id, fileId: file.id },
+      });
+      expect(result.isError).toBe(true);
+      expect(JSON.stringify(result.content)).toContain('Trip not found or access denied.');
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// update_trip_file
+// ---------------------------------------------------------------------------
+
+describe('Tool: update_trip_file', () => {
+  it('sets the description and attaches the file to a place', async () => {
+    const { user } = createUser(testDb);
+    const trip = createTrip(testDb, user.id);
+    const place = createPlace(testDb, trip.id);
+    const file = await insertFile(trip.id);
+
+    await withHarness(user.id, async (h) => {
+      const data = parseToolResult(
+        await h.client.callTool({
+          name: 'update_trip_file',
+          arguments: { tripId: trip.id, fileId: file.id, description: 'Museum ticket', place_id: place.id },
+        }),
+      ) as any;
+      expect(data.file.description).toBe('Museum ticket');
+      expect(await fileRow(file.id)).toMatchObject({ description: 'Museum ticket', place_id: place.id });
+    });
+    expect(broadcastMock).toHaveBeenCalledWith(trip.id, 'file:updated', expect.objectContaining({ _source: 'mcp' }));
+  });
+
+  it('leaves out fields the caller did not send', async () => {
+    const { user } = createUser(testDb);
+    const trip = createTrip(testDb, user.id);
+    const reservation = createReservation(testDb, trip.id);
+    const file = await insertFile(trip.id, { description: 'Keep me' });
+
+    await withHarness(user.id, async (h) => {
+      await h.client.callTool({
+        name: 'update_trip_file',
+        arguments: { tripId: trip.id, fileId: file.id, reservation_id: reservation.id },
+      });
+      expect(await fileRow(file.id)).toMatchObject({ description: 'Keep me', reservation_id: reservation.id });
+    });
+  });
+
+  it('detaches a booking when reservation_id is null', async () => {
+    const { user } = createUser(testDb);
+    const trip = createTrip(testDb, user.id);
+    const reservation = createReservation(testDb, trip.id);
+    const file = await insertFile(trip.id, { reservation_id: reservation.id });
+
+    await withHarness(user.id, async (h) => {
+      await h.client.callTool({
+        name: 'update_trip_file',
+        arguments: { tripId: trip.id, fileId: file.id, reservation_id: null },
+      });
+      expect((await fileRow(file.id)).reservation_id).toBeNull();
+    });
+  });
+
+  it('refuses a place that belongs to another trip', async () => {
+    const { user } = createUser(testDb);
+    const trip = createTrip(testDb, user.id);
+    const otherTrip = createTrip(testDb, user.id);
+    const foreignPlace = createPlace(testDb, otherTrip.id);
+    const file = await insertFile(trip.id);
+
+    await withHarness(user.id, async (h) => {
+      const result = await h.client.callTool({
+        name: 'update_trip_file',
+        arguments: { tripId: trip.id, fileId: file.id, place_id: foreignPlace.id },
+      });
+      expect(result.isError).toBe(true);
+      expect(JSON.stringify(result.content)).toContain('does not belong to this trip (place_id)');
+      expect((await fileRow(file.id)).place_id).toBeNull();
+    });
+  });
+
+  it('refuses a file id from another trip', async () => {
+    const { user } = createUser(testDb);
+    const trip = createTrip(testDb, user.id);
+    const otherTrip = createTrip(testDb, user.id);
+    const foreign = await insertFile(otherTrip.id);
+
+    await withHarness(user.id, async (h) => {
+      const result = await h.client.callTool({
+        name: 'update_trip_file',
+        arguments: { tripId: trip.id, fileId: foreign.id, description: 'x' },
+      });
+      expect(result.isError).toBe(true);
+      expect(JSON.stringify(result.content)).toContain('File not found.');
+    });
+  });
+
+  it('refuses a member once file_edit is owner-only', async () => {
+    const { user: owner } = createUser(testDb);
+    const { user: member } = createUser(testDb);
+    const trip = createTrip(testDb, owner.id);
+    addTripMember(testDb, trip.id, member.id);
+    const file = await insertFile(trip.id);
+    await setPermission('file_edit', 'trip_owner');
+
+    await withHarness(member.id, async (h) => {
+      const result = await h.client.callTool({
+        name: 'update_trip_file',
+        arguments: { tripId: trip.id, fileId: file.id, description: 'nope' },
+      });
+      expect(result.isError).toBe(true);
+      expect((await fileRow(file.id)).description).toBeNull();
+    });
+  });
+
+  it('denies a non-member', async () => {
+    const { user } = createUser(testDb);
+    const { user: other } = createUser(testDb);
+    const trip = createTrip(testDb, other.id);
+    const file = await insertFile(trip.id);
+
+    await withHarness(user.id, async (h) => {
+      const result = await h.client.callTool({
+        name: 'update_trip_file',
+        arguments: { tripId: trip.id, fileId: file.id, description: 'nope' },
+      });
+      expect(result.isError).toBe(true);
+      expect(JSON.stringify(result.content)).toContain('Trip not found or access denied.');
+    });
+  });
+
+  it('blocks a demo user before it looks at the trip', async () => {
+    process.env.DEMO_MODE = 'true';
+    const { user } = createUser(testDb, { email: 'demo@trek.app' });
+    const trip = createTrip(testDb, user.id);
+    const file = await insertFile(trip.id);
+
+    await withHarness(user.id, async (h) => {
+      const result = await h.client.callTool({
+        name: 'update_trip_file',
+        arguments: { tripId: trip.id, fileId: file.id, description: 'nope' },
+      });
+      expect(result.isError).toBe(true);
+      expect((await fileRow(file.id)).description).toBeNull();
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// upload_trip_file (#1566)
+// ---------------------------------------------------------------------------
+
+describe('Tool: upload_trip_file', () => {
+  const pdf = Buffer.from('%PDF-1.4 booking').toString('base64');
+
+  it('stores the bytes, records the row and attaches it to a booking', async () => {
+    const { user } = createUser(testDb);
+    const trip = createTrip(testDb, user.id);
+    const booking = createReservation(testDb, trip.id);
+
+    await withHarness(user.id, async (h) => {
+      const data = parseToolResult(
+        await h.client.callTool({
+          name: 'upload_trip_file',
+          arguments: {
+            tripId: trip.id,
+            filename: 'C:\\mail\\hotel.pdf',
+            content: pdf,
+            description: 'Hotel',
+            reservation_id: booking.id,
+          },
+        }),
+      ) as any;
+      expect(data.file).toMatchObject({
+        original_name: 'hotel.pdf',
+        mime_type: 'application/pdf',
+        file_size: 16,
+        description: 'Hotel',
+        reservation_id: booking.id,
+        uploaded_by: user.id,
+      });
+      expect(data.file.filename).toMatch(/^[0-9a-f-]{36}\.pdf$/);
+      expect(fs.readFileSync(nodePath.join(fixture.root, data.file.filename), 'utf8')).toBe('%PDF-1.4 booking');
+      // And the read tool hands the same bytes back.
+      const read = parseToolResult(
+        await h.client.callTool({ name: 'read_trip_file', arguments: { tripId: trip.id, fileId: data.file.id } }),
+      ) as any;
+      expect(Buffer.from(read.file.content, 'base64').toString()).toBe('%PDF-1.4 booking');
+    });
+    expect(broadcastMock).toHaveBeenCalledWith(trip.id, 'file:created', expect.objectContaining({ _source: 'mcp' }));
+  });
+
+  it('refuses an extension the file manager would refuse', async () => {
+    const { user } = createUser(testDb);
+    const trip = createTrip(testDb, user.id);
+    await withHarness(user.id, async (h) => {
+      for (const filename of ['evil.html', 'logo.svg', 'tool.exe', 'noext']) {
+        const result = await h.client.callTool({
+          name: 'upload_trip_file',
+          arguments: { tripId: trip.id, filename, content: pdf },
+        });
+        expect(result.isError).toBe(true);
+        expect(JSON.stringify(result.content)).toContain('not allowed');
+      }
+    });
+    expect(await countRows(orm, TripFiles)).toBe(0);
+  });
+
+  it('follows the operator list, including the wildcard', async () => {
+    const { user } = createUser(testDb);
+    const trip = createTrip(testDb, user.id);
+    await setAppSetting(orm, 'allowed_file_types', 'pdf');
+    await withHarness(user.id, async (h) => {
+      const refused = await h.client.callTool({
+        name: 'upload_trip_file',
+        arguments: { tripId: trip.id, filename: 'notes.txt', content: pdf },
+      });
+      expect(refused.isError).toBe(true);
+      await updateRows(orm, AppSettings, { key: 'allowed_file_types' }, { value: '*' });
+      const data = parseToolResult(
+        await h.client.callTool({
+          name: 'upload_trip_file',
+          arguments: { tripId: trip.id, filename: 'route.gpx', content: pdf },
+        }),
+      ) as any;
+      expect(data.file.mime_type).toBe('application/gpx+xml');
+    });
+  });
+
+  it('refuses content that is not base64, or decodes to nothing', async () => {
+    const { user } = createUser(testDb);
+    const trip = createTrip(testDb, user.id);
+    await withHarness(user.id, async (h) => {
+      const bad = await h.client.callTool({
+        name: 'upload_trip_file',
+        arguments: { tripId: trip.id, filename: 'a.pdf', content: 'not base64!' },
+      });
+      expect(JSON.stringify(bad.content)).toContain('not valid base64');
+      const empty = await h.client.callTool({
+        name: 'upload_trip_file',
+        arguments: { tripId: trip.id, filename: 'a.pdf', content: '==' },
+      });
+      expect(JSON.stringify(empty.content)).toContain('empty');
+    });
+  });
+
+  it('refuses a file over the cap', async () => {
+    const { user } = createUser(testDb);
+    const trip = createTrip(testDb, user.id);
+    // Just past the cap after decoding, still inside the schema's base64 length.
+    const big = Buffer.alloc(FILE_CONTENT_MAX + 1, 1).toString('base64');
+    await withHarness(user.id, async (h) => {
+      const result = await h.client.callTool({
+        name: 'upload_trip_file',
+        arguments: { tripId: trip.id, filename: 'big.pdf', content: big },
+      });
+      expect(result.isError).toBe(true);
+      expect(JSON.stringify(result.content)).toContain('too large');
+    });
+  });
+
+  it('refuses a place from another trip', async () => {
+    const { user } = createUser(testDb);
+    const trip = createTrip(testDb, user.id);
+    const foreignTrip = createTrip(testDb, user.id);
+    const foreignPlace = createPlace(testDb, foreignTrip.id);
+    await withHarness(user.id, async (h) => {
+      const result = await h.client.callTool({
+        name: 'upload_trip_file',
+        arguments: { tripId: trip.id, filename: 'a.pdf', content: pdf, place_id: foreignPlace.id },
+      });
+      expect(result.isError).toBe(true);
+      expect(JSON.stringify(result.content)).toContain('does not belong to this trip');
+    });
+    expect(await countRows(orm, TripFiles)).toBe(0);
+  });
+
+  it('refuses a member once file_upload is owner-only', async () => {
+    const { user: owner } = createUser(testDb);
+    const { user: member } = createUser(testDb);
+    const trip = createTrip(testDb, owner.id);
+    addTripMember(testDb, trip.id, member.id);
+    await setPermission('file_upload', 'trip_owner');
+    await withHarness(member.id, async (h) => {
+      const result = await h.client.callTool({
+        name: 'upload_trip_file',
+        arguments: { tripId: trip.id, filename: 'a.pdf', content: pdf },
+      });
+      expect(result.isError).toBe(true);
+    });
+  });
+
+  it('denies a non-member, and blocks a demo user', async () => {
+    const { user } = createUser(testDb);
+    const { user: other } = createUser(testDb);
+    const foreign = createTrip(testDb, other.id);
+    await withHarness(user.id, async (h) => {
+      const result = await h.client.callTool({
+        name: 'upload_trip_file',
+        arguments: { tripId: foreign.id, filename: 'a.pdf', content: pdf },
+      });
+      expect(JSON.stringify(result.content)).toContain('Trip not found or access denied.');
+    });
+    process.env.DEMO_MODE = 'true';
+    const { user: demo } = createUser(testDb, { email: 'demo@trek.app' });
+    const own = createTrip(testDb, demo.id);
+    await withHarness(demo.id, async (h) => {
+      const result = await h.client.callTool({
+        name: 'upload_trip_file',
+        arguments: { tripId: own.id, filename: 'a.pdf', content: pdf },
+      });
+      expect(result.isError).toBe(true);
+    });
+    expect(await countRows(orm, TripFiles)).toBe(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// link_trip_file
+// ---------------------------------------------------------------------------
+
+describe('Tool: link_trip_file', () => {
+  it('attaches one file to a booking, a place and a day assignment', async () => {
+    const { user } = createUser(testDb);
+    const trip = createTrip(testDb, user.id);
+    const reservation = createReservation(testDb, trip.id);
+    const place = createPlace(testDb, trip.id);
+    const day = createDay(testDb, trip.id);
+    const assignment = createDayAssignment(testDb, day.id, place.id);
+    const file = await insertFile(trip.id);
+
+    await withHarness(user.id, async (h) => {
+      const first = parseToolResult(
+        await h.client.callTool({
+          name: 'link_trip_file',
+          arguments: { tripId: trip.id, fileId: file.id, reservation_id: reservation.id },
+        }),
+      ) as any;
+      expect(first.success).toBe(true);
+      expect(first.links).toHaveLength(1);
+
+      await h.client.callTool({
+        name: 'link_trip_file',
+        arguments: { tripId: trip.id, fileId: file.id, place_id: place.id, assignment_id: assignment.id },
+      });
+    });
+
+    const links = await linkRows(file.id);
+    expect(links).toHaveLength(2);
+    expect(links[0].reservation_id).toBe(reservation.id);
+    expect(links[1]).toMatchObject({ place_id: place.id, assignment_id: assignment.id });
+  });
+
+  it('refuses a call with no target instead of storing an empty link', async () => {
+    const { user } = createUser(testDb);
+    const trip = createTrip(testDb, user.id);
+    const file = await insertFile(trip.id);
+
+    await withHarness(user.id, async (h) => {
+      const result = await h.client.callTool({
+        name: 'link_trip_file',
+        arguments: { tripId: trip.id, fileId: file.id },
+      });
+      expect(result.isError).toBe(true);
+      expect(JSON.stringify(result.content)).toContain('at least one of reservation_id');
+    });
+    expect(await linkRows(file.id)).toHaveLength(0);
+  });
+
+  it('refuses a booking from another trip', async () => {
+    const { user } = createUser(testDb);
+    const trip = createTrip(testDb, user.id);
+    const otherTrip = createTrip(testDb, user.id);
+    const foreignReservation = createReservation(testDb, otherTrip.id);
+    const file = await insertFile(trip.id);
+
+    await withHarness(user.id, async (h) => {
+      const result = await h.client.callTool({
+        name: 'link_trip_file',
+        arguments: { tripId: trip.id, fileId: file.id, reservation_id: foreignReservation.id },
+      });
+      expect(result.isError).toBe(true);
+      expect(JSON.stringify(result.content)).toContain('does not belong to this trip (reservation_id)');
+    });
+    expect(await linkRows(file.id)).toHaveLength(0);
+  });
+
+  it('refuses a day assignment from another trip', async () => {
+    const { user } = createUser(testDb);
+    const trip = createTrip(testDb, user.id);
+    const otherTrip = createTrip(testDb, user.id);
+    const foreignDay = createDay(testDb, otherTrip.id);
+    const foreignPlace = createPlace(testDb, otherTrip.id);
+    const foreignAssignment = createDayAssignment(testDb, foreignDay.id, foreignPlace.id);
+    const file = await insertFile(trip.id);
+
+    await withHarness(user.id, async (h) => {
+      const result = await h.client.callTool({
+        name: 'link_trip_file',
+        arguments: { tripId: trip.id, fileId: file.id, assignment_id: foreignAssignment.id },
+      });
+      expect(result.isError).toBe(true);
+      expect(JSON.stringify(result.content)).toContain('does not belong to this trip (assignment_id)');
+    });
+  });
+
+  it('refuses a file id from another trip', async () => {
+    const { user } = createUser(testDb);
+    const trip = createTrip(testDb, user.id);
+    const otherTrip = createTrip(testDb, user.id);
+    const foreign = await insertFile(otherTrip.id);
+    const reservation = createReservation(testDb, trip.id);
+
+    await withHarness(user.id, async (h) => {
+      const result = await h.client.callTool({
+        name: 'link_trip_file',
+        arguments: { tripId: trip.id, fileId: foreign.id, reservation_id: reservation.id },
+      });
+      expect(result.isError).toBe(true);
+      expect(JSON.stringify(result.content)).toContain('File not found.');
+      // Nothing was linked, so no tab is told about the other trip's file.
+      expect(broadcastMock).not.toHaveBeenCalledWith(expect.anything(), 'file:updated', expect.anything());
+    });
+  });
+
+  it('refuses a member once file_edit is owner-only', async () => {
+    const { user: owner } = createUser(testDb);
+    const { user: member } = createUser(testDb);
+    const trip = createTrip(testDb, owner.id);
+    addTripMember(testDb, trip.id, member.id);
+    const reservation = createReservation(testDb, trip.id);
+    const file = await insertFile(trip.id);
+    await setPermission('file_edit', 'trip_owner');
+
+    await withHarness(member.id, async (h) => {
+      const result = await h.client.callTool({
+        name: 'link_trip_file',
+        arguments: { tripId: trip.id, fileId: file.id, reservation_id: reservation.id },
+      });
+      expect(result.isError).toBe(true);
+    });
+    expect(await linkRows(file.id)).toHaveLength(0);
+  });
+
+  it('denies a non-member', async () => {
+    const { user } = createUser(testDb);
+    const { user: other } = createUser(testDb);
+    const trip = createTrip(testDb, other.id);
+    const reservation = createReservation(testDb, trip.id);
+    const file = await insertFile(trip.id);
+
+    await withHarness(user.id, async (h) => {
+      const result = await h.client.callTool({
+        name: 'link_trip_file',
+        arguments: { tripId: trip.id, fileId: file.id, reservation_id: reservation.id },
+      });
+      expect(result.isError).toBe(true);
+      expect(JSON.stringify(result.content)).toContain('Trip not found or access denied.');
+    });
+  });
+
+  it('blocks a demo user', async () => {
+    process.env.DEMO_MODE = 'true';
+    const { user } = createUser(testDb, { email: 'demo@trek.app' });
+    const trip = createTrip(testDb, user.id);
+    const reservation = createReservation(testDb, trip.id);
+    const file = await insertFile(trip.id);
+
+    await withHarness(user.id, async (h) => {
+      const result = await h.client.callTool({
+        name: 'link_trip_file',
+        arguments: { tripId: trip.id, fileId: file.id, reservation_id: reservation.id },
+      });
+      expect(result.isError).toBe(true);
+    });
+    expect(await linkRows(file.id)).toHaveLength(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// unlink_trip_file
+// ---------------------------------------------------------------------------
+
+describe('Tool: unlink_trip_file', () => {
+  it('removes one link and leaves the others alone', async () => {
+    const { user } = createUser(testDb);
+    const trip = createTrip(testDb, user.id);
+    const reservation = createReservation(testDb, trip.id);
+    const place = createPlace(testDb, trip.id);
+    const file = await insertFile(trip.id);
+    await linkFile(orm, file.id, { reservation: reservation.id });
+    await linkFile(orm, file.id, { place: place.id });
+    const doomed = (await linkRows(file.id))[0].id;
+
+    await withHarness(user.id, async (h) => {
+      const data = parseToolResult(
+        await h.client.callTool({
+          name: 'unlink_trip_file',
+          arguments: { tripId: trip.id, fileId: file.id, linkId: doomed },
+        }),
+      ) as any;
+      expect(data.success).toBe(true);
+    });
+    const left = await linkRows(file.id);
+    expect(left).toHaveLength(1);
+    expect(left[0].place_id).toBe(place.id);
+  });
+
+  it('refuses a file id from another trip, so a foreign link survives', async () => {
+    const { user } = createUser(testDb);
+    const trip = createTrip(testDb, user.id);
+    const otherTrip = createTrip(testDb, user.id);
+    const foreignFile = await insertFile(otherTrip.id);
+    const foreignReservation = createReservation(testDb, otherTrip.id);
+    await linkFile(orm, foreignFile.id, { reservation: foreignReservation.id });
+    const linkId = (await linkRows(foreignFile.id))[0].id;
+
+    await withHarness(user.id, async (h) => {
+      const result = await h.client.callTool({
+        name: 'unlink_trip_file',
+        arguments: { tripId: trip.id, fileId: foreignFile.id, linkId },
+      });
+      expect(result.isError).toBe(true);
+      expect(JSON.stringify(result.content)).toContain('File not found.');
+    });
+    expect(await linkRows(foreignFile.id)).toHaveLength(1);
+  });
+
+  it('refuses a member once file_edit is owner-only', async () => {
+    const { user: owner } = createUser(testDb);
+    const { user: member } = createUser(testDb);
+    const trip = createTrip(testDb, owner.id);
+    addTripMember(testDb, trip.id, member.id);
+    const reservation = createReservation(testDb, trip.id);
+    const file = await insertFile(trip.id);
+    await linkFile(orm, file.id, { reservation: reservation.id });
+    const linkId = (await linkRows(file.id))[0].id;
+    await setPermission('file_edit', 'trip_owner');
+
+    await withHarness(member.id, async (h) => {
+      const result = await h.client.callTool({
+        name: 'unlink_trip_file',
+        arguments: { tripId: trip.id, fileId: file.id, linkId },
+      });
+      expect(result.isError).toBe(true);
+    });
+    expect(await linkRows(file.id)).toHaveLength(1);
+  });
+
+  it('denies a non-member', async () => {
+    const { user } = createUser(testDb);
+    const { user: other } = createUser(testDb);
+    const trip = createTrip(testDb, other.id);
+    const file = await insertFile(trip.id);
+
+    await withHarness(user.id, async (h) => {
+      const result = await h.client.callTool({
+        name: 'unlink_trip_file',
+        arguments: { tripId: trip.id, fileId: file.id, linkId: 1 },
+      });
+      expect(result.isError).toBe(true);
+      expect(JSON.stringify(result.content)).toContain('Trip not found or access denied.');
+    });
+  });
+
+  it('blocks a demo user', async () => {
+    process.env.DEMO_MODE = 'true';
+    const { user } = createUser(testDb, { email: 'demo@nomad.app' });
+    const trip = createTrip(testDb, user.id);
+    const reservation = createReservation(testDb, trip.id);
+    const file = await insertFile(trip.id);
+    await linkFile(orm, file.id, { reservation: reservation.id });
+    const linkId = (await linkRows(file.id))[0].id;
+
+    await withHarness(user.id, async (h) => {
+      const result = await h.client.callTool({
+        name: 'unlink_trip_file',
+        arguments: { tripId: trip.id, fileId: file.id, linkId },
+      });
+      expect(result.isError).toBe(true);
+    });
+    expect(await linkRows(file.id)).toHaveLength(1);
+  });
+});
+
+describe('Link changes reach every tab', () => {
+  /** The one file:updated a link change sent, and the file it carried. */
+  function sentFile() {
+    expect(broadcastMock.mock.calls.map((call) => call[1])).toEqual(['file:updated']);
+    return broadcastMock.mock.calls[0][2].file as {
+      id: number;
+      linked_place_ids: number[];
+      linked_reservation_ids: number[];
+    };
+  }
+
+  it('MCP-FILES-001: link_trip_file sends the file again with every link it now carries', async () => {
+    const { user } = createUser(testDb);
+    const trip = createTrip(testDb, user.id);
+    const reservation = createReservation(testDb, trip.id);
+    const place = createPlace(testDb, trip.id);
+    const file = await insertFile(trip.id);
+    await linkFile(orm, file.id, { reservation: reservation.id });
+    await withHarness(user.id, async (h) => {
+      await h.client.callTool({
+        name: 'link_trip_file',
+        arguments: { tripId: trip.id, fileId: file.id, place_id: place.id },
+      });
+    });
+    expect(sentFile()).toMatchObject({
+      id: file.id,
+      linked_reservation_ids: [reservation.id],
+      linked_place_ids: [place.id],
+    });
+  });
+
+  it('MCP-FILES-002: unlink_trip_file sends the file with the links it has left', async () => {
+    const { user } = createUser(testDb);
+    const trip = createTrip(testDb, user.id);
+    const reservation = createReservation(testDb, trip.id);
+    const place = createPlace(testDb, trip.id);
+    const file = await insertFile(trip.id);
+    await linkFile(orm, file.id, { reservation: reservation.id });
+    await linkFile(orm, file.id, { place: place.id });
+    const doomed = (await linkRows(file.id))[0].id;
+    await withHarness(user.id, async (h) => {
+      await h.client.callTool({
+        name: 'unlink_trip_file',
+        arguments: { tripId: trip.id, fileId: file.id, linkId: doomed },
+      });
+    });
+    expect(sentFile()).toMatchObject({ id: file.id, linked_reservation_ids: [], linked_place_ids: [place.id] });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// list_trip_file_links
+// ---------------------------------------------------------------------------
+
+describe('Tool: list_trip_file_links', () => {
+  it('returns every link with its id and the booking title', async () => {
+    const { user } = createUser(testDb);
+    const trip = createTrip(testDb, user.id);
+    const reservation = createReservation(testDb, trip.id, { title: 'Nightjet 421' });
+    const file = await insertFile(trip.id);
+    await linkFile(orm, file.id, { reservation: reservation.id });
+
+    await withHarness(user.id, async (h) => {
+      const data = parseToolResult(
+        await h.client.callTool({
+          name: 'list_trip_file_links',
+          arguments: { tripId: trip.id, fileId: file.id },
+        }),
+      ) as any;
+      expect(data.links).toHaveLength(1);
+      expect(data.links[0]).toMatchObject({
+        file_id: file.id,
+        reservation_id: reservation.id,
+        reservation_title: 'Nightjet 421',
+      });
+      expect(typeof data.links[0].id).toBe('number');
+    });
+  });
+
+  it('refuses a file id from another trip', async () => {
+    const { user } = createUser(testDb);
+    const trip = createTrip(testDb, user.id);
+    const otherTrip = createTrip(testDb, user.id);
+    const foreign = await insertFile(otherTrip.id);
+
+    await withHarness(user.id, async (h) => {
+      const result = await h.client.callTool({
+        name: 'list_trip_file_links',
+        arguments: { tripId: trip.id, fileId: foreign.id },
+      });
+      expect(result.isError).toBe(true);
+      expect(JSON.stringify(result.content)).toContain('File not found.');
+    });
+  });
+
+  it('denies a non-member', async () => {
+    const { user } = createUser(testDb);
+    const { user: other } = createUser(testDb);
+    const trip = createTrip(testDb, other.id);
+    const file = await insertFile(trip.id);
+
+    await withHarness(user.id, async (h) => {
+      const result = await h.client.callTool({
+        name: 'list_trip_file_links',
+        arguments: { tripId: trip.id, fileId: file.id },
+      });
+      expect(result.isError).toBe(true);
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Scope gating
+// ---------------------------------------------------------------------------
+
+describe('File tools: scope gating', () => {
+  const READ_TOOLS = ['list_trip_files', 'list_trip_file_links'];
+  const WRITE_TOOLS = ['upload_trip_file', 'update_trip_file', 'link_trip_file', 'unlink_trip_file'];
+
+  async function listToolNames(userId: number, scopes: string[] | null): Promise<string[]> {
+    const h = await createMcpHarness({ realtime, userId, withResources: false, scopes });
+    try {
+      return (await h.client.listTools()).tools.map((t) => t.name);
+    } finally {
+      await h.cleanup();
+    }
+  }
+
+  it('registers all seven tools for a full-access session', async () => {
+    const { user } = createUser(testDb);
+    const names = await listToolNames(user.id, null);
+    for (const tool of [...READ_TOOLS, ...WRITE_TOOLS, 'read_trip_file']) expect(names).toContain(tool);
+  });
+
+  it('files:read lists the documents but does not open them', async () => {
+    const { user } = createUser(testDb);
+    const names = await listToolNames(user.id, ['files:read']);
+    for (const tool of READ_TOOLS) expect(names).toContain(tool);
+    for (const tool of [...WRITE_TOOLS, 'read_trip_file']) expect(names).not.toContain(tool);
+  });
+
+  it('files:content opens a document without granting the listing', async () => {
+    const { user } = createUser(testDb);
+    const names = await listToolNames(user.id, ['files:content']);
+    expect(names).toContain('read_trip_file');
+    for (const tool of [...READ_TOOLS, ...WRITE_TOOLS]) expect(names).not.toContain(tool);
+  });
+
+  it('files:write carries the reads, and still not the contents', async () => {
+    const { user } = createUser(testDb);
+    const names = await listToolNames(user.id, ['files:write']);
+    for (const tool of [...READ_TOOLS, ...WRITE_TOOLS]) expect(names).toContain(tool);
+    expect(names).not.toContain('read_trip_file');
+  });
+
+  it('a token without any files scope gets none of them', async () => {
+    const { user } = createUser(testDb);
+    const names = await listToolNames(user.id, ['trips:read']);
+    for (const tool of [...READ_TOOLS, ...WRITE_TOOLS, 'read_trip_file']) expect(names).not.toContain(tool);
+  });
+});
+
+describe('FilesMcp wiring', () => {
+  it('is listed in its module providers', () => {
+    expectRegisteredProvider(FilesModule, FilesMcp);
+  });
+});

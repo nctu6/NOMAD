@@ -1,0 +1,103 @@
+import type { NotificationLocale } from '../externalNotifications/types';
+import { pluralForm } from '../plural';
+
+const uk: NotificationLocale = {
+  email: {
+    footer: 'Ви отримали це, оскільки увімкнули сповіщення в TREK.',
+    manage: 'Керувати налаштуваннями у Налаштуваннях',
+    madeWith: 'Made with',
+    openTrek: 'Відкрити TREK',
+  },
+  events: {
+    trip_invite: (p) => ({
+      title: `Запрошення до "${p.trip}"`,
+      body: `${p.actor} запросив ${p.invitee || 'учасника'} до подорожі "${p.trip}".`,
+    }),
+    booking_change: (p) => ({
+      title: `Нове бронювання: ${p.booking}`,
+      body: `${p.actor} додав бронювання "${p.booking}" (${p.type}) до "${p.trip}".`,
+    }),
+    trip_reminder: (p) => ({
+      title: `Нагадування про подорож: ${p.trip}`,
+      body: `Ваша подорож "${p.trip}" наближається!`,
+    }),
+    todo_due: (p) => ({
+      title: `Завдання з терміном: ${p.todo}`,
+      body: `"${p.todo}" у "${p.trip}" — термін ${p.due}.`,
+    }),
+    vacay_invite: (p) => ({
+      title: 'Запрошення Vacay Fusion',
+      body: `${p.actor} запрошує вас об'єднати плани відпустки. Відкрийте TREK, щоб прийняти або відхилити.`,
+    }),
+    vacay_share: (p) => ({
+      title: 'Календар Vacay надано',
+      body: `${p.actor} поділився з вами своїм календарем відпусток. Відкрийте TREK, щоб переглянути.`,
+    }),
+    collection_invite: (p) => ({
+      title: 'Запрошення до колекції',
+      body: `${p.actor} запрошує вас поділитися колекцією. Відкрийте TREK, щоб прийняти або відхилити.`,
+    }),
+    photos_shared: (p) => ({
+      title: pluralForm(p.count, 'uk', {
+        one: `${p.count} нове фото`,
+        few: `${p.count} нові фото`,
+        many: `${p.count} нових фото`,
+        other: `${p.count} нового фото`,
+      }),
+      body: `${p.actor} поділився ${p.count} фото у "${p.trip}".`,
+    }),
+    collab_message: (p) => ({
+      title: `Нове повідомлення у "${p.trip}"`,
+      body: `${p.actor}: ${p.preview}`,
+    }),
+    packing_tagged: (p) => ({
+      title: `Пакування: ${p.category}`,
+      body: `${p.actor} призначив вас до категорії "${p.category}" у "${p.trip}".`,
+    }),
+    version_available: (p) => ({
+      title: 'Доступна нова версія TREK',
+      body: `TREK ${p.version} тепер доступний. Перейдіть до панелі адміністратора для оновлення.`,
+    }),
+    replica_failure: (p) => ({
+      title: 'Збій репліки сховища',
+      body:
+        `Помилка запису в репліку '${p.backend}': ${p.op} для ${p.key} — ${p.error}.` +
+        (p.suppressed !== '0'
+          ? pluralForm(p.suppressed, 'uk', {
+              one: ` Із моменту останнього сповіщення приховано ще ${p.suppressed} помилку.`,
+              few: ` Із моменту останнього сповіщення приховано ще ${p.suppressed} помилки.`,
+              many: ` Із моменту останнього сповіщення приховано ще ${p.suppressed} помилок.`,
+              other: ` Із моменту останнього сповіщення приховано ще ${p.suppressed} помилки.`,
+            })
+          : ''),
+    }),
+    paddle_region_requested: (p) => ({
+      title: 'Запитано регіон для сплаву',
+      body: `${p.actor} планує сплав у регіоні ${p.region}. Завантажте або відхиліть його дані про воду в адмініструванні в розділі «Доповнення».`,
+    }),
+    synology_session_cleared: () => ({
+      title: 'Сеанс Synology скинуто',
+      body: 'Ваш обліковий запис або URL Synology змінився. Ви вийшли з Synology Photos.',
+    }),
+    wanderer_source_hint: (p) => ({
+      title: `Маршрут wanderer: ${p.tour}`,
+      body:
+        p.state === 'changed'
+          ? `«${p.tour}» у «${p.trip}» змінено в wanderer. Відкрийте тур і перевірте його джерело, щоб побачити всі зміни. У подорожі нічого не змінюється само.`
+          : p.state === 'unverifiable'
+            ? `«${p.tour}» у «${p.trip}» більше не можна перевірити в wanderer. Тур у вашій подорожі залишається як є.`
+            : `«${p.tour}» у «${p.trip}», можливо, змінено в wanderer. Відкрийте тур і перевірте його джерело. У подорожі нічого не змінюється само.`,
+    }),
+    plugin_notification: (p) => ({ title: p.title ?? '', body: p.body ?? '' }),
+  },
+  passwordReset: {
+    subject: 'Скидання пароля',
+    greeting: 'Привіт',
+    body: 'Ми отримали запит на скидання пароля вашого облікового запису TREK. Натисніть кнопку нижче, щоб встановити новий пароль.',
+    ctaIntro: 'Скинути пароль',
+    expiry: 'Це посилання дійсне протягом 60 хвилин.',
+    ignore: 'Якщо ви не надсилали цей запит, просто проігноруйте цей лист — ваш пароль залишиться незмінним.',
+  },
+};
+
+export default uk;

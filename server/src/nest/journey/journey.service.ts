@@ -1,0 +1,205 @@
+import { ADDON_IDS } from '../../addons';
+import { UserImmichRepository } from '../../db/repositories/UserImmich.repository';
+import { AddonsService } from '../addons/addons.service';
+import { ImmichService } from '../memories/immich.service';
+import { PhotoProviderRegistry } from '../memories/photo-provider.registry';
+import { PhotoResolverService } from '../memories/photo-resolver.service';
+import { JourneyDomainService } from './journey-domain.service';
+import { JourneyMapService } from './journey-map.service';
+import { JourneyShareService } from './journey-share.service';
+import { Injectable } from '@nestjs/common';
+
+import type { Response } from 'express';
+
+/**
+ * Thin Nest wrapper around the existing journey services. Access control lives
+ * inside journeyService (each call returns null/false for no-access), so this
+ * just re-exposes the functions plus the share-link helpers, the Immich mirror
+ * and the addon gate the legacy mount enforced.
+ */
+@Injectable()
+export class JourneyService {
+  constructor(
+    private readonly addons: AddonsService,
+    private readonly immich: ImmichService,
+    private readonly providers: PhotoProviderRegistry,
+    private readonly photoResolver: PhotoResolverService,
+    private readonly journey: JourneyDomainService,
+    private readonly share: JourneyShareService,
+    private readonly immichRepo: UserImmichRepository,
+    private readonly map: JourneyMapService,
+  ) {}
+
+  async journeyAddonEnabled(): Promise<boolean> {
+    return this.addons.isAddonEnabled(ADDON_IDS.JOURNEY);
+  }
+
+  // Journeys
+  listJourneys(userId: number) {
+    return this.journey.listJourneys(userId);
+  }
+  createJourney(userId: number, data: Parameters<typeof this.journey.createJourney>[1], sid?: string) {
+    return this.journey.createJourney(userId, data, sid);
+  }
+  getJourneyFull(id: number, userId: number) {
+    return this.journey.getJourneyFull(id, userId);
+  }
+  updateJourney(id: number, userId: number, data: Parameters<typeof this.journey.updateJourney>[2], sid?: string) {
+    return this.journey.updateJourney(id, userId, data, sid);
+  }
+  deleteJourney(id: number, userId: number, sid?: string) {
+    return this.journey.deleteJourney(id, userId, sid);
+  }
+  getSuggestions(userId: number) {
+    return this.journey.getSuggestions(userId);
+  }
+  listUserTrips(userId: number) {
+    return this.journey.listUserTrips(userId);
+  }
+  updateJourneyPreferences(
+    id: number,
+    userId: number,
+    data: Parameters<typeof this.journey.updateJourneyPreferences>[2],
+    sid?: string,
+  ) {
+    return this.journey.updateJourneyPreferences(id, userId, data, sid);
+  }
+  restoreDismissedSuggestions(id: number, userId: number, sid?: string) {
+    return this.journey.restoreDismissedSuggestions(id, userId, sid);
+  }
+
+  // Trips
+  addTripToJourney(id: number, tripId: number, userId: number) {
+    return this.journey.addTripToJourney(id, tripId, userId);
+  }
+  removeTripFromJourney(id: number, tripId: number, userId: number, sid?: string) {
+    return this.journey.removeTripFromJourney(id, tripId, userId, sid);
+  }
+
+  // Entries
+  listEntries(id: number, userId: number) {
+    return this.journey.listEntries(id, userId);
+  }
+  journeyTracks(id: number, userId: number) {
+    return this.journey.journeyTracks(id, userId);
+  }
+  journeyStats(id: number, userId: number) {
+    return this.journey.journeyStats(id, userId);
+  }
+  // Entry create/update bodies are free-form in the legacy route (req.body: any);
+  // the cast keeps that boundary here so callers needn't pre-shape the payload.
+  createEntry(id: number, userId: number, data: Record<string, unknown>, sid?: string) {
+    return this.journey.createEntry(id, userId, data as Parameters<typeof this.journey.createEntry>[2], sid);
+  }
+  updateEntry(entryId: number, userId: number, data: Parameters<typeof this.journey.updateEntry>[2], sid?: string) {
+    return this.journey.updateEntry(entryId, userId, data, sid);
+  }
+  deleteEntry(entryId: number, userId: number, sid?: string) {
+    return this.journey.deleteEntry(entryId, userId, sid);
+  }
+  reorderEntries(id: number, userId: number, orderedIds: number[], sid?: string) {
+    return this.journey.reorderEntries(id, userId, orderedIds, sid);
+  }
+  reorderEntryPhotos(entryId: number, userId: number, orderedIds: number[], sid?: string) {
+    return this.journey.reorderEntryPhotos(entryId, userId, orderedIds, sid);
+  }
+
+  // Photos
+  addPhoto(
+    entryId: number,
+    userId: number,
+    filePath: string,
+    thumbnailPath: string | undefined,
+    caption: string | undefined,
+    media?: { mediaType?: string; durationMs?: number | null },
+  ) {
+    return this.journey.addPhoto(entryId, userId, filePath, thumbnailPath, caption, media);
+  }
+  setPhotoProvider(photoId: number, provider: string, assetId: string, ownerId: number) {
+    return this.journey.setPhotoProvider(photoId, provider, assetId, ownerId);
+  }
+  // Linking, unlinking and captioning a photo go through JourneyPhotoLinksService, which tells every tab.
+  deletePhoto(photoId: number, userId: number) {
+    return this.journey.deletePhoto(photoId, userId);
+  }
+  uploadGalleryPhotos(id: number, userId: number, filePaths: Parameters<typeof this.journey.uploadGalleryPhotos>[2]) {
+    return this.journey.uploadGalleryPhotos(id, userId, filePaths);
+  }
+  deleteGalleryPhoto(journeyPhotoId: number, userId: number) {
+    return this.journey.deleteGalleryPhoto(journeyPhotoId, userId);
+  }
+
+  // Contributors
+  addContributor(id: number, userId: number, targetUserId: number, role: 'editor' | 'viewer') {
+    return this.journey.addContributor(id, userId, targetUserId, role);
+  }
+  updateContributorRole(id: number, userId: number, targetUserId: number, role: 'editor' | 'viewer') {
+    return this.journey.updateContributorRole(id, userId, targetUserId, role);
+  }
+  removeContributor(id: number, userId: number, targetUserId: number) {
+    return this.journey.removeContributor(id, userId, targetUserId);
+  }
+
+  // Share links
+  // Authorization lives in JourneyShareService.readJourneyShareLink, which the
+  // MCP tool reads through as well; { allowed: false } is a refusal, not "no
+  // link exists".
+  getJourneyShareLink(id: number, userId: number) {
+    return this.share.readJourneyShareLink(id, userId);
+  }
+  createOrUpdateJourneyShareLink(
+    id: number,
+    userId: number,
+    data: Parameters<typeof this.share.createOrUpdateJourneyShareLink>[2],
+  ) {
+    return this.share.createOrUpdateJourneyShareLink(id, userId, data);
+  }
+  deleteJourneyShareLink(id: number, userId: number) {
+    return this.share.deleteJourneyShareLink(id, userId);
+  }
+
+  // Immich mirror (only when the user opted in via integration settings)
+  // JV1 — `UserImmichRepository.getImmichAutoUpload`.
+  async immichAutoUploadEnabled(userId: number): Promise<boolean> {
+    return !!(await this.immichRepo.getImmichAutoUpload(userId));
+  }
+  uploadToImmich(userId: number, relativePath: string, originalName: string) {
+    return this.immich.uploadToImmich(userId, relativePath, originalName);
+  }
+
+  // Public (share-token) access — no auth, validated by token.
+  async getPublicJourney(token: string) {
+    return this.share.getPublicJourney(token);
+  }
+  getPublicMapLayers(token: string) {
+    return this.map.publicMapLayers(token);
+  }
+  validateShareTokenForPhoto(token: string, photoId: number) {
+    return this.share.validateShareTokenForPhoto(token, photoId);
+  }
+  validateShareTokenForAsset(token: string, assetId: string) {
+    return this.share.validateShareTokenForAsset(token, assetId);
+  }
+  streamPhoto(res: Response, ownerId: number, photoId: number, kind: 'thumbnail' | 'original') {
+    return this.photoResolver.streamPhoto(res, ownerId, photoId, kind);
+  }
+  /**
+   * Stream a shared journey asset from whichever backend holds it.
+   *
+   * Replaced a pair of per-provider passthroughs (and, before those, a dynamic
+   * import() around a since-removed cycle). The public controller used to pick
+   * between them with `provider === 'immich' ? … : trySynology()`, so a third
+   * provider would have been handed to Synology and 404'd from inside its
+   * parser. An unregistered provider is now told apart from a failing one.
+   */
+  streamProviderAsset(
+    res: Response,
+    provider: string,
+    ref: { userId: number; ownerId: number; assetId: string },
+    kind: 'thumbnail' | 'original',
+  ): Promise<void> | null {
+    const backend = this.providers.get(provider);
+    if (!backend) return null;
+    return backend.streamAsset(res, ref, kind);
+  }
+}

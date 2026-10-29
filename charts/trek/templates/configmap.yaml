@@ -1,0 +1,126 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "trek.fullname" . }}-config
+  labels:
+    app: {{ include "trek.name" . }}
+data:
+  NODE_ENV: {{ .Values.env.NODE_ENV | quote }}
+  PORT: {{ .Values.env.PORT | quote }}
+  {{- if .Values.env.TZ }}
+  TZ: {{ .Values.env.TZ | quote }}
+  {{- end }}
+  {{- if .Values.env.LOG_LEVEL }}
+  LOG_LEVEL: {{ .Values.env.LOG_LEVEL | quote }}
+  {{- end }}
+  {{- if .Values.env.TREK_WIKI_DIR }}
+  TREK_WIKI_DIR: {{ .Values.env.TREK_WIKI_DIR | quote }}
+  {{- end }}
+  {{- if .Values.env.DEFAULT_LANGUAGE }}
+  DEFAULT_LANGUAGE: {{ .Values.env.DEFAULT_LANGUAGE | quote }}
+  {{- end }}
+  {{- if .Values.env.MCP_MAX_SESSION_PER_USER }}
+  MCP_MAX_SESSION_PER_USER: {{ .Values.env.MCP_MAX_SESSION_PER_USER | quote }}
+  {{- end }}
+  {{- if .Values.env.ALLOWED_ORIGINS }}
+  ALLOWED_ORIGINS: {{ .Values.env.ALLOWED_ORIGINS | quote }}
+  {{- end }}
+  {{- if .Values.env.APP_URL }}
+  APP_URL: {{ .Values.env.APP_URL | quote }}
+  {{- end }}
+  {{- if .Values.env.FORCE_HTTPS }}
+  FORCE_HTTPS: {{ .Values.env.FORCE_HTTPS | quote }}
+  {{- end }}
+  {{- if .Values.env.HSTS_INCLUDE_SUBDOMAINS }}
+  HSTS_INCLUDE_SUBDOMAINS: {{ .Values.env.HSTS_INCLUDE_SUBDOMAINS | quote }}
+  {{- end }}
+  {{- if .Values.env.COOKIE_SECURE }}
+  COOKIE_SECURE: {{ .Values.env.COOKIE_SECURE | quote }}
+  {{- end }}
+  {{- if .Values.env.SESSION_DURATION }}
+  SESSION_DURATION: {{ .Values.env.SESSION_DURATION | quote }}
+  {{- end }}
+  {{- if .Values.env.SESSION_DURATION_REMEMBER }}
+  SESSION_DURATION_REMEMBER: {{ .Values.env.SESSION_DURATION_REMEMBER | quote }}
+  {{- end }}
+  {{- if .Values.env.TRUST_PROXY }}
+  TRUST_PROXY: {{ .Values.env.TRUST_PROXY | quote }}
+  {{- end }}
+  {{- if .Values.env.ALLOW_INTERNAL_NETWORK }}
+  ALLOW_INTERNAL_NETWORK: {{ .Values.env.ALLOW_INTERNAL_NETWORK | quote }}
+  {{- end }}
+  {{- if .Values.env.ALLOW_LINK_LOCAL_IPS }}
+  ALLOW_LINK_LOCAL_IPS: {{ .Values.env.ALLOW_LINK_LOCAL_IPS | quote }}
+  {{- end }}
+  {{- if .Values.env.OIDC_ISSUER }}
+  OIDC_ISSUER: {{ .Values.env.OIDC_ISSUER | quote }}
+  {{- end }}
+  {{- if .Values.env.OIDC_CLIENT_ID }}
+  OIDC_CLIENT_ID: {{ .Values.env.OIDC_CLIENT_ID | quote }}
+  {{- end }}
+  {{- if .Values.env.OIDC_DISPLAY_NAME }}
+  OIDC_DISPLAY_NAME: {{ .Values.env.OIDC_DISPLAY_NAME | quote }}
+  {{- end }}
+  {{- if .Values.env.OIDC_ONLY }}
+  OIDC_ONLY: {{ .Values.env.OIDC_ONLY | quote }}
+  {{- end }}
+  {{- if .Values.env.OIDC_ADMIN_CLAIM }}
+  OIDC_ADMIN_CLAIM: {{ .Values.env.OIDC_ADMIN_CLAIM | quote }}
+  {{- end }}
+  {{- if .Values.env.OIDC_ADMIN_VALUE }}
+  OIDC_ADMIN_VALUE: {{ .Values.env.OIDC_ADMIN_VALUE | quote }}
+  {{- end }}
+  {{- if .Values.env.OIDC_USERNAME_CLAIM }}
+  OIDC_USERNAME_CLAIM: {{ .Values.env.OIDC_USERNAME_CLAIM | quote }}
+  {{- end }}
+  {{- if .Values.env.OIDC_SCOPE }}
+  OIDC_SCOPE: {{ .Values.env.OIDC_SCOPE | quote }}
+  {{- end }}
+  {{- if .Values.env.HTTP_PROXY }}
+  HTTP_PROXY: {{ .Values.env.HTTP_PROXY | quote }}
+  {{- end }}
+  {{- if .Values.env.HTTPS_PROXY }}
+  HTTPS_PROXY: {{ .Values.env.HTTPS_PROXY | quote }}
+  {{- end }}
+  {{- if .Values.env.NO_PROXY }}
+  NO_PROXY: {{ .Values.env.NO_PROXY | quote }}
+  {{- end }}
+  {{- if .Values.env.OIDC_DISCOVERY_URL }}
+  OIDC_DISCOVERY_URL: {{ .Values.env.OIDC_DISCOVERY_URL | quote }}
+  {{- end }}
+  {{- if .Values.env.DEMO_MODE }}
+  DEMO_MODE: {{ .Values.env.DEMO_MODE | quote }}
+  {{- end }}
+  {{- if .Values.env.MCP_RATE_LIMIT }}
+  MCP_RATE_LIMIT: {{ .Values.env.MCP_RATE_LIMIT | quote }}
+  {{- end }}
+  {{- if .Values.env.NOMINATIM_URL }}
+  NOMINATIM_URL: {{ .Values.env.NOMINATIM_URL | quote }}
+  {{- end }}
+  {{- if .Values.env.OVERPASS_URL }}
+  OVERPASS_URL: {{ .Values.env.OVERPASS_URL | quote }}
+  {{- end }}
+  {{- if .Values.env.OVERPASS_TIMEOUT_MS }}
+  OVERPASS_TIMEOUT_MS: {{ .Values.env.OVERPASS_TIMEOUT_MS | quote }}
+  {{- end }}
+  {{- /* Tested for presence rather than truth: the one value this switch gets set to is
+         false, and an unquoted false (or --set env.TREK_PLACES_ENABLED=false) would
+         otherwise drop the key and leave the index on. */}}
+  {{- if not (kindIs "invalid" .Values.env.TREK_PLACES_ENABLED) }}
+  TREK_PLACES_ENABLED: {{ .Values.env.TREK_PLACES_ENABLED | quote }}
+  {{- end }}
+  {{- if .Values.env.TREK_PLACES_URL }}
+  TREK_PLACES_URL: {{ .Values.env.TREK_PLACES_URL | quote }}
+  {{- end }}
+  {{- if .Values.env.GOOGLE_LIST_DATA_BASE }}
+  GOOGLE_LIST_DATA_BASE: {{ .Values.env.GOOGLE_LIST_DATA_BASE | quote }}
+  {{- end }}
+  {{- if .Values.env.AMAP_API_BASE }}
+  AMAP_API_BASE: {{ .Values.env.AMAP_API_BASE | quote }}
+  {{- end }}
+  {{- if .Values.env.VAPID_PUBLIC_KEY }}
+  VAPID_PUBLIC_KEY: {{ .Values.env.VAPID_PUBLIC_KEY | quote }}
+  {{- end }}
+  {{- if .Values.env.VAPID_SUBJECT }}
+  VAPID_SUBJECT: {{ .Values.env.VAPID_SUBJECT | quote }}
+  {{- end }}

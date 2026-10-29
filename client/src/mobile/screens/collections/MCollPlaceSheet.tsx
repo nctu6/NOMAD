@@ -1,0 +1,296 @@
+import { useRef, useState } from 'react'
+import Markdown from 'react-markdown'
+import remarkGfm from 'remark-gfm'
+import remarkBreaks from 'remark-breaks'
+import { Camera, Check, Copy, ExternalLink, Loader2, MapPin, Navigation, Pencil, Trash2, X } from 'lucide-react'
+import type { CollectionLabel, CollectionLink, CollectionPlace, CollectionStatus } from '@trek/shared'
+import type { Category, TranslationFn } from '../../../types'
+import { useCollectionPlaceForm } from '../../../components/Collections/useCollectionPlaceForm'
+import { normalizeLinkUrl, STATUS_ORDER } from '../../../pages/collections/collectionsModel'
+import MSheet from '../../components/MSheet'
+import PlaceRating from '../../../components/shared/StarRating'
+import MCollCategoryPicker from './MCollCategoryPicker'
+import MCollLinksEditor from './MCollLinksEditor'
+import { STATUS_SPEC } from './collectionsMobileModel'
+import { CancelPill, Eyebrow, INPUT_CLS, PrimaryPill, TEXTAREA_CLS } from './MCollSheetKit'
+import { getNavigationTargets, navigationTargetLabel, openNavigationTarget } from '../../../components/Planner/placeNavigation'
+import { NavigationMenu } from '../../../components/shared/NavigationMenu'
+
+function linkHost(url: string): string {
+  try { return new URL(url).hostname.replace(/^www\./, '') } catch { return url }
+}
+
+// Hero chrome sits on a photo/gradient — fixed white/black scrims in both themes.
+const HERO_CAT_CHIP =
+  'inline-flex min-w-0 items-center gap-1 rounded-full bg-[rgba(255,255,255,.9)] px-[10px] py-[3px] font-geist text-[0.59375rem] font-extrabold text-[#101013]' // theme-lint-disable
+// Close and the cover controls beside it.
+const HERO_BTN =
+  'flex h-8 w-8 items-center justify-center rounded-full bg-[rgba(0,0,0,.28)] text-white' // theme-lint-disable
+
+interface MCollPlaceSheetProps {
+  place: CollectionPlace | null
+  canEdit: boolean
+  canDelete: boolean
+  categories: Category[]
+  labels: CollectionLabel[]
+  onClose: () => void
+  onSetStatus: (status: CollectionStatus) => void
+  onSave: (patch: { name?: string; description?: string | null; links?: CollectionLink[]; category_id?: number | null; label_ids?: number[]; image_url?: string | null; address?: string | null }) => Promise<void>
+  onUploadImage?: (file: File) => Promise<void>
+  onCopyToTrip: () => void
+  onRemove: () => void
+  /** Cast/clear the current user's star vote (#1435); every member may vote. */
+  onRate?: (rating: number | null) => Promise<void> | void
+  t: TranslationFn
+}
+
+/**
+ * Saved-place detail: auto-cover hero with the category chip, the live status
+ * cycle (Idea → Want to go → Visited), markdown description, links, copy to
+ * trip and remove. Edit mode swaps the body for name / category / labels /
+ * description / links.
+ */
+export default function MCollPlaceSheet({
+  place, canEdit, canDelete, categories, labels, onClose, onSetStatus, onSave, onUploadImage, onCopyToTrip, onRemove, onRate, t,
+}: MCollPlaceSheetProps) {
+  const imageInputRef = useRef<HTMLInputElement | null>(null)
+  const [navOpen, setNavOpen] = useState(false)
+  const navBtnRef = useRef<HTMLButtonElement | null>(null)
+  const {
+    shown: held, editing, setEditing, name, setName, address, setAddress, categoryId, setCategoryId, description, setDescription,
+    links, setLinks, labelIds, toggleLabel, saving, imgBusy, cover, assignedLabels, handleImagePick, handleImageRemove, cancelEdit, save,
+  } = useCollectionPlaceForm({
+    place, labels, onSave, onUploadImage, t, normalizeLinkUrl, holdLastPlace: true, dropPhotoOnPlaceUpdate: true,
+  })
+
+  const navTargets = getNavigationTargets(held)
+  const actionBtn =
+    'flex flex-1 items-center justify-center gap-[6px] rounded-[13px] border border-[color:var(--m-rowbr)] bg-[color:var(--m-sheet)] px-2 py-[11px] text-[0.78125rem] font-semibold text-m-ink'
+
+  return (
+    <MSheet open={place != null} onClose={onClose} material="opaque" className="!rounded-[24px]" ariaLabel={held?.name}>
+      {held && (
+        <>
+          {/* Hero: auto cover (photo when available, the design gradient otherwise) */}
+          <div
+            className="relative flex-none px-[18px] pb-4 pt-[14px]"
+            style={cover ? undefined : { background: 'linear-gradient(120deg,#2FA9A0,#3B8C7E)' }}
+          >
+            {cover && (
+              <>
+                <img src={cover} alt="" className="absolute inset-0 h-full w-full object-cover" />
+                <div className="absolute inset-0 bg-[linear-gradient(180deg,rgba(0,0,0,.18),rgba(0,0,0,.44))]" />
+              </>
+            )}
+            {/* Chip and cover controls share the top row, in flow: the name always
+                starts below the buttons, chip or not, and a long category name
+                ellipsizes against them instead of running underneath. */}
+            <div className="relative flex items-center gap-2">
+              {held.category?.name && (
+                <span className={HERO_CAT_CHIP}>
+                  <MapPin size={9} strokeWidth={2.6} className="flex-none" />
+                  <span className="truncate">{held.category.name}</span>
+                </span>
+              )}
+              {/* -me-1 keeps the buttons 14px off the edge, where close has always sat. */}
+              <div className="-me-1 ms-auto flex flex-none gap-[6px]">
+                {canEdit && onUploadImage && (
+                  <>
+                    <input ref={imageInputRef} type="file" accept="image/jpeg,image/png,image/gif,image/webp,.heic,.heif" className="hidden" onChange={handleImagePick} />
+                    {held.image_url && !imgBusy && (
+                      <button type="button" onClick={handleImageRemove} aria-label={t('places.removeImage')} className={HERO_BTN}>
+                        <Trash2 size={15} strokeWidth={2.2} />
+                      </button>
+                    )}
+                    <button
+                      type="button"
+                      onClick={() => { if (!imgBusy) imageInputRef.current?.click() }}
+                      aria-label={held.image_url ? t('places.changeImage') : t('places.uploadImage')}
+                      className={HERO_BTN}
+                    >
+                      {imgBusy ? <Loader2 size={15} strokeWidth={2.2} className="animate-spin" /> : <Camera size={15} strokeWidth={2.2} />}
+                    </button>
+                  </>
+                )}
+                <button type="button" onClick={onClose} aria-label={t('common.close')} className={HERO_BTN}>
+                  <X size={15} strokeWidth={2.2} />
+                </button>
+              </div>
+            </div>
+            <div className="relative mt-1 text-[1.3125rem] font-extrabold text-white">{held.name}</div>
+          </div>
+
+          <div className="min-h-0 flex-1 overflow-y-auto px-[18px] pb-[18px] pt-[14px]">
+            {!editing && held.address && (
+              <div className="flex items-start gap-[6px] font-geist text-[0.75rem] leading-[1.5] text-m-muted">
+                <MapPin size={13} strokeWidth={2} className="mt-[1px] flex-none" /> {held.address}
+              </div>
+            )}
+
+            {/* Status cycle */}
+            <div className="mt-3 flex gap-[6px]">
+              {STATUS_ORDER.map(s => {
+                const meta = STATUS_SPEC[s]
+                const Icon = meta.icon
+                const on = held.status === s
+                return (
+                  <button
+                    key={s}
+                    type="button"
+                    disabled={!canEdit}
+                    onClick={() => onSetStatus(s)}
+                    aria-pressed={on}
+                    className={`flex flex-1 items-center justify-center gap-[5px] rounded-[12px] py-[9px] text-[0.71875rem] font-bold ${
+                      on ? 'bg-m-act text-m-actfg' : 'bg-m-sheetop text-m-ink shadow-[inset_0_0_0_1.5px_var(--m-rowbr)]'
+                    }`}
+                  >
+                    <Icon size={13} strokeWidth={2.2} style={on ? undefined : { color: meta.color }} />
+                    <span className="truncate">{t(meta.labelKey)}</span>
+                  </button>
+                )
+              })}
+            </div>
+
+            {/* Collaborative rating (#1435) — tap a star to cast/clear your vote. */}
+            {onRate && (
+              <div className="mt-3">
+                <PlaceRating ratings={held.ratings ?? []} ratingAvg={held.rating_avg} onRate={onRate} size={18} />
+              </div>
+            )}
+
+            {editing ? (
+              <>
+                <Eyebrow className="mb-[6px] mt-4">{t('common.name').toUpperCase()}</Eyebrow>
+                <input value={name} onChange={e => setName(e.target.value)} className={INPUT_CLS} />
+                {/* Address (#1870): free text, same as the add sheet offers */}
+                <Eyebrow className="mb-[6px] mt-[14px]">{t('places.formAddress').toUpperCase()}</Eyebrow>
+                <input value={address} onChange={e => setAddress(e.target.value)} placeholder={t('places.formAddressPlaceholder')} className={INPUT_CLS} />
+                <Eyebrow className="mb-[6px] mt-[14px]">{t('collections.category').toUpperCase()}</Eyebrow>
+                <MCollCategoryPicker categories={categories} value={categoryId} onChange={setCategoryId} t={t} />
+                {labels.length > 0 && (
+                  <>
+                    <Eyebrow className="mb-[6px] mt-[14px]">{t('collections.labels.title').toUpperCase()}</Eyebrow>
+                    <div className="flex flex-wrap gap-[6px]">
+                      {labels.map(l => {
+                        const on = labelIds.includes(l.id)
+                        const color = l.color || '#6366F1'
+                        return (
+                          <button
+                            key={l.id}
+                            type="button"
+                            onClick={() => toggleLabel(l.id)}
+                            aria-pressed={on}
+                            className="flex items-center gap-[5px] rounded-full border px-3 py-[7px] text-[0.71875rem] font-bold"
+                            style={on
+                              ? { background: `${color}18`, color, borderColor: `${color}2e` }
+                              : { background: 'var(--m-ic)', color: 'var(--m-ink)', borderColor: 'var(--m-rowbr)' }}
+                          >
+                            <span className="h-[7px] w-[7px] rounded-full" style={{ background: color }} />
+                            {l.name}
+                          </button>
+                        )
+                      })}
+                    </div>
+                  </>
+                )}
+                <Eyebrow className="mb-[6px] mt-[14px]">{t('collections.description').toUpperCase()}</Eyebrow>
+                <textarea rows={4} value={description} onChange={e => setDescription(e.target.value)} placeholder={t('collections.descriptionPlaceholder')} className={TEXTAREA_CLS} />
+                <Eyebrow className="mb-[6px] mt-[14px]">{t('collections.links').toUpperCase()}</Eyebrow>
+                <MCollLinksEditor links={links} onChange={setLinks} t={t} />
+                <div className="mt-4 flex items-center gap-2">
+                  <CancelPill className="ms-auto" onClick={cancelEdit}>{t('common.cancel')}</CancelPill>
+                  <PrimaryPill onClick={save} disabled={saving}>
+                    <Check size={14} strokeWidth={2.4} /> {t('common.save')}
+                  </PrimaryPill>
+                </div>
+              </>
+            ) : (
+              <>
+                {assignedLabels.length > 0 && (
+                  <div className="mt-3 flex flex-wrap gap-[6px]">
+                    {assignedLabels.map(l => {
+                      const color = l.color || '#6366F1'
+                      return (
+                        <span
+                          key={l.id}
+                          className="inline-flex items-center gap-[5px] rounded-full px-[10px] py-[5px] font-geist text-[0.625rem] font-bold"
+                          style={{ background: `${color}18`, color }}
+                        >
+                          <span className="h-[7px] w-[7px] rounded-full" style={{ background: color }} />
+                          {l.name}
+                        </span>
+                      )
+                    })}
+                  </div>
+                )}
+                {held.description && (
+                  <div className="collab-note-md mt-3 font-geist text-[0.78125rem] leading-[1.55] text-m-ink">
+                    <Markdown remarkPlugins={[remarkGfm, remarkBreaks]}>{held.description}</Markdown>
+                  </div>
+                )}
+                {held.links && held.links.length > 0 && (
+                  <div className="mt-3 flex flex-wrap gap-[6px]">
+                    {held.links.map((l, i) => (
+                      <a
+                        key={i}
+                        href={l.url}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="inline-flex items-center gap-[5px] rounded-full border border-[color:var(--m-rowbr)] bg-[color:var(--m-sheet)] px-3 py-[7px] text-[0.71875rem] font-semibold text-m-ink"
+                      >
+                        <ExternalLink size={13} strokeWidth={2} className="text-m-muted" /> {l.label || linkHost(l.url)}
+                      </a>
+                    ))}
+                  </div>
+                )}
+                {/* Collections are a store of places to go to, so the way there leads
+                    the actions, as it does in the trip's place sheet (#2091). One
+                    app offered opens straight away; more open the same picker. */}
+                {navTargets.length > 0 && (
+                  <>
+                    <button
+                      ref={navBtnRef}
+                      type="button"
+                      onClick={() => (navTargets.length === 1 ? openNavigationTarget(navTargets[0]) : setNavOpen(true))}
+                      className="mt-[14px] flex w-full items-center justify-center gap-[6px] rounded-[13px] bg-[color:var(--m-act)] px-2 py-[11px] text-[0.78125rem] font-semibold text-[color:var(--m-actfg)]"
+                    >
+                      <Navigation size={14} strokeWidth={2.2} />
+                      {navTargets.length === 1 ? navigationTargetLabel(navTargets[0], t) : t('inspector.navigation')}
+                    </button>
+                    {navOpen && (
+                      <NavigationMenu
+                        targets={navTargets}
+                        anchor={navBtnRef.current}
+                        onClose={() => setNavOpen(false)}
+                        title={t('inspector.openWith')}
+                      />
+                    )}
+                  </>
+                )}
+                <div className={`${navTargets.length > 0 ? 'mt-2' : 'mt-[14px]'} flex gap-2`}>
+                  {canEdit && (
+                    <button type="button" onClick={() => setEditing(true)} className={actionBtn}>
+                      <Pencil size={13} strokeWidth={2.2} /> {t('common.edit')}
+                    </button>
+                  )}
+                  <button type="button" onClick={onCopyToTrip} className={actionBtn}>
+                    <Copy size={13} strokeWidth={2.2} /> {t('collections.copyToTrip')}
+                  </button>
+                </div>
+                {canDelete && (
+                  <button
+                    type="button"
+                    onClick={onRemove}
+                    className="mt-[10px] flex w-full items-center justify-center gap-[6px] rounded-[13px] p-[11px] text-[0.78125rem] font-bold text-[color:var(--m-st-danger)]"
+                  >
+                    <Trash2 size={14} strokeWidth={2} /> {t('collections.removeFromList')}
+                  </button>
+                )}
+              </>
+            )}
+          </div>
+        </>
+      )}
+    </MSheet>
+  )
+}

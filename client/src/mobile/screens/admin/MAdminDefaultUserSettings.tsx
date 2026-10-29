@@ -1,0 +1,318 @@
+import React, { useState } from 'react'
+import { ChevronDown, Settings2 } from 'lucide-react'
+import { useTranslation } from '../../../i18n'
+import { MapView } from '../../../components/Map/MapView'
+import { SYMBOLS, currenciesWith } from '../../../components/Budget/BudgetPanel.constants'
+import { getApiErrorMessage, type DistanceUnit, type WeekStart } from '../../../types'
+import { weekStartOptions } from '../../../utils/calendarWeek'
+import { withTileApiKey } from '../../../utils/tileUrl'
+import { defaultStyleForProvider } from '../../../components/Map/glProviders'
+import { MAP_PRESETS, type MapProvider } from '../../../components/Settings/mapSettingsModel'
+import { useDefaultUserSettings, type Defaults } from '../../../components/Admin/useDefaultUserSettings'
+import MToggle from '../../components/MToggle'
+import MSegmented from '../../components/MSegmented'
+import { MAdminCard, MAdminCardHead, MAdminField, MAdminInput, MAdminRow } from './MAdminUi'
+import { MSetSelectRow } from '../settings/MSettingsUi'
+import MSetPickerSheet from '../settings/MSetPickerSheet'
+import RoutingInstanceFields from '../../../components/Admin/RoutingInstanceFields'
+
+// Mobile-native rebuild of the desktop DefaultUserSettingsTab. Identical data
+// layer (adminApi defaults, per-change auto-save, reset-to-built-in) — only the
+// presentation is relaid on the admin mobile design system.
+export default function MAdminDefaultUserSettings(): React.ReactElement {
+  const { t, locale } = useTranslation()
+  const {
+    defaults, loaded, managed, isSet, save, reset, mapTileUrl, setMapTileUrl, mapboxToken, setMapboxToken,
+    cartoKey, setCartoKey, mapboxStyle, setMapboxStyle, mapPreviewPlaces, mapProvider, glStylePresets, styleKey,
+    saveMapProvider, pickTilePreset, pickStylePreset, commitStyle,
+  } = useDefaultUserSettings({ errorMessage: getApiErrorMessage, previewCreatedAt: () => new Date().toISOString() })
+  const [currencyOpen, setCurrencyOpen] = useState(false)
+  const [presetOpen, setPresetOpen] = useState(false)
+  const [styleOpen, setStyleOpen] = useState(false)
+
+  const ResetButton = ({ field }: { field: keyof Defaults }) =>
+    isSet(field) ? (
+      <button
+        type="button"
+        onClick={() => reset(field)}
+        className="ms-2 font-geist text-[0.625rem] font-medium text-m-faint underline"
+      >
+        {t('admin.defaultSettings.resetToBuiltIn')}
+      </button>
+    ) : null
+
+  if (!loaded) {
+    return (
+      <MAdminCard>
+        <p className="font-geist text-[0.75rem] italic text-m-faint">Loading…</p>
+      </MAdminCard>
+    )
+  }
+
+  const darkMode = defaults.dark_mode
+  // No active value when the setting is unset → segmented shows no pill, matching
+  // the desktop tab (which only highlights a button once a default is chosen).
+  const colorModeValue =
+    darkMode === 'dark' || darkMode === true
+      ? 'dark'
+      : darkMode === 'light' || darkMode === false
+        ? 'light'
+        : darkMode === 'auto'
+          ? 'auto'
+          : ''
+
+  const modeOptions: { value: string; label: React.ReactNode }[] = [
+    { value: 'light', label: t('settings.light') },
+    { value: 'dark', label: t('settings.dark') },
+    { value: 'auto', label: t('settings.auto') },
+  ]
+  const tempOptions: { value: string; label: React.ReactNode }[] = [
+    { value: 'celsius', label: '°C Celsius' },
+    { value: 'fahrenheit', label: '°F Fahrenheit' },
+  ]
+  const distanceOptions: { value: string; label: React.ReactNode }[] = [
+    { value: 'metric', label: 'km Metric' },
+    { value: 'imperial', label: 'mi Imperial' },
+  ]
+  const timeOptions: { value: string; label: React.ReactNode }[] = [
+    { value: '24h', label: '24h (14:30)' },
+    { value: '12h', label: '12h (2:30 PM)' },
+  ]
+  const providerOptions: { value: string; label: React.ReactNode }[] = [
+    { value: 'leaflet', label: t('admin.defaultSettings.providerLeaflet') },
+    { value: 'mapbox-gl', label: t('admin.defaultSettings.providerMapbox') },
+    { value: 'maplibre-gl', label: t('admin.defaultSettings.providerMapLibre') },
+  ]
+
+  const currencyLabel = defaults.default_currency
+    ? (SYMBOLS[defaults.default_currency] ? `${defaults.default_currency}  ${SYMBOLS[defaults.default_currency]}` : defaults.default_currency)
+    : t('settings.currency')
+  const tilePresetLabel = MAP_PRESETS.find((p) => p.url === mapTileUrl)?.name || t('settings.mapTemplatePlaceholder.select')
+  const stylePresetLabel = glStylePresets.find((p) => p.url === mapboxStyle)?.name || t('admin.defaultSettings.mapboxStylePlaceholder')
+  const chevron = <ChevronDown size={13} strokeWidth={2} className="flex-none text-m-faint" />
+
+  return (
+    <div className="space-y-3">
+      {/* Display + regional defaults */}
+      <MAdminCard>
+        <MAdminCardHead title={t('admin.defaultSettings.title')} hint={t('admin.defaultSettings.description')} />
+
+        <div className="mt-2 space-y-[14px]">
+          {/* Color Mode */}
+          <MAdminField label={<>{t('settings.colorMode')} <ResetButton field="dark_mode" /></>}>
+            <MSegmented value={colorModeValue} onChange={(v) => save({ dark_mode: v })} options={modeOptions} />
+          </MAdminField>
+
+          {/* Temperature */}
+          <MAdminField label={<>{t('settings.temperature')} <ResetButton field="temperature_unit" /></>}>
+            <MSegmented value={defaults.temperature_unit || ''} onChange={(v) => save({ temperature_unit: v })} options={tempOptions} />
+          </MAdminField>
+
+          {/* Distance */}
+          <MAdminField label={<>{t('settings.distance')} <ResetButton field="distance_unit" /></>}>
+            <MSegmented value={defaults.distance_unit || ''} onChange={(v) => save({ distance_unit: v as DistanceUnit })} options={distanceOptions} />
+          </MAdminField>
+
+          {/* Time Format */}
+          <MAdminField label={<>{t('settings.timeFormat')} <ResetButton field="time_format" /></>}>
+            <MSegmented value={defaults.time_format || ''} onChange={(v) => save({ time_format: v })} options={timeOptions} />
+          </MAdminField>
+
+          {/* Week start (#2029) */}
+          <MAdminField label={<>{t('settings.weekStart')} <ResetButton field="week_start" /></>}>
+            <MSegmented value={defaults.week_start || ''} onChange={(v) => save({ week_start: v as WeekStart })} options={weekStartOptions(locale)} />
+          </MAdminField>
+
+          {/* Default Currency */}
+          <MAdminField
+            label={<>{t('settings.currency')} <ResetButton field="default_currency" /></>}
+            hint={t('settings.currencyHint')}
+          >
+            <MSetSelectRow label={currencyLabel} trailing={chevron} onClick={() => setCurrencyOpen(true)} />
+          </MAdminField>
+
+          {/* Blur Booking Codes */}
+          <MAdminRow
+            first
+            title={<>{t('settings.blurBookingCodes')} <ResetButton field="blur_booking_codes" /></>}
+            trailing={
+              <MToggle
+                checked={defaults.blur_booking_codes === true}
+                ariaLabel={t('settings.blurBookingCodes')}
+                onChange={(v) => save({ blur_booking_codes: v })}
+              />
+            }
+          />
+        </div>
+      </MAdminCard>
+
+      {/* Map */}
+      <MAdminCard>
+        <div className="mb-1 flex items-center gap-2 text-[0.875rem] font-extrabold text-m-ink">
+          <Settings2 size={16} strokeWidth={2.2} className="flex-none" />
+          <span className="min-w-0 flex-1 truncate">{t('settings.mapTemplate')}</span>
+        </div>
+
+        <div className="mt-2 space-y-[14px]">
+          {/* Map Tile URL */}
+          <MAdminField
+            label={<>{t('settings.mapTemplate')} <ResetButton field="map_tile_url" /></>}
+            hint={t('settings.mapDefaultHint')}
+          >
+            <MSetSelectRow label={tilePresetLabel} trailing={chevron} onClick={() => setPresetOpen(true)} />
+            <MAdminInput
+              type="text"
+              className="mt-[6px]"
+              value={mapTileUrl}
+              onChange={(e: React.ChangeEvent<HTMLInputElement>) => setMapTileUrl(e.target.value)}
+              onBlur={() => save({ map_tile_url: mapTileUrl })}
+              placeholder="https://tile.openstreetmap.org/{z}/{x}/{y}.png"
+            />
+          </MAdminField>
+
+          {/* The key comes with the instance on a managed install, injected when the
+              settings are read. A field here would only let somebody save a worse one. */}
+          {!managed && (
+            <MAdminField
+              label={<>{t('admin.defaultSettings.cartoKey')} <ResetButton field="carto_api_key" /></>}
+              hint={t('admin.defaultSettings.cartoKeyHint')}
+            >
+              <MAdminInput
+                type="text"
+                value={cartoKey}
+                onChange={(e: React.ChangeEvent<HTMLInputElement>) => setCartoKey(e.target.value)}
+                onBlur={() => save({ carto_api_key: cartoKey })}
+                spellCheck={false}
+                autoComplete="off"
+              />
+            </MAdminField>
+          )}
+
+          {!managed && <RoutingInstanceFields defaults={defaults} onSave={save} onReset={reset} hintClassName="font-geist text-[0.625rem] leading-relaxed text-m-muted" />}
+
+          {/* Live tile preview */}
+          <div className="relative h-[200px] w-full overflow-hidden rounded-xl">
+            {/* eslint-disable-next-line @typescript-eslint/no-explicit-any */}
+            {React.createElement(MapView as any, {
+              places: mapPreviewPlaces,
+              dayPlaces: [],
+              route: null,
+              routeSegments: null,
+              selectedPlaceId: null,
+              onMarkerClick: null,
+              onMapClick: null,
+              onMapContextMenu: null,
+              center: [48.8566, 2.3522],
+              zoom: 10,
+              // As on the other three previews: the field holds what is being
+              // edited, so the key goes back on before the template resolves.
+              tileUrl: withTileApiKey(mapTileUrl, cartoKey),
+              fitKey: null,
+              dayOrderMap: [],
+              leftWidth: 0,
+              rightWidth: 0,
+              hasInspector: false,
+            })}
+          </div>
+
+          {/* Map provider */}
+          <div className="border-t border-[color:var(--m-rowbr)] pt-[14px]">
+            <MAdminField
+              label={<>{t('admin.defaultSettings.mapProvider')} <ResetButton field="map_provider" /></>}
+              hint={t('admin.defaultSettings.mapProviderHint')}
+            >
+              <MSegmented value={mapProvider} onChange={(v) => saveMapProvider(v as MapProvider)} options={providerOptions} />
+            </MAdminField>
+          </div>
+
+          {mapProvider !== 'leaflet' && (
+            <div className="space-y-[14px]">
+              {mapProvider === 'mapbox-gl' && !managed && (
+                <MAdminField
+                  label={<>{t('admin.defaultSettings.mapboxToken')} <ResetButton field="mapbox_access_token" /></>}
+                  hint={t('admin.defaultSettings.mapboxTokenHint')}
+                >
+                  <MAdminInput
+                    type="text"
+                    value={mapboxToken}
+                    onChange={(e: React.ChangeEvent<HTMLInputElement>) => setMapboxToken(e.target.value)}
+                    onBlur={() => save({ mapbox_access_token: mapboxToken })}
+                    placeholder="pk.eyJ…"
+                    spellCheck={false}
+                    autoComplete="off"
+                  />
+                </MAdminField>
+              )}
+
+              <MAdminField label={<>{t('admin.defaultSettings.mapboxStyle')} <ResetButton field={styleKey} /></>}>
+                <MSetSelectRow label={stylePresetLabel} trailing={chevron} onClick={() => setStyleOpen(true)} />
+                <MAdminInput
+                  type="text"
+                  className="mt-[6px]"
+                  value={mapboxStyle}
+                  onChange={(e: React.ChangeEvent<HTMLInputElement>) => setMapboxStyle(e.target.value)}
+                  onBlur={commitStyle}
+                  placeholder={defaultStyleForProvider(mapProvider)}
+                />
+              </MAdminField>
+
+              {mapProvider === 'mapbox-gl' && (
+                <div>
+                  <MAdminRow
+                    first
+                    title={<>{t('admin.defaultSettings.mapbox3d')} <ResetButton field="mapbox_3d_enabled" /></>}
+                    trailing={
+                      <MToggle
+                        checked={defaults.mapbox_3d_enabled ?? true}
+                        ariaLabel={t('admin.defaultSettings.mapbox3d')}
+                        onChange={(v) => save({ mapbox_3d_enabled: v })}
+                      />
+                    }
+                  />
+                  <MAdminRow
+                    title={<>{t('admin.defaultSettings.mapboxQuality')} <ResetButton field="mapbox_quality_mode" /></>}
+                    trailing={
+                      <MToggle
+                        checked={defaults.mapbox_quality_mode ?? false}
+                        ariaLabel={t('admin.defaultSettings.mapboxQuality')}
+                        onChange={(v) => save({ mapbox_quality_mode: v })}
+                      />
+                    }
+                  />
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+      </MAdminCard>
+
+      {/* Pickers */}
+      <MSetPickerSheet
+        open={currencyOpen}
+        onClose={() => setCurrencyOpen(false)}
+        title={t('settings.currency')}
+        value={defaults.default_currency || ''}
+        onSelect={(value) => { if (value) void save({ default_currency: value }) }}
+        options={currenciesWith(defaults.default_currency).map((c) => ({ value: c, label: SYMBOLS[c] ? `${c}  ${SYMBOLS[c]}` : c }))}
+      />
+
+      <MSetPickerSheet
+        open={presetOpen}
+        onClose={() => setPresetOpen(false)}
+        title={t('settings.mapTemplate')}
+        value={mapTileUrl}
+        onSelect={pickTilePreset}
+        options={MAP_PRESETS.map((p) => ({ value: p.url, label: p.name }))}
+      />
+
+      <MSetPickerSheet
+        open={styleOpen}
+        onClose={() => setStyleOpen(false)}
+        title={t('admin.defaultSettings.mapboxStyle')}
+        value={mapboxStyle}
+        onSelect={pickStylePreset}
+        options={glStylePresets.map((p) => ({ value: p.url, label: p.name }))}
+      />
+    </div>
+  )
+}

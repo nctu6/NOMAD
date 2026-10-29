@@ -1,0 +1,35 @@
+import { AddonsService } from './addons.service';
+import { REQUIRE_ADDON, type RequireAddonMeta } from './require-addon.decorator';
+import { CanActivate, ExecutionContext, HttpException, Injectable } from '@nestjs/common';
+import { Reflector } from '@nestjs/core';
+
+/**
+ * Enforces @RequireAddon. Replaces the three hand-written addon guards
+ * (collections, airtrail, journey), which differed only in which addon id they
+ * read and which word led the 404 body.
+ *
+ * A handler-level @RequireAddon overrides the controller's, so a route group
+ * can carry one addon and a single endpoint another. Without the decorator the
+ * guard is a no-op — it never gates a route that did not ask for it.
+ */
+@Injectable()
+export class AddonGuard implements CanActivate {
+  constructor(
+    private readonly addons: AddonsService,
+    private readonly reflector: Reflector,
+  ) {}
+
+  async canActivate(context: ExecutionContext): Promise<boolean> {
+    const meta = this.reflector.getAllAndOverride<RequireAddonMeta | undefined>(REQUIRE_ADDON, [
+      context.getHandler(),
+      context.getClass(),
+    ]);
+    if (!meta) return true;
+    const ids = typeof meta.addonId === 'string' ? [meta.addonId] : meta.addonId;
+    const enabled = await Promise.all(ids.map((id) => this.addons.isAddonEnabled(id)));
+    if (!enabled.includes(true)) {
+      throw new HttpException({ error: `${meta.label} addon is not enabled` }, 404);
+    }
+    return true;
+  }
+}
