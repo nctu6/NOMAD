@@ -391,6 +391,22 @@ describe('usePlacesSidebar day helpers', () => {
     expect([...S.inDaySet]).toEqual([5]);
     expect(S.isAssignedToSelectedDay(5)).toBe(true);
     expect(S.isAssignedToSelectedDay(6)).toBe(false);
+    expect(S.dayStats.blocked.has(5)).toBe(true);
+    expect(S.placeMenuItems(hotel, 3).some(e => !e.divider && e.label === '+ Day')).toBe(false);
+  });
+
+  it('FE-PLANNER-PSHOOK-052b: two ordinary visits of one place are counted and can be added again', () => {
+    const cafe = buildPlace({ id: 5, name: 'Cafe' });
+    const assignments = {
+      '3': [
+        buildAssignment({ id: 1, place: cafe, day_id: 3 }),
+        buildAssignment({ id: 2, place: cafe, day_id: 3 }),
+      ],
+    };
+    render(<Host {...makeProps({ places: [cafe], assignments, selectedDayId: 3 })} />);
+    expect(S.dayStats.counts.get(5)).toBe(2);
+    expect(S.dayStats.blocked.has(5)).toBe(false);
+    expect(S.placeMenuItems(cafe, 3).some(e => !e.divider && e.label === '+ Day')).toBe(true);
   });
 });
 

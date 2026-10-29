@@ -3,6 +3,7 @@ import { Plus, X, MapPin } from 'lucide-react'
 import { useTranslation } from '../../i18n'
 import type { Place, AssignmentsMap } from '../../types'
 import { placeMatchesSearch } from '../../utils/placeSearch'
+import { dayPlaceCounts } from './dayPlaceCounts'
 
 export function MobileAddPlaceButton({ dayId, places, assignments, onAssign, onAddNew }: {
   dayId: number
@@ -15,9 +16,10 @@ export function MobileAddPlaceButton({ dayId, places, assignments, onAssign, onA
   const [open, setOpen] = useState(false)
   const [search, setSearch] = useState('')
 
-  // Find places not assigned to this day
-  const assignedToDay = new Set((assignments[String(dayId)] || []).map(a => a.place_id))
-  const available = places.filter(p => !assignedToDay.has(p.id))
+  // A place already on the day can be added again. A lodging booking's stop
+  // cannot: a second row would sit beside the night.
+  const stats = dayPlaceCounts(assignments[String(dayId)] || [])
+  const available = places.filter(p => !stats.blocked.has(p.id))
   const filtered = available.filter(p => placeMatchesSearch(p, search))
 
   return (
@@ -56,24 +58,32 @@ export function MobileAddPlaceButton({ dayId, places, assignments, onAssign, onA
                 {available.length === 0 ? t('dayplan.mobile.allAssigned') : t('dayplan.mobile.noMatch')}
               </div>
             )}
-            {filtered.slice(0, 20).map(p => (
-              <button type="button"
-                key={p.id}
-                onClick={() => {
-                  onAssign?.(p.id, dayId)
-                  setOpen(false)
-                  setSearch('')
-                }}
-                style={{
-                  width: '100%', display: 'flex', alignItems: 'center', gap: 8,
-                  padding: '10px 12px', border: 'none', background: 'transparent',
-                  cursor: 'pointer', fontFamily: 'inherit', textAlign: 'start',
-                }}
-              >
-                <MapPin size={13} style={{ color: 'var(--text-faint)', flexShrink: 0 }} />
-                <span style={{ fontSize: 'calc(13px * var(--fs-scale-body, 1))', fontWeight: 500, color: 'var(--text-primary)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{p.name}</span>
-              </button>
-            ))}
+            {filtered.slice(0, 20).map(p => {
+              const times = stats.counts.get(p.id) ?? 0
+              return (
+                <button type="button"
+                  key={p.id}
+                  onClick={() => {
+                    onAssign?.(p.id, dayId)
+                    setOpen(false)
+                    setSearch('')
+                  }}
+                  style={{
+                    width: '100%', display: 'flex', alignItems: 'center', gap: 8,
+                    padding: '10px 12px', border: 'none', background: 'transparent',
+                    cursor: 'pointer', fontFamily: 'inherit', textAlign: 'start',
+                  }}
+                >
+                  <MapPin size={13} style={{ color: 'var(--text-faint)', flexShrink: 0 }} />
+                  <span style={{ fontSize: 'calc(13px * var(--fs-scale-body, 1))', fontWeight: 500, color: 'var(--text-primary)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{p.name}</span>
+                  {times > 0 && (
+                    <span className="text-content-faint" style={{ marginInlineStart: 'auto', fontSize: 'calc(11px * var(--fs-scale-caption, 1))', fontWeight: 700 }} aria-label={t('inspector.onThisDay', { count: times })}>
+                      ×{times}
+                    </span>
+                  )}
+                </button>
+              )
+            })}
           </div>
           {onAddNew && (
             <button type="button"

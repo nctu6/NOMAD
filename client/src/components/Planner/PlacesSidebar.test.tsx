@@ -616,12 +616,21 @@ describe('Place list interaction', () => {
     expect(onPlaceClick).not.toHaveBeenCalled();
   });
 
-  it('FE-PLANNER-SIDEBAR-029: "+" button not shown when place already assigned to selectedDay', () => {
+  it('FE-PLANNER-SIDEBAR-029: "+" stays available when the place is already on the day, with a count', async () => {
+    const user = userEvent.setup();
+    const onAssignToDay = vi.fn();
     const place = buildPlace({ id: 55, name: 'Already Assigned' });
-    const assignments = { '5': [buildAssignment({ place, day_id: 5 })] };
-    render(<PlacesSidebar {...defaultProps} places={[place]} selectedDayId={5} assignments={assignments} />);
+    const assignments = {
+      '5': [
+        buildAssignment({ id: 1, place, day_id: 5 }),
+        buildAssignment({ id: 2, place, day_id: 5 }),
+      ],
+    };
+    render(<PlacesSidebar {...defaultProps} places={[place]} selectedDayId={5} assignments={assignments} onAssignToDay={onAssignToDay} />);
     const placeRow = screen.getByText('Already Assigned').closest('div[draggable]') as HTMLElement;
-    expect(within(placeRow).queryByRole('button', { name: '+ Day' })).not.toBeInTheDocument();
+    expect(within(placeRow).getByLabelText('2 on this day')).toBeInTheDocument();
+    await user.click(within(placeRow).getByRole('button', { name: 'Add again' }));
+    expect(onAssignToDay).toHaveBeenCalledWith(55);
   });
 
   it('FE-PLANNER-SIDEBAR-030: place address shown as subtitle', () => {

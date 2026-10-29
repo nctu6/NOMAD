@@ -324,10 +324,14 @@ export default function PlaceInspector({
     ? ((selectedAssignmentId ? dayAssignments.find(a => a.id === selectedAssignmentId) : null)
       ?? dayAssignments.find(a => a.place?.id === place.id))
     : null
+  /** A lodging booking holds this place on the day, whichever row the list shows. */
+  const heldByBooking = [...dayAssignments, ...(storedDayAssignments ?? [])].some(
+    a => a.place?.id === place.id && a.accommodation_id != null,
+  )
   /** This stop belongs to a booked night rather than to the traveller. */
   const bookedNight = assignmentInDay
     ? assignmentInDay.accommodation_id != null
-    : !!storedDayAssignments?.some(a => a.place?.id === place.id && a.accommodation_id != null)
+    : heldByBooking
 
   // The weekday lines are display text; the ring is computed from the structured
   // periods next to them, in the place's own timezone. open_now stays the fallback.
@@ -497,15 +501,23 @@ export default function PlaceInspector({
               made: in the day's overnight block, or by turning the night back into a
               pause in road trip mode. */}
           {mode === 'trip' && !!selectedDayId && !bookedNight && (
-            assignmentInDay ? (
-              <DialogButton onClick={() => onRemoveAssignment?.(selectedDayId, assignmentInDay.id)} icon={<Minus size={14} strokeWidth={2} />} aria-label={t('inspector.removeFromDay')}>
-                <span className="max-sm:hidden">{t('inspector.removeFromDay')}</span>
-              </DialogButton>
-            ) : (
-              <DialogButton variant="primary" onClick={() => onAssignToDay?.(place.id)} icon={<Plus size={14} strokeWidth={2} />}>
-                {t('inspector.addToDay')}
-              </DialogButton>
-            )
+            <>
+              {/* An ordinary place can be added again (breakfast and a second
+                  visit). A place a booking already holds cannot: that second
+                  row is the duplicate the night exists to prevent. The
+                  traveller's own row, when the list still shows it, keeps
+                  Remove. */}
+              {!heldByBooking && (
+                <DialogButton variant="primary" onClick={() => onAssignToDay?.(place.id)} icon={<Plus size={14} strokeWidth={2} />} aria-label={assignmentInDay ? t('inspector.addAgain') : t('inspector.addToDay')}>
+                  <span className="max-sm:hidden">{assignmentInDay ? t('inspector.addAgain') : t('inspector.addToDay')}</span>
+                </DialogButton>
+              )}
+              {assignmentInDay && (
+                <DialogButton onClick={() => onRemoveAssignment?.(selectedDayId, assignmentInDay.id)} icon={<Minus size={14} strokeWidth={2} />} aria-label={t('inspector.removeFromDay')}>
+                  <span className="max-sm:hidden">{t('inspector.removeFromDay')}</span>
+                </DialogButton>
+              )}
+            </>
           )}
           {navigationTargets.length > 0 && (
             <>

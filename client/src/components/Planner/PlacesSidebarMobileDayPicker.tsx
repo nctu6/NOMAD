@@ -1,6 +1,7 @@
 import { createPortal } from 'react-dom'
 import { CalendarDays, Pencil, Trash2, ChevronDown, Check, Eye } from 'lucide-react'
 import type { SidebarState } from './usePlacesSidebar'
+import { dayPlaceCounts } from './dayPlaceCounts'
 
 export function MobileDayPickerSheet(S: SidebarState) {
   const {
@@ -55,20 +56,33 @@ export function MobileDayPickerSheet(S: SidebarState) {
               </button>
               {mobileShowDays && (
                 <div style={{ paddingInlineStart: 20 }}>
-                  {days.map((day, i) => (
-                    <button type="button"
-                      key={day.id}
-                      onClick={() => { onAssignToDay(dayPickerPlace.id, day.id); setDayPickerPlace(null); setMobileShowDays(false) }}
-                      style={{ display: 'flex', alignItems: 'center', gap: 10, width: '100%', padding: '10px 14px', borderRadius: 10, border: 'none', cursor: 'pointer', background: 'transparent', fontFamily: 'inherit', textAlign: 'start' }}
-                    >
-                      <div className="bg-surface-tertiary text-content" style={{ width: 28, height: 28, borderRadius: '50%', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 'calc(12px * var(--fs-scale-body, 1))', fontWeight: 700, flexShrink: 0 }}>{i + 1}</div>
-                      <div style={{ flex: 1, minWidth: 0 }}>
-                        <div className="text-content" style={{ fontSize: 'calc(13px * var(--fs-scale-body, 1))', fontWeight: 500 }}>{day.title || t('dayplan.dayN', { n: i + 1 })}</div>
-                        {day.date && <div className="text-content-faint" style={{ fontSize: 'calc(11px * var(--fs-scale-caption, 1))' }}>{new Date(day.date + 'T00:00:00Z').toLocaleDateString(undefined, { timeZone: 'UTC' })}</div>}
-                      </div>
-                      {(assignments[String(day.id)] || []).some(a => a.place?.id === dayPickerPlace.id) && <Check size={14} color="var(--text-faint)" />}
-                    </button>
-                  ))}
+                  {days.map((day, i) => {
+                    const stats = dayPlaceCounts(assignments[String(day.id)] || [])
+                    const times = stats.counts.get(dayPickerPlace.id) ?? 0
+                    const blocked = stats.blocked.has(dayPickerPlace.id)
+                    return (
+                      <button type="button"
+                        key={day.id}
+                        onClick={() => {
+                          if (blocked) return
+                          onAssignToDay(dayPickerPlace.id, day.id)
+                          setDayPickerPlace(null)
+                          setMobileShowDays(false)
+                        }}
+                        style={{ display: 'flex', alignItems: 'center', gap: 10, width: '100%', padding: '10px 14px', borderRadius: 10, border: 'none', cursor: blocked ? 'default' : 'pointer', background: 'transparent', fontFamily: 'inherit', textAlign: 'start' }}
+                      >
+                        <div className="bg-surface-tertiary text-content" style={{ width: 28, height: 28, borderRadius: '50%', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 'calc(12px * var(--fs-scale-body, 1))', fontWeight: 700, flexShrink: 0 }}>{i + 1}</div>
+                        <div style={{ flex: 1, minWidth: 0 }}>
+                          <div className="text-content" style={{ fontSize: 'calc(13px * var(--fs-scale-body, 1))', fontWeight: 500 }}>{day.title || t('dayplan.dayN', { n: i + 1 })}</div>
+                          {day.date && <div className="text-content-faint" style={{ fontSize: 'calc(11px * var(--fs-scale-caption, 1))' }}>{new Date(day.date + 'T00:00:00Z').toLocaleDateString(undefined, { timeZone: 'UTC' })}</div>}
+                        </div>
+                        {!blocked && times > 0 && (
+                          <span className="text-content-faint" style={{ fontSize: 'calc(11px * var(--fs-scale-caption, 1))', fontWeight: 700 }} aria-label={t('inspector.onThisDay', { count: times })}>×{times}</span>
+                        )}
+                        {blocked && <Check size={14} color="var(--text-faint)" />}
+                      </button>
+                    )
+                  })}
                 </div>
               )}
             </>

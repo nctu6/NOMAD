@@ -39,13 +39,21 @@ describe('MobileAddPlaceButton', () => {
     expect(screen.getByText('Eiffel Tower')).toBeInTheDocument()
   })
 
-  it('FE-PLANNER-DPADDPLACE-003: places already assigned to this day are filtered out', async () => {
+  it('FE-PLANNER-DPADDPLACE-003: a place already on the day stays listed, a booked night does not', async () => {
     const user = userEvent.setup()
-    const assignments = { '5': [buildAssignment({ id: 1, day_id: 5, place_id: 11, place: louvre })] } as AssignmentsMap
-    render(<MobileAddPlaceButton {...makeProps({ assignments })} />)
+    const hotel = buildPlace({ id: 13, name: 'Hotel' })
+    const assignments = {
+      '5': [
+        buildAssignment({ id: 1, day_id: 5, place_id: 11, place: louvre }),
+        buildAssignment({ id: 2, day_id: 5, place_id: 13, place: hotel, accommodation_id: 4 }),
+      ],
+    } as AssignmentsMap
+    render(<MobileAddPlaceButton {...makeProps({ places: [louvre, eiffel, hotel], assignments })} />)
     await openPicker(user)
-    expect(screen.queryByText('Louvre')).not.toBeInTheDocument()
+    expect(screen.getByText('Louvre')).toBeInTheDocument()
     expect(screen.getByText('Eiffel Tower')).toBeInTheDocument()
+    expect(screen.queryByText('Hotel')).not.toBeInTheDocument()
+    expect(screen.getByLabelText('1 on this day')).toBeInTheDocument()
   })
 
   it('FE-PLANNER-DPADDPLACE-004: the search box narrows the list case-insensitively', async () => {
@@ -65,15 +73,13 @@ describe('MobileAddPlaceButton', () => {
     expect(screen.getByText('No match')).toBeInTheDocument()
   })
 
-  it('FE-PLANNER-DPADDPLACE-006: with everything already assigned it shows the all-assigned hint', async () => {
+  it('FE-PLANNER-DPADDPLACE-006: a day whose places are all booked nights shows the all-assigned hint', async () => {
     const user = userEvent.setup()
+    const hotel = buildPlace({ id: 13, name: 'Hotel' })
     const assignments = {
-      '5': [
-        buildAssignment({ id: 1, day_id: 5, place_id: 11, place: louvre }),
-        buildAssignment({ id: 2, day_id: 5, place_id: 12, place: eiffel }),
-      ],
+      '5': [buildAssignment({ id: 1, day_id: 5, place_id: 13, place: hotel, accommodation_id: 4 })],
     } as AssignmentsMap
-    render(<MobileAddPlaceButton {...makeProps({ assignments })} />)
+    render(<MobileAddPlaceButton {...makeProps({ places: [hotel], assignments })} />)
     await openPicker(user)
     expect(screen.getByText('All places assigned')).toBeInTheDocument()
   })

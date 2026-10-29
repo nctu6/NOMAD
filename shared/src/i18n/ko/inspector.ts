@@ -10,6 +10,8 @@ const inspector: TranslationStrings = {
   'inspector.remove': '제거',
   'inspector.removeFromDay': '날에서 제거',
   'inspector.addToDay': '날에 추가',
+  'inspector.addAgain': '다시 추가',
+  'inspector.onThisDay': '이 날에 {count}곳',
   'inspector.confirmedRes': '확정된 예약',
   'inspector.pendingRes': '대기 중인 예약',
   'inspector.google': 'Google Maps',

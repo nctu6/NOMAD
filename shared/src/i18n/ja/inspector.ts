@@ -10,6 +10,8 @@ const inspector: TranslationStrings = {
   'inspector.filesCount': '{count}件のファイル',
   'inspector.removeFromDay': 'この日から削除',
   'inspector.addToDay': '日に追加',
+  'inspector.addAgain': 'もう一度追加',
+  'inspector.onThisDay': 'この日に{count}件',
   'inspector.confirmedRes': '確定済み予約',
   'inspector.pendingRes': '保留中の予約',
   'inspector.google': 'Google Maps',

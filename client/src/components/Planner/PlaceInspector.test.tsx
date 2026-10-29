@@ -277,6 +277,26 @@ describe('PlaceInspector', () => {
     expect(onRemoveAssignment).toHaveBeenCalledWith(1, 99);
   });
 
+  it('FE-PLANNER-INSPECTOR-018b: a place already on the day can be added again and still removed', async () => {
+    const user = userEvent.setup();
+    const onAssignToDay = vi.fn();
+    const onRemoveAssignment = vi.fn();
+    const assignmentInDay = [{ id: 99, place, day_id: 1, place_id: place.id, order_index: 0, notes: null }];
+    render(
+      <PlaceInspector
+        {...defaultProps}
+        selectedDayId={1}
+        assignments={{ '1': assignmentInDay }}
+        onAssignToDay={onAssignToDay}
+        onRemoveAssignment={onRemoveAssignment}
+      />
+    );
+    await user.click(screen.getByRole('button', { name: 'Add again' }));
+    expect(onAssignToDay).toHaveBeenCalledWith(place.id);
+    await user.click(screen.getByRole('button', { name: 'Remove from Day' }));
+    expect(onRemoveAssignment).toHaveBeenCalledWith(1, 99);
+  });
+
   // ── Inline name editing ────────────────────────────────────────────────────
 
   it('FE-PLANNER-INSPECTOR-019: double-clicking name enters edit mode', async () => {

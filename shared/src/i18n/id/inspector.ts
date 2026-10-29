@@ -10,6 +10,8 @@ const inspector: TranslationStrings = {
   'inspector.remove': 'Hapus',
   'inspector.removeFromDay': 'Hapus dari Hari',
   'inspector.addToDay': 'Tambah ke Hari',
+  'inspector.addAgain': 'Tambah lagi',
+  'inspector.onThisDay': '{count} di hari ini',
   'inspector.confirmedRes': 'Reservasi Dikonfirmasi',
   'inspector.pendingRes': 'Reservasi Menunggu',
   'inspector.google': 'Google Maps',
