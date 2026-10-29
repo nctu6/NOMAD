@@ -11,6 +11,8 @@ import AdminPage from './pages/AdminPage'
 import SettingsPage from './pages/SettingsPage'
 import VacayPage from './pages/VacayPage'
 import AtlasPage from './pages/AtlasPage'
+import CitiesPage from './pages/CitiesPage'
+import CityDetailPage from './pages/CityDetailPage'
 import { ToastContainer } from './components/shared/Toast'
 import { TranslationProvider, useTranslation } from './i18n'
 import DemoBanner from './components/Layout/DemoBanner'
@@ -161,6 +163,22 @@ export default function App() {
           element={
             <ProtectedRoute>
               <AtlasPage />
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="/cities"
+          element={
+            <ProtectedRoute>
+              <CitiesPage />
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="/cities/:slug"
+          element={
+            <ProtectedRoute>
+              <CityDetailPage />
             </ProtectedRoute>
           }
         />

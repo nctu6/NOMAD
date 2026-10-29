@@ -13,9 +13,10 @@ interface TripFormModalProps {
   onSave: (data: Record<string, string | number | null>) => Promise<void> | void
   trip: Trip | null
   onCoverUpdate: (tripId: number, coverUrl: string) => void
+  preset?: { title?: string; description?: string } | null
 }
 
-export default function TripFormModal({ isOpen, onClose, onSave, trip, onCoverUpdate }: TripFormModalProps) {
+export default function TripFormModal({ isOpen, onClose, onSave, trip, onCoverUpdate, preset }: TripFormModalProps) {
   const isEditing = !!trip
   const fileRef = useRef(null)
   const toast = useToast()
@@ -43,12 +44,17 @@ export default function TripFormModal({ isOpen, onClose, onSave, trip, onCoverUp
       })
       setCoverPreview(trip.cover_image || null)
     } else {
-      setFormData({ title: '', description: '', start_date: '', end_date: '' })
+      setFormData({
+        title: preset?.title || '',
+        description: preset?.description || '',
+        start_date: '',
+        end_date: '',
+      })
       setCoverPreview(null)
     }
     setPendingCoverFile(null)
     setError('')
-  }, [trip, isOpen])
+  }, [trip, isOpen, preset?.title, preset?.description])
 
   const handleSubmit = async (e) => {
     e.preventDefault()

@@ -258,6 +258,10 @@ body {
 .leaflet-container {
   z-index: 0;
 }
+/* OSM tiles, darkened without a third-party key. Markers stay in their own pane. */
+.city-map-dark .leaflet-tile-pane {
+  filter: invert(100%) hue-rotate(180deg) brightness(0.9) contrast(0.95);
+}
 .leaflet-pane {
   z-index: 0 !important;
 }

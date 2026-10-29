@@ -141,6 +141,11 @@ export const addonsApi = {
   enabled: () => apiClient.get('/addons').then(r => r.data),
 }
 
+export const citiesApi = {
+  list: (params?: Record<string, string | number | undefined>) => apiClient.get('/cities', { params }).then(r => r.data),
+  get: (slug: string) => apiClient.get(`/cities/${encodeURIComponent(slug)}`).then(r => r.data),
+}
+
 export const mapsApi = {
   search: (query: string, lang?: string) => apiClient.post(`/maps/search?lang=${lang || 'en'}`, { query }).then(r => r.data),
   details: (placeId: string, lang?: string) => apiClient.get(`/maps/details/${placeId}`, { params: { lang } }).then(r => r.data),

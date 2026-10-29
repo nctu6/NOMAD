@@ -67,6 +67,7 @@
 ### Addons (modular, admin-toggleable)
 - **Vacay** — Personal vacation day planner with calendar view, public holidays (100+ countries), company holidays, user fusion with live sync, and carry-over tracking
 - **Atlas** — Interactive world map with visited countries, travel stats, continent breakdown, streak tracking, and liquid glass UI effects
+- **Cities** — Compare a starter set of cities by open-data scores (cost level, internet, safety, climate, healthcare, air, things to do), with filters, a map, and a one-click trip. See [City data](#city-data).
 - **Collab** — Chat with your group, share notes, create polls, and track who's signed up for each day's activities
 - **Dashboard Widgets** — Currency converter and timezone clock, toggleable per user
 
@@ -221,6 +222,33 @@ API keys are configured in the **Admin Panel** after login. Keys set by the admi
 2. Create a project and enable the **Places API (New)**
 3. Create an API key under Credentials
 4. In NOMAD: Admin Panel → Settings → Google Maps
+
+## City data
+
+The Cities section reads measurements from SQLite. A fresh database has the tables, but no cities, until you run the seed script. The script only stores values returned by the sources below. If a source has no figure, the UI shows “No data”.
+
+Sources, licenses, and the score formulas are documented in [docs/cities-data-sources.md](docs/cities-data-sources.md).
+
+```bash
+cd server
+npm run seed:cities
+```
+
+Useful flags:
+
+```bash
+npm run seed:cities -- --refresh          # refetch measurements that are already stored
+npm run seed:cities -- --skip=internet    # skip the Ookla parquet lookup
+npm run seed:cities -- --limit=5          # only the first cities, for a smoke test
+```
+
+Inside an image **built from this repository** (`docker build -t nomad .`), with the data volume mounted at `/app/data`:
+
+```bash
+docker run --rm -v "$(pwd)/data:/app/data" nomad node --import tsx scripts/seed-cities.ts
+```
+
+The published Docker Hub image does not contain this script until a release includes it. Re-running the script is safe: it fills gaps and leaves existing trips alone.
 
 ## Building from Source
 

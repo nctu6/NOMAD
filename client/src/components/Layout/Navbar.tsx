@@ -5,10 +5,10 @@ import { useAuthStore } from '../../store/authStore'
 import { useSettingsStore } from '../../store/settingsStore'
 import { useTranslation } from '../../i18n'
 import { addonsApi } from '../../api/client'
-import { Plane, LogOut, Settings, ChevronDown, Shield, ArrowLeft, Users, Moon, Sun, Monitor, CalendarDays, Briefcase, Globe } from 'lucide-react'
+import { Plane, LogOut, Settings, ChevronDown, Shield, ArrowLeft, Users, Moon, Sun, Monitor, CalendarDays, Briefcase, Globe, Compass } from 'lucide-react'
 import type { LucideIcon } from 'lucide-react'
 
-const ADDON_ICONS: Record<string, LucideIcon> = { CalendarDays, Briefcase, Globe }
+const ADDON_ICONS: Record<string, LucideIcon> = { CalendarDays, Briefcase, Globe, Compass }
 
 interface NavbarProps {
   tripTitle?: string
@@ -113,7 +113,10 @@ export default function Navbar({ tripTitle, tripId, onBack, showBack, onShare }:
             {globalAddons.map(addon => {
               const Icon = ADDON_ICONS[addon.icon] || CalendarDays
               const path = `/${addon.id}`
-              const isActive = location.pathname === path
+              const isActive = location.pathname === path || location.pathname.startsWith(`${path}/`)
+              const labelKey = `nav.addon.${addon.id}`
+              const translated = t(labelKey)
+              const label = translated === labelKey ? addon.name : translated
               return (
                 <Link key={addon.id} to={path}
                   className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-medium transition-colors flex-shrink-0"
@@ -124,7 +127,7 @@ export default function Navbar({ tripTitle, tripId, onBack, showBack, onShare }:
                   onMouseEnter={e => e.currentTarget.style.background = 'var(--bg-hover)'}
                   onMouseLeave={e => { if (!isActive) e.currentTarget.style.background = 'transparent' }}>
                   <Icon className="w-3.5 h-3.5" />
-                  <span className="hidden md:inline">{addon.name}</span>
+                  <span className="hidden md:inline">{label}</span>
                 </Link>
               )
             })}
